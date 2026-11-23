@@ -118,12 +118,15 @@ void agent_tool_free(agent_tool_t *t) {
  * `i: {type: string, description: "concise intent"}` property (required unless the tool opts for optional/omit);
  * the harness strips it before validation/execution and reports it on tool_execution_start. */
 
-static int g_intent_tracing = -1; /* -1 = default (on unless PI_NO_INTENT=1) */
+static int g_intent_tracing = -1; /* -1 = unset: follows the interactive host (omp intentTracingActive) */
+static bool g_interactive_host;
 
 void agent_set_intent_tracing(bool on) { g_intent_tracing = on ? 1 : 0; }
+void agent_reset_intent_tracing(void) { g_intent_tracing = -1; }
+void agent_set_interactive_host(bool on) { g_interactive_host = on; }
 
 bool agent_intent_tracing(void) {
-    if (g_intent_tracing == 0) return false;
+    if (g_intent_tracing == 0 || (g_intent_tracing < 0 && !g_interactive_host)) return false;
     const char *no = getenv("PI_NO_INTENT");
     if (no && !strcmp(no, "1")) return false;
     no = getenv("OMC_NO_INTENT");

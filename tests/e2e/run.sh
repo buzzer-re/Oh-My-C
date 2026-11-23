@@ -41,7 +41,9 @@ MOCK_LOG="$T/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $PORT & MPID
 trap 'kill $(jobs -p) $MPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
 # OMC_NO_UPDATE_CHECK: no interactive launch looks for a new omc release (tests/e2e/update.sh lifts it against a mock)
-export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1 OMC_NO_UPDATE_CHECK=1
+# PI_INTENT_TRACING=1: tools.intentTracing is off by default outside the TUI since omp 96078472c4; the checks below were
+# written against tool calls that carry `i` (the "intent default" check runs without it)
+export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1 OMC_NO_UPDATE_CHECK=1 PI_INTENT_TRACING=1
 cd "$T/work"
 fail=0
 check() { # name expected-substring command...
@@ -56,6 +58,8 @@ check "file content"   "written by omc"                  cat a/b.txt
 check "read hashline"  "1:written by omc"                "$B" --model mock/mock-1 -p "read:a/b.txt"
 # intent field: injected (required) into tool schemas, stripped before execution
 check "intent schema"  '"i": {"type": "string", "description": "concise intent"}'  bash -c "python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; t=[x for x in r if x.get(\"tools\")][-1][\"tools\"][0][\"function\"][\"parameters\"]; print(json.dumps(t[\"properties\"][\"i\"]) if \"i\" in t[\"required\"] else \"no i\")' '$T/req.jsonl' | sed 's/^/\"i\": /'"
+# unset tools.intentTracing follows the host: off in print mode (omp 96078472c4)
+check "intent default" "no i"  bash -c "env -u PI_INTENT_TRACING '$B' --model mock/mock-1 -p 'say:x' >/dev/null 2>&1 </dev/null; python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; t=[x for x in r if x.get(\"tools\")][-1][\"tools\"][0][\"function\"][\"parameters\"]; print(\"has i\" if \"i\" in t[\"properties\"] else \"no i\")' '$T/req.jsonl'"
 check "intent stripped" "Tool said: hi-intent"           "$B" --model mock/mock-1 -p 'call:bash:{"i":"Checking echo","command":"echo hi-intent"}'
 # a leading `cd <dir> &&` always hoists into cwd; `cd <dir>;` only onto an existing directory (omp 6ad51806eb)
 check "bash cd hoist"  "Tool said: Working directory does not exist: /nonexistent-omc-cd" "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd && echo hi"}'

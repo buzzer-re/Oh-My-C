@@ -102,7 +102,9 @@ optionals, numeric strings, enum whitespace — up to 5 coercion passes, and omp
 ### The intent field `i`
 
 This ports `agent-loop.ts` `injectIntentIntoSchema` / `extractIntent`. When
-`tools.intentTracing` is on (the default; `PI_NO_INTENT=1` / `OMC_NO_INTENT=1` disable it), every
+`tools.intentTracing` is on (unset, it follows the host since omp 96078472c4: on in the interactive TUI and its
+subagents, off in print, RPC, ACP and library sessions; the setting or `PI_INTENT_TRACING` wins, and `PI_NO_INTENT=1` /
+`OMC_NO_INTENT=1` disable it), every
 tool's wire schema gets a leading `i: {type: string, description: "concise intent"}` property,
 required unless the tool sets `INTENT_OPTIONAL` / `INTENT_OMIT`. The loop strips `i` from the
 arguments before validation and reports it on `tool_execution_start`, where the TUI shows it. A

@@ -79,6 +79,10 @@ json_t *agent_tool_wire(const agent_tool_t *t); /* {name, description, parameter
 char *agent_tool_examples_jsdoc(const agent_tool_t *t);
 /* intent tracing (upstream tools.intentTracing; PI_NO_INTENT=1 disables injection). Process-wide. */
 void agent_set_intent_tracing(bool on);
+/* tools.intentTracing unset: tracing follows the interactive host (on in the TUI and its subagents, off in print, RPC,
+ * ACP and library sessions; omp 96078472c4) */
+void agent_reset_intent_tracing(void);
+void agent_set_interactive_host(bool on); /* isInteractiveHost: the process runs the interactive TUI */
 bool agent_intent_tracing(void);
 /* schema with the `i` intent field injected per mode (owned clone) */
 json_t *agent_schema_inject_intent(const json_t *schema, int mode);

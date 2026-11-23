@@ -561,6 +561,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     bool stdin_tty = isatty(0);
     bool auto_print = (piped || !stdin_tty) && !A->print && !A->mode;
     bool interactive = !A->print && !auto_print && !A->mode;
+    agent_set_interactive_host(interactive); /* main.ts setInteractiveHost */
     int rc = 0;
     char *cwd = NULL;
     app_t *app = NULL;

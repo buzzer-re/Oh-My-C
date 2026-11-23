@@ -1694,7 +1694,9 @@ static void install_agent(app_t *a) {
     a->env->can_prompt_user = a->opts.has_ui;
     a->env->ask_ui = a->opts.rpc_ui || a->opts.interactive_prompts;
     a->env->delegation_bias = model_delegation_bias(a->model);
-    agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
+    /* intentTracingActive: an explicit tools.intentTracing (any layer or PI_INTENT_TRACING) wins; unset, the host decides */
+    if (settings_configured("tools.intentTracing")) agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
+    else agent_reset_intent_tracing();
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
     if (a->mcp && a->opts.subagent) { /* subagents share the parent's connections, each with its own view */
         free(ag->mcp_scope);
