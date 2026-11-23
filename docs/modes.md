@@ -202,14 +202,15 @@ the UTF-8 JSON, 256 KiB per chunk, 64 MiB per frame). Under v1 an oversized resp
 other frames are shrunk (`…[N chars elided for RPC frame]`).
 
 **Dialogs.** Tools that need the user send `{"type":"extension_ui_request","id","method",...}` and
-wait for `{"type":"extension_ui_response","id","value"|"confirmed"|"cancelled"|"answers"}`. The ask
-tool has no form surface here, so it walks its HTML form's named fields in order (omp `askFieldByField`):
-radio groups and single selects are one `select` (options plus `Other (type your own)` for radio groups,
-which then asks an `input`), checkbox groups and multi-selects a `select` loop titled `(N selected) …`
-with a `✔ Done selecting` row (hidden while a required group has nothing checked), empty text inputs an
-`input` with their placeholder, textareas and prefilled inputs an `editor` with `prefill` (`promptStyle`
-for inputs), re-asked as `Question (error)` until valid; `ask.timeout` goes out as `timeout` and a
-deadline submits the remaining defaults. `set_ask_dialog {enabled: true}` only affects the questions
+wait for `{"type":"extension_ui_response","id","value"|"confirmed"|"cancelled"|"answers"|"data"}`. The ask
+tool sends its whole HTML form as one `form` request (`html`, `timeout` when `ask.timeout` applies), without an
+opt-in; the host answers `{data}` (values by control name: a string, a number for `number`/`range` inputs, an array
+for checkbox groups and multi-selects of 2+ options, one extra non-option string as a group's "Other" answer) or
+`{cancelled: true}`. The data is checked field by field against the form (unknown names, wrong shapes, disabled
+options and broken `required`/`min`/`max`/`minlength`/`maxlength`/`email`/`url`/`pattern` fail the call; hidden
+inputs keep the form's values, an echoed hidden value counts as no selection); a timeout (omc's timer or `cancelled`
++ `timedOut`) submits the form's defaults, and a form whose frame exceeds the transport limit (1 MiB, 64 MiB after
+`negotiate_protocol` v2) fails the call unsent. `set_ask_dialog {enabled: true}` only affects the questions
 dialog of `cfg://` change approvals (one `ask` request); tool approvals
 (`tools.approvalMode`) use a `select` with the full prompt as title and `Approve` / `Approve <tool>
 for this session` / grant labels / `Deny`; `login` sends `open_url`, `notify` and `input`. A dialog

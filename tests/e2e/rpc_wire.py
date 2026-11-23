@@ -23,7 +23,7 @@ class Rpc:
         for line in self.p.stdout:
             self.raw.append(len(line))
             m = json.loads(line)
-            if m.get("type") == "extension_ui_request" and m.get("method") in ("select", "editor", "input", "ask") and self.ui:
+            if m.get("type") == "extension_ui_request" and m.get("method") in ("select", "editor", "input", "ask", "form") and self.ui:
                 a = dict(self.ui.pop(0))
                 a.update(type="extension_ui_response", id=m["id"])
                 self.send(a)
@@ -163,43 +163,63 @@ check("queue_update", qu and qu.get("liveSteered") == 0, qu)
 r.wait(lambda f: f.get("type") == "prompt_result" and f.get("id") == "q", 30)
 r.wait(lambda f: f.get("type") == "queue_update" and f.get("followUp") == [], 10)
 
-# ask: a host without a form surface walks the HTML form's named fields through select / input / editor
+# ask: the RPC host gets the whole HTML form as one `form` request, without opting in, and answers with its data
+# (omp b1470da89c, 6de8e8863a); the data is checked per field (omp 28faee2951, 92ee4063a9, bf12deaaee, 4d0ef0ea82,
+# e5ecf66816, 25b43b43e8, 2506c20d5d, f62c96ef69)
 FORM1 = ('<form><p>Pick one</p><label><input type="radio" name="q1" value="a"> A</label>'
          '<label><input type="radio" name="q1" value="b" checked> B</label>'
          '<label>Name <input name="n" placeholder="you"></label><label>Notes <textarea name="t">draft</textarea></label></form>')
-r.ui += [{"value": "B"}, {"value": "Zed"}, {"value": "final"}]
+r.ui += [{"data": {"q1": "b", "n": "Zed", "t": "final"}}]
 n0 = len(r.frames)
 r.prompt("a1", "call:ask:" + json.dumps({"html": FORM1}))
-sel = r.wait(lambda f: f.get("type") == "extension_ui_request" and f.get("method") == "select" and f.get("title") == "Pick one")
-check("ask select", sel and sel["options"] == ["A", "B", "Other (type your own)"] and "optionDetails" not in sel and
-      sel.get("initialIndex") == 1 and sel.get("selectionMarker") == "radio" and "checkedIndices" not in sel, sel)
 te = r.wait(lambda f: f.get("type") == "tool_execution_end" and f.get("toolName") == "ask")
 with r.lock:
-    inp = next((f for f in r.frames[n0:] if f.get("method") == "input"), None)
-    ed = next((f for f in r.frames[n0:] if f.get("method") == "editor"), None)
-check("ask input", inp and inp["title"] == "Name" and inp.get("placeholder") == "you", inp)
-check("ask editor", ed and ed["title"] == "Notes" and ed.get("prefill") == "draft" and "promptStyle" not in ed, ed)
+    fr = next((f for f in r.frames[n0:] if f.get("method") == "form"), None)
+    others = [f for f in r.frames[n0:] if f.get("method") in ("select", "input", "editor")]
+check("ask form", fr and fr["html"] == FORM1 and "timeout" not in fr and not others, (fr, others))
 check("ask answer", te and te["result"]["content"][0]["text"] == 'User answers:\n{\n  "q1": "b",\n  "n": "Zed",\n  "t": "final"\n}' and
       te["result"]["details"] == {"answers": [{"name": "q1", "question": "Pick one", "answer": "B"},
                                               {"name": "n", "question": "Name", "answer": "Zed"},
                                               {"name": "t", "question": "Notes", "answer": "final"}]}, te)
-# set_ask_dialog only governs extension askDialog calls: the ask tool still walks its form; "Other" asks for text
+# set_ask_dialog only governs extension askDialog calls; a group of 2+ options takes one "Other" string
 x = r.call({"id": "ad", "type": "set_ask_dialog", "enabled": True})
 check("set_ask_dialog", x and x["data"] == {"enabled": True}, x)
-r.ui = [{"value": "Other (type your own)"}, {"value": "teal"}, {"value": "\u2714 Done selecting"}]
-n0 = len(r.frames)
-r.prompt("a2", "call:ask:" + json.dumps({"html": '<form><p>Q</p><label><input type="checkbox" name="c" value="x" checked> X</label>'
-                                                  '<label><input type="checkbox" name="c" value="y"> Y</label></form>'}))
-with r.lock:
-    te = next((f for f in r.frames[n0:] if f.get("type") == "tool_execution_end" and f.get("toolName") == "ask"), None)
-    ask = next((f for f in r.frames[n0:] if f.get("method") == "ask"), None)
-    sels = [f for f in r.frames[n0:] if f.get("method") == "select"]
-check("ask no dialog", ask is None and len(sels) == 2 and sels[0]["title"] == "(1 selected) Q" and
-      sels[0]["options"] == ["X", "Y", "Other (type your own)", "\u2714 Done selecting"] and sels[1]["title"] == "(2 selected) Q" and
-      sels[0].get("selectionMarker") == "checkbox" and sels[0].get("checkedIndices") == [0] and sels[0].get("markableCount") == 3 and
-      sels[0].get("initialIndex") == 0 and sels[1].get("checkedIndices") == [0, 2] and sels[1].get("initialIndex") == 2, sels)
-check("ask other", te and te["result"]["content"][0]["text"] == 'User answers:\n{\n  "c": [\n    "x",\n    "teal"\n  ]\n}', te)
+FORM2 = ('<form><p>Q</p><label><input type="checkbox" name="c" value="x" checked> X</label>'
+         '<label><input type="checkbox" name="c" value="y"> Y</label></form>')
+
+
+def ask_with(pid, html, reply):
+    r.ui = [reply]
+    n0 = len(r.frames)
+    r.prompt(pid, "call:ask:" + json.dumps({"html": html}))
+    with r.lock:
+        te = next((f for f in r.frames[n0:] if f.get("type") == "tool_execution_end" and f.get("toolName") == "ask"), None)
+        ask = next((f for f in r.frames[n0:] if f.get("method") == "ask"), None)
+    return te, ask
+
+
+te, ask = ask_with("a2", FORM2, {"data": {"c": ["x", "teal"]}})
+check("ask other", ask is None and te and te["result"]["content"][0]["text"] == 'User answers:\n{\n  "c": [\n    "x",\n    "teal"\n  ]\n}', te)
 x = r.call({"id": "ad2", "type": "set_ask_dialog", "enabled": False})
+# an omitted array choice gives an empty array; an unknown name, a wrong shape or a disabled option fails the call
+te, _ = ask_with("a3", FORM2, {"data": {}})
+check("ask omitted array", te and '"c": []' in te["result"]["content"][0]["text"], te)
+te, _ = ask_with("a4", FORM2, {"data": {"bogus": "x"}})
+check("ask unknown field", te and te["isError"] and te["result"]["content"][0]["text"] == 'Form dialog data carries unknown field "bogus"', te)
+te, _ = ask_with("a5", FORM2, {"data": {"c": "x"}})
+check("ask wrong shape", te and te["isError"] and te["result"]["content"][0]["text"] == 'Form field "c" must carry an array of strings', te)
+FORM3 = ('<form><select name="s"><option value="a" disabled>A</option><option value="b">B</option></select>'
+         '<input type="number" name="k" min="1" required><input type="hidden" name="h" value="keep"></form>')
+te, _ = ask_with("a6", FORM3, {"data": {"s": "a", "k": 2}})
+check("ask disabled option", te and te["isError"] and te["result"]["content"][0]["text"] == 'Form field "s" carries disabled option "a"', te)
+te, _ = ask_with("a7", FORM3, {"data": {"s": "b", "k": 0, "h": "echo"}})
+check("ask constraint", te and te["isError"] and te["result"]["content"][0]["text"].startswith('Form field "k": '), te)
+te, _ = ask_with("a8", FORM3, {"data": {"s": "b", "k": 3, "h": "echo"}})
+check("ask number + hidden", te and not te["isError"] and '"k": 3' in te["result"]["content"][0]["text"] and
+      '"h": "keep"' in te["result"]["content"][0]["text"], te)
+# a host timeout submits the form's defaults
+te, _ = ask_with("a9", FORM1, {"cancelled": True, "timedOut": True})
+check("ask timed out", te and te["result"]["details"].get("timedOut") is True and '"q1": "b"' in te["result"]["content"][0]["text"], te)
 
 # session change shapes
 n0 = len(r.frames)

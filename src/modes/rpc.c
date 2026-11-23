@@ -15,11 +15,13 @@
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "text/htmlform.h"
 #include "tui/ansi.h"
 #include "tui/symbols.h"
 #include "ui/ui.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <errno.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -939,9 +941,262 @@ static json_t *rpc_ask(void *ud, const json_t *qs) {
     return out;
 }
 
-/* ---------- the ask tool's field-by-field fallback (tool_ui_t.select / input / editor) ---------- */
-
 #define RPC_GONE "RPC client disconnected before extension UI response completed"
+
+/* ---------- the ask tool's whole HTML form (requestRpcFormDialog, omp b1470da89c and its follow-ups) ---------- */
+
+static char *js_quote(const char *s) { /* JSON.stringify of a string (owned) */
+    json_t *j = json_str(s ? s : "");
+    char *q = json_dump(j, 0);
+    json_free(j);
+    return q;
+}
+
+/* parseFormChoice: each string one of the field's enabled option values, except one free-text entry when the field
+ * offers "Other"; checkbox groups and multi-selects take an array. *val (owned, NULL = nothing chosen) */
+static bool form_choice(const hf_field_t *f, const json_t *value, json_t **val, char **err) {
+    *val = NULL;
+    bool *checked = xcalloc(f->opts.n ? f->opts.n : 1, sizeof *checked);
+    if (!value) {
+        *val = hf_choice_value(f, checked, NULL);
+        free(checked);
+        return true;
+    }
+    char *label = js_quote(f->name);
+    bool array = hf_is_array_choice(f);
+    const char *shape = array ? "an array of strings" : "one string, not an array";
+    const char *other = NULL;
+    bool ok = true;
+    if (array != json_is_arr(value)) {
+        *err = xasprintf("Form field %s must carry %s", label, shape);
+        ok = false;
+    }
+    size_t n = !ok ? 0 : array ? json_len(value) : 1;
+    for (size_t i = 0; i < n && ok; i++) {
+        const json_t *e = array ? json_at(value, i) : value;
+        if (!json_is_str(e)) {
+            *err = xasprintf("Form field %s must carry %s", label, shape);
+            ok = false;
+            break;
+        }
+        const char *entry = json_sv(e);
+        long enabled = -1, any = -1;
+        for (size_t k = 0; k < f->opts.n; k++) {
+            if (strcmp(f->opts.v[k].value ? f->opts.v[k].value : "", entry)) continue;
+            if (any < 0) any = (long)k;
+            if (enabled < 0 && !f->opts.v[k].disabled) enabled = (long)k;
+        }
+        long idx = enabled >= 0 ? enabled : any;
+        if (idx >= 0 && f->opts.v[idx].disabled) {
+            char *q = js_quote(entry);
+            *err = xasprintf("Form field %s carries disabled option %s", label, q);
+            free(q);
+            ok = false;
+        } else if (idx >= 0 && !checked[idx]) checked[idx] = true;
+        else if (idx < 0 && f->other && !other) other = entry;
+        else {
+            char *q = js_quote(entry);
+            *err = xasprintf("Form field %s carries unexpected value %s", label, q);
+            free(q);
+            ok = false;
+        }
+    }
+    if (ok) *val = hf_choice_value(f, checked, other);
+    free(label);
+    free(checked);
+    return ok;
+}
+
+/* parseChoiceOrHiddenFallback: an echoed same-name hidden value counts as no selection when it cannot be the answer */
+static bool form_choice_hidden(const hf_field_t *f, const json_t *value, const char *hidden, json_t **val, char **err) {
+    if (!hidden || !value) return form_choice(f, value, val, err);
+    long echo = -1;
+    if (json_is_arr(value)) {
+        for (size_t i = 0; i < json_len(value) && echo < 0; i++)
+            if (json_is_str(json_at(value, i)) && !strcmp(json_sv(json_at(value, i)), hidden)) echo = (long)i;
+    } else if (json_is_str(value) && !strcmp(json_sv(value), hidden)) echo = 0;
+    if (echo < 0) return form_choice(f, value, val, err);
+    json_t *without = NULL;
+    if (json_is_arr(value)) {
+        without = json_arr();
+        for (size_t i = 0; i < json_len(value); i++)
+            if ((long)i != echo) json_push(without, json_clone(json_at(value, i)));
+    }
+    bool carried_by_option = false;
+    for (size_t k = 0; k < f->opts.n; k++)
+        if (str_eq(f->opts.v[k].value, hidden)) carried_by_option = true;
+    bool ok;
+    if (json_is_arr(value) && !carried_by_option) ok = form_choice(f, without, val, err);
+    else {
+        char *e1 = NULL;
+        ok = form_choice(f, value, val, &e1);
+        if (!ok) {
+            free(e1);
+            ok = form_choice(f, without, val, err);
+        }
+    }
+    json_free(without);
+    return ok;
+}
+
+/* parseFormText: a string, or a finite number for `number`/`range` inputs; absent counts as empty */
+static bool form_text(const hf_field_t *f, const json_t *value, json_t **val, char **err) {
+    *val = NULL;
+    if (!value) {
+        *val = hf_text_value(f, "");
+        return true;
+    }
+    bool numeric = str_eq(f->type, "number") || str_eq(f->type, "range");
+    if (json_is_str(value)) {
+        *val = hf_text_value(f, json_sv(value));
+        return true;
+    }
+    if (numeric && json_is_num(value) && isfinite(value->u.num.d)) {
+        char *t = json_dump(value, 0); /* String(value) */
+        *val = hf_text_value(f, t);
+        free(t);
+        return true;
+    }
+    char *label = js_quote(f->name);
+    *err = xasprintf("Form field %s must carry a string%s", label, numeric ? " or a number" : "");
+    free(label);
+    return false;
+}
+
+static bool form_field_value(const hf_field_t *f, const json_t *entry, const char *hidden, json_t **val, char **err) {
+    return f->kind == HF_CHOICE ? form_choice_hidden(f, entry, hidden, val, err) : form_text(f, entry, val, err);
+}
+
+/* parseFormDialogResponse: validates submitted `data` against the parsed form; any mismatch fails (owned data, or NULL
+ * with *err) */
+static json_t *form_parse_data(const hf_form_t *form, const json_t *submitted, char **err) {
+    if (!json_is_obj(submitted)) {
+        *err = xstrdup("Form dialog response must carry a data object");
+        return NULL;
+    }
+    for (size_t i = 0; i < json_len(submitted); i++) {
+        const char *key = submitted->u.obj.keys[i];
+        bool known = strvec_contains(&form->hidden_names, key);
+        for (size_t k = 0; k < form->fields.n && !known; k++)
+            if (form->fields.v[k]->name && *form->fields.v[k]->name && !strcmp(form->fields.v[k]->name, key)) known = true;
+        if (!known) {
+            char *q = js_quote(key);
+            *err = xasprintf("Form dialog data carries unknown field %s", q);
+            free(q);
+            return NULL;
+        }
+    }
+    json_t *data = json_obj();
+    for (size_t i = 0; i < form->hidden_names.n; i++) json_set_str(data, form->hidden_names.v[i], form->hidden_values.v[i]);
+    for (size_t i = 0; i < form->fields.n; i++) {
+        const hf_field_t *first = form->fields.v[i];
+        if (!first->name || !*first->name) continue;
+        bool seen = false;
+        for (size_t k = 0; k < i && !seen; k++) seen = str_eq(form->fields.v[k]->name, first->name);
+        if (seen) continue;
+        const char *name = first->name;
+        const json_t *entry = json_get(submitted, name);
+        const char *hidden = NULL;
+        for (size_t k = 0; k < form->hidden_names.n; k++) /* new Map(form.hidden): the last pair wins */
+            if (!strcmp(form->hidden_names.v[k], name)) hidden = form->hidden_values.v[k];
+        VEC(const hf_field_t *) fields = {0};
+        for (size_t k = i; k < form->fields.n; k++)
+            if (str_eq(form->fields.v[k]->name, name)) vec_push(&fields, form->fields.v[k]);
+        json_t **vals = xcalloc(fields.n, sizeof *vals);
+        bool *carried = xcalloc(fields.n, sizeof *carried), any = false, ok = true;
+        char *mismatch = NULL;
+        for (size_t k = 0; k < fields.n && ok; k++) {
+            char *e = NULL;
+            if (form_field_value(fields.v[k], entry, hidden, &vals[k], &e)) {
+                carried[k] = any = true;
+                continue;
+            }
+            /* only a field sharing its name may decline the entry; a lone field's mismatch fails the answer */
+            if (fields.n == 1) {
+                *err = e;
+                ok = false;
+                break;
+            }
+            if (!mismatch) mismatch = e;
+            else free(e);
+            char *e2 = NULL;
+            form_field_value(fields.v[k], NULL, NULL, &vals[k], &e2);
+            free(e2);
+        }
+        if (ok && !any) {
+            *err = mismatch;
+            mismatch = NULL;
+            ok = false;
+        }
+        for (size_t k = 0; k < fields.n && ok; k++) {
+            char *problem = hf_field_error(fields.v[k], vals[k]);
+            if (problem) {
+                char *q = js_quote(name);
+                *err = xasprintf("Form field %s: %s", q, problem);
+                free(q);
+                free(problem);
+                ok = false;
+                break;
+            }
+            if (carried[k] && vals[k]) json_set(data, name, json_clone(vals[k]));
+        }
+        for (size_t k = 0; k < fields.n; k++) json_free(vals[k]);
+        free(vals);
+        free(carried);
+        free(mismatch);
+        vec_free(&fields);
+        if (!ok) {
+            json_free(data);
+            return NULL;
+        }
+    }
+    return data;
+}
+
+/* tool_ui_t.form: the ask tool's HTML form as one `form` request; a timeout submits the form's defaults. A frame
+ * larger than the negotiated protocol delivers intact fails without being sent (omp 9a323f5dc7). */
+static json_t *rpc_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+                        volatile sig_atomic_t *cancel, char **err) {
+    rpc_t *r = ud;
+    *timed_out = false;
+    if (notes) *notes = NULL;
+    json_t *f = json_obj();
+    json_set_str(f, "method", "form");
+    json_set_str(f, "html", html);
+    if (timeout_ms > 0) json_set_int(f, "timeout", timeout_ms);
+    { /* a throwaway 16-character id measures the frame */
+        json_t *probe = json_obj();
+        json_set_str(probe, "type", "extension_ui_request");
+        json_set_str(probe, "id", "0000000000000000");
+        for (size_t i = 0; i < json_len(f); i++) json_set(probe, f->u.obj.keys[i], json_clone(f->u.obj.vals[i]));
+        char *enc = json_dump(probe, 0);
+        size_t bytes = strlen(enc), limit = r->proto == 2 ? RPC_MAX_REASSEMBLED_BYTES : RPC_MAX_FRAME_BYTES - 1;
+        free(enc);
+        json_free(probe);
+        if (bytes > limit) {
+            *err = xasprintf("Form is too large for the RPC host (%zu bytes, limit %zu); use fewer or smaller images, or split the form",
+                             bytes, limit);
+            json_free(f);
+            return NULL;
+        }
+    }
+    hf_form_t *form = hf_parse(html);
+    json_t *resp = NULL;
+    bool to = false;
+    int rc = ui_request(r, f, timeout_ms, cancel, &resp, &to);
+    json_t *data = NULL;
+    if (rc < 0) *err = xstrdup(RPC_GONE);
+    else if (to || (rc == 0 && json_get_bool(resp, "cancelled", false) && json_get_bool(resp, "timedOut", false))) {
+        data = hf_default_data(form);
+        *timed_out = true;
+    } else if (rc == 0 && !json_get_bool(resp, "cancelled", false))
+        data = form_parse_data(form, json_get(resp, "data"), err);
+    json_free(resp);
+    hf_form_free(form);
+    return data;
+}
+
+/* ---------- the ask tool's field-by-field fallback (tool_ui_t.select / input / editor) ---------- */
 
 static char *rpc_fb_select(void *ud, const char *title, const strvec_t *options, const tool_select_opts_t *so,
                            int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel, char **err) {
@@ -3648,6 +3903,7 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     a->queue_snapshot = qsnap;
     pthread_mutex_unlock(&a->mu);
     a->env->ui.ask = rpc_ask;
+    a->env->ui.form = rpc_form;
     a->env->ui.select = rpc_fb_select;
     a->env->ui.input = rpc_fb_input;
     a->env->ui.editor = rpc_fb_editor;
@@ -3728,6 +3984,7 @@ void rpc_detach(rpc_t *r) {
     }
     if (a->env->ui.ud == r) {
         a->env->ui.ask = NULL;
+        a->env->ui.form = NULL;
         a->env->ui.select = NULL;
         a->env->ui.input = NULL;
         a->env->ui.editor = NULL;
