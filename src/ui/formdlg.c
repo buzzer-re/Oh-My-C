@@ -80,6 +80,7 @@ typedef struct fd {
     char **errors;           /* per field index */
     size_t nerrors;
     int focus, page;
+    bool sole; /* the keys reach one field only: Enter on it submits (omp 05c0e53513) */
     bool follow;
     hf_pages_t pages;
     VEC(size_t) stop_atoms;
@@ -605,7 +606,10 @@ static void reset_countdown(fd_t *v) {
     v->remaining = (int)((v->o.timeout_ms + 999) / 1000);
 }
 
+static const fd_t *g_closed; /* the dialog a key just closed (compared, never dereferenced) */
+
 static void finish(fd_t *v, json_t *data, json_t *notes, bool timed_out) {
+    g_closed = v;
     if (v->closed) {
         json_free(data);
         json_free(notes);
@@ -778,14 +782,37 @@ static void move_stop(fd_t *v, int delta) { set_focus(v, v->focus + delta); }
 
 static const void *field_of(const stop_t *s) { return s->kind == STOP_SUBMIT ? (const void *)s : (const void *)s->field; }
 
-/* jump to the first stop of the next (or previous) field; Submit counts as a field */
+
+/* #answerStop: the stop where `f`'s answer is: its checked option, its chosen Other, else its first stop; Submit's
+ * stop when `f` has none (omp 6b213b6d3b) */
+static int answer_stop(fd_t *v, const hf_field_t *f) {
+    int first = -1;
+    for (size_t at = 0; at < v->stops.n; at++) {
+        const stop_t *st = &v->stops.v[at];
+        if (st->kind == STOP_SUBMIT || st->field != f) continue;
+        if (first < 0) first = (int)at;
+        if ((st->kind == STOP_OPTION && f->kind == HF_CHOICE && v->checked[fidx(f)][st->option]) ||
+            (st->kind == STOP_OTHER && other_chosen(v, f)))
+            return (int)at;
+    }
+    return first >= 0 ? first : (int)v->stops.n - 1;
+}
+
+/* jump to the next (or previous) field, at its answer; Submit counts as a field */
 static void move_field(fd_t *v, int delta) {
     const void *cur = field_of(&v->stops.v[v->focus]);
     int i = v->focus;
     while (i + delta >= 0 && i + delta < (int)v->stops.n && field_of(&v->stops.v[i]) == cur) i += delta;
-    const void *target = field_of(&v->stops.v[i]);
-    while (delta < 0 && i > 0 && field_of(&v->stops.v[i - 1]) == target) i--;
-    set_focus(v, i);
+    const stop_t *t = &v->stops.v[i];
+    set_focus(v, t->kind != STOP_SUBMIT ? answer_stop(v, t->field) : i);
+}
+
+static void submit(fd_t *v);
+
+/* #advance: Enter on a field moves to the next one, or submits when the form asks only this one */
+static void advance(fd_t *v) {
+    if (v->sole) submit(v);
+    else move_field(v, 1);
 }
 
 static int page_of_atom(const fd_t *v, size_t atom) {
@@ -856,7 +883,7 @@ static void text_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
             return;
         }
         if (tui_kb(k, "tui.input.submit") || (k->kind == TUI_KEY_CHAR && k->codepoint == '\n' && !k->mods)) {
-            move_field(v, 1);
+            advance(v);
             return;
         }
         char *before = xstrdup(ui_input_value(&v->inputs[i]));
@@ -871,7 +898,7 @@ static void text_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
         return;
     }
     if (tui_kb(k, "tui.input.submit")) {
-        move_field(v, 1);
+        advance(v);
         return;
     }
     char *before = tui_editor_get_text(ed);
@@ -894,7 +921,7 @@ static void other_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
         char *t = str_trim(ui_input_value(in));
         if (!f->multi && *t) memset(v->checked[fidx(f)], 0, f->opts.n * sizeof(bool));
         free(t);
-        move_field(v, 1);
+        advance(v);
         return;
     }
     char *before = xstrdup(ui_input_value(in));
@@ -925,7 +952,7 @@ static void select_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
         return;
     }
     if (is_confirm(k)) {
-        move_field(v, 1);
+        advance(v);
         return;
     }
     const char *typed = printable(k);
@@ -976,6 +1003,7 @@ static void set_hidden(fd_t *v, bool hidden) {
 static bool fd_key(tui_component_t *c, const tui_key_t *k) {
     fd_t *v = (fd_t *)c;
     if (v->closed) return true;
+    g_closed = NULL;
     reset_countdown(v);
     if (tui_kb(k, "app.ask.hide")) {
         set_hidden(v, !v->hidden);
@@ -1040,8 +1068,16 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
     } else if (matches_note_key(k, false)) start_note(v, -1);
     else if (tui_key_matches(k, "space")) toggle(v, s->field, s->option);
     else if (is_confirm(k)) {
-        if (!s->field->multi) toggle(v, s->field, s->option);
-        move_field(v, 1);
+        /* Enter picks a radio; on a checkbox group with nothing checked it checks the focused box */
+        bool none = true;
+        for (size_t q = 0; q < s->field->opts.n; q++)
+            if (v->checked[fidx(s->field)][q]) none = false;
+        if (!s->field->multi || none) toggle(v, s->field, s->option);
+        advance(v);
+    }
+    if (g_closed == v) { /* a sole field's Enter submitted: v is gone */
+        g_closed = NULL;
+        return true;
     }
     request(v);
     return true;
@@ -1786,13 +1822,14 @@ static char *footer_text(fd_t *v) {
     }
     char *space = ui_key_hint("space"), *left = ui_key_hint("left"), *right = ui_key_hint("right"), *tab = ui_key_hint("tab");
     char *action;
+    const char *next = v->sole ? "submit" : "next";
     if (s->kind == STOP_SUBMIT) action = xasprintf("%s submit", enter);
-    else if (s->kind == STOP_TEXT) action = xasprintf("%s next", enter);
-    else if (s->kind == STOP_OTHER) action = xasprintf("type your own \xc2\xb7 %s next", enter);
+    else if (s->kind == STOP_TEXT) action = xasprintf("%s %s", enter, next);
+    else if (s->kind == STOP_OTHER) action = xasprintf("type your own \xc2\xb7 %s %s", enter, next);
     else if (s->kind == STOP_SELECT)
-        action = xasprintf("%s open \xc2\xb7 %s/%s change \xc2\xb7 %s next", space, left, right, enter);
-    else if (s->field->multi) action = xasprintf("%s toggle \xc2\xb7 %s next", space, enter);
-    else action = xasprintf("%s choose", enter);
+        action = xasprintf("%s open \xc2\xb7 %s/%s change \xc2\xb7 %s %s", space, left, right, enter, next);
+    else if (s->field->multi) action = xasprintf("%s toggle \xc2\xb7 %s %s", space, enter, next);
+    else action = xasprintf("%s %s", enter, v->sole ? "submit" : "choose");
     if (s->kind == STOP_OPTION || s->kind == STOP_SELECT) {
         char *a2 = xasprintf("%s%s", action, note);
         free(action);
@@ -2020,6 +2057,20 @@ tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o) {
     }
     stop_t sub = {STOP_SUBMIT, NULL, 0};
     vec_push(&v->stops, sub);
+    {
+        const hf_field_t *only = NULL;
+        size_t distinct = 0;
+        for (size_t i = 0; i + 1 < v->stops.n; i++)
+            if (v->stops.v[i].field != only) {
+                bool seen = false;
+                for (size_t k = 0; k < i && !seen; k++) seen = v->stops.v[k].field == v->stops.v[i].field;
+                if (!seen) distinct++;
+                only = v->stops.v[i].field;
+            }
+        v->sole = distinct == 1;
+    }
+    /* open where the answer is, so Enter accepts a preselected choice instead of overwriting it */
+    if (v->stops.n > 1) v->focus = answer_stop(v, v->stops.v[0].field);
     if (o->draft && !tui_editor_is_empty(o->draft)) v->guard = true;
     if (o->timeout_ms > 0) {
         v->deadline = mono_ms() + o->timeout_ms;
