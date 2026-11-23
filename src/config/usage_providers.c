@@ -1030,6 +1030,28 @@ json_t *usage_claude_consume_reset(const char *token, const char *org_in, const 
 #undef FAIL
 }
 
+/* claudeProfilePlan: "Max 5x" / "Max 20x" from organization.rate_limit_tier, else the organization type (Max, Pro, Team,
+ * Enterprise); NULL when the profile names no recognised plan. Owned. */
+char *claude_profile_plan(const json_t *profile) {
+    json_t *org = json_get_obj(profile, "organization");
+    if (!org) return NULL;
+    const char *tier = json_get_str(org, "rate_limit_tier");
+    for (const char *q = tier; q && (q = str_istr(q, "max_")); q++) {
+        const char *d = q + 4;
+        size_t n = 0;
+        while (isdigit((unsigned char)d[n])) n++;
+        if (n && (d[n] == 'x' || d[n] == 'X')) return xasprintf("Max %.*sx", (int)n, d);
+    }
+    char *type = json_get_str(org, "organization_type") ? str_lower(json_get_str(org, "organization_type")) : NULL;
+    static const char *const plans[][2] = {{"claude_max", "Max"}, {"claude_pro", "Pro"}, {"claude_team", "Team"},
+                                           {"claude_enterprise", "Enterprise"}};
+    char *out = NULL;
+    for (size_t i = 0; type && i < ARRAY_LEN(plans) && !out; i++)
+        if (!strcmp(type, plans[i][0])) out = xstrdup(plans[i][1]);
+    free(type);
+    return out;
+}
+
 static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
     const char *token = claude_token(p->cred);
     if (!token) return NULL;
@@ -1080,22 +1102,37 @@ static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
             json_t *md = json_get_obj(report, "metadata");
             const char *acc = json_get_str(md, "accountId") ? json_get_str(md, "accountId") : cstr(p->cred, "accountId");
             const char *email = json_get_str(md, "email") ? json_get_str(md, "email") : cstr(p->cred, "email");
-            char *pacc = NULL, *pemail = NULL;
-            if (!acc || !email) { /* fetchProfile */
+            char *pacc = NULL, *pemail = NULL, *plan = NULL;
+            /* fetchProfile, every time: the plan can change under a long-lived credential and /usage never reports it;
+             * a failed probe keeps the plan the previous report carried (omp d5ea5dccf8) */
+            {
                 char *url = xasprintf("%s/profile", base);
                 http_resp_t r;
                 if (uhttp("GET", url, &h, NULL, p, &r) == 0 && r.status >= 200 && r.status < 300) {
                     json_t *prof = resp_json(&r);
-                    const char *u = payload_str(prof, "uuid");
-                    if (!u) u = payload_str(json_get_obj(prof, "account"), "uuid");
-                    const char *e = payload_str(prof, "email");
-                    if (!e) e = payload_str(json_get_obj(prof, "account"), "email");
-                    if (u) pacc = str_trim(u);
-                    if (e) pemail = str_trim(e);
+                    if (!acc || !email) {
+                        const char *u = payload_str(prof, "uuid");
+                        if (!u) u = payload_str(json_get_obj(prof, "account"), "uuid");
+                        const char *e = payload_str(prof, "email");
+                        if (!e) e = payload_str(json_get_obj(prof, "account"), "email");
+                        if (u) pacc = str_trim(u);
+                        if (e) pemail = str_trim(e);
+                    }
+                    plan = claude_profile_plan(prof);
                     json_free(prof);
                 }
                 http_resp_free(&r);
                 free(url);
+            }
+            if (!plan) {
+                const char *prev = json_get_str(json_get_obj(p->previous, "metadata"), "subscriptionPlan");
+                if (prev) {
+                    plan = str_trim(prev);
+                    if (!*plan) {
+                        free(plan);
+                        plan = NULL;
+                    }
+                }
             }
             if (resets) {
                 json_t *rc = json_clone(resets);
@@ -1112,7 +1149,8 @@ static json_t *claude_fetch(const usage_params_t *p, bool *rejected) {
             if (a2) json_set_str(md, "accountId", a2);
             if (e2) json_set_str(md, "email", e2);
             if (cstr(p->cred, "orgId")) json_set_str(md, "orgId", cstr(p->cred, "orgId"));
-            free(a2), free(e2), free(pacc), free(pemail);
+            if (plan) json_set_str(md, "subscriptionPlan", plan);
+            free(a2), free(e2), free(pacc), free(pemail), free(plan);
         }
         json_free(resets);
     }

@@ -36,6 +36,8 @@ typedef struct {
     int64_t failure_backoff_ms; /* 0 = shared 10 s */
 } usage_provider_t;
 
+/* usage/claude.ts claudeProfilePlan: the subscription plan a /api/oauth/profile response names (owned) or NULL */
+char *claude_profile_plan(const json_t *profile);
 /* usage/kiro.ts parseKiroUsage: the report of a GetUsageLimits payload, or NULL without a readable credit breakdown */
 json_t *usage_kiro_parse(const json_t *payload, int64_t fetched_at);
 

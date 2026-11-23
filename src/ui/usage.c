@@ -488,9 +488,17 @@ static char *codex_tui_label(const json_t *r, const json_t *peers, const char *b
     return o;
 }
 
+/* " (org · plan)": the organization and the subscription plan (usageSubscriptionPlan, omp d5ea5dccf8) */
 static char *org_suffix(const json_t *r) {
     const char *org = meta(r, "orgName") ? meta(r, "orgName") : json_get_str(json_get_obj(r, "metadata"), "orgId");
-    return org ? xasprintf(" (%s)", org) : xstrdup("");
+    char *plan = meta(r, "subscriptionPlan") ? str_trim(meta(r, "subscriptionPlan")) : NULL;
+    if (plan && !*plan) {
+        free(plan);
+        plan = NULL;
+    }
+    char *o = org && plan ? xasprintf(" (%s \xc2\xb7 %s)", org, plan) : org ? xasprintf(" (%s)", org) : plan ? xasprintf(" (%s)", plan) : xstrdup("");
+    free(plan);
+    return o;
 }
 
 static char *account_label(const json_t *limit, const json_t *r, const json_t *peers, size_t index) {

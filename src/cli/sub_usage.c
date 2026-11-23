@@ -333,7 +333,7 @@ static char *report_identity(const json_t *r, const json_t *peers, size_t index,
             }
             free(org);
         }
-        const char *plan = meta(r, "planType");
+        const char *plan = meta(r, "subscriptionPlan") ? meta(r, "subscriptionPlan") : meta(r, "planType"); /* usageSubscriptionPlan */
         char *pt = plan ? str_trim(plan) : NULL;
         if (pt && *pt) {
             char *o = usage_one_line(pt);
@@ -355,7 +355,7 @@ static char *report_identity(const json_t *r, const json_t *peers, size_t index,
             sb_append(&b, d);
             free(t), free(d);
         }
-        const char *plan = meta(r, "planType");
+        const char *plan = meta(r, "subscriptionPlan") ? meta(r, "subscriptionPlan") : meta(r, "planType"); /* usageSubscriptionPlan */
         char *pt = plan ? str_trim(plan) : NULL;
         if (pt && *pt) {
             char *t = xasprintf(" \xc2\xb7 plan: %s", pt), *d = cli_dim(t);
