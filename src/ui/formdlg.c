@@ -1185,6 +1185,9 @@ static char *title_text(fd_t *v) {
     return r;
 }
 
+/* setUseTerminalCursor: the TUI hands the focused form its hardware-cursor mode (showHardwareCursor), as the composer's */
+static bool hw_cursor(const fd_t *v) { return v->o.draft && v->o.draft->use_terminal_cursor; }
+
 static char *cursor_prefix(bool focused) {
     if (!focused) return xstrdup("  ");
     char *c = xasprintf("%s ", tui_sym("nav.cursor")), *r = fg(TUI_TC_ACCENT, c);
@@ -1193,7 +1196,7 @@ static char *cursor_prefix(bool focused) {
 }
 
 /* Input.render with prompt "": windowed value, cursor cell (or `override` at the end), padded to width */
-static char *input_row(const ui_input_t *in, int width, bool focused, bool mask, const char *override) {
+static char *input_row(const ui_input_t *in, int width, bool focused, bool mask, const char *override, bool hw_cursor) {
     ui_input_t tmp = {0};
     const ui_input_t *src = in;
     if (mask) {
@@ -1222,7 +1225,7 @@ static char *input_row(const ui_input_t *in, int width, bool focused, bool mask,
         tui_sb_spaces(&b, MAX(0, avail - tui_visible_width(before) - ow));
         free(before);
         r = sb_detach(&b);
-    } else r = ui_input_render(src, "", width, focused);
+    } else r = ui_input_render_hw(src, "", width, focused, hw_cursor); /* Input #cursorCell: plain under a hardware cursor */
     sb_free(&tmp.v);
     return r;
 }
@@ -1246,7 +1249,7 @@ static char *other_line(fd_t *v, hf_field_t *f, bool focused, int width) {
             free(ph);
             free(d);
         }
-        shown = input_row(in, inner, v->base.focused && !v->hidden && !v->note_ed, false, ov);
+        shown = input_row(in, inner, v->base.focused && !v->hidden && !v->note_ed, false, ov, hw_cursor(v));
         free(ov);
     } else if (*value) {
         char *s = sanitize(value), *t = trunc_to(s, inner);
@@ -1409,7 +1412,7 @@ static void text_field_lines(fd_t *v, const hf_field_t *f, bool focused, int wid
             free(ph);
             free(d);
         }
-        strvec_push_own(&rows, input_row(&v->inputs[fidx(f)], inner, live, str_eq(f->type, "password"), ov));
+        strvec_push_own(&rows, input_row(&v->inputs[fidx(f)], inner, live, str_eq(f->type, "password"), ov, hw_cursor(v)));
         free(ov);
     } else if (*value) {
         char *shown;
