@@ -449,6 +449,29 @@ json_t *ai_stream(const ai_model_t *model, const ai_context_t *ctx, const ai_str
     return tp_stream(model, ctx, opts, cb, ud); /* withProbedThinking */
 }
 
+/* normalizeMandatoryReasoningOptions: mandatory-reasoning endpoints (thinking.requiresEffort, not suppressWhenOff) reject
+ * disabled or omitted thinking, so an effort-less request runs at defaultSupportedEffort (the effort routed to the
+ * default wire id, else the lowest supported one). EFFORT_OFF when the request keeps its options. */
+static ai_effort_t mandatory_reasoning_floor(const ai_model_t *m, const ai_stream_opts_t *o) {
+    const json_t *th = m->thinking;
+    if (!m->reasoning || !th || !json_get_bool(th, "requiresEffort", false) || json_get_bool(th, "suppressWhenOff", false))
+        return EFFORT_OFF;
+    if (o->reasoning != EFFORT_OFF && !o->disable_reasoning && !o->force_reasoning_off) return EFFORT_OFF;
+    json_t *efforts = json_get_arr(th, "efforts");
+    if (json_len(efforts) == 0) return EFFORT_OFF;
+    json_t *routing = json_get_obj(th, "effortRouting");
+    const char *wire = json_get_str(m->raw, "requestModelId");
+    for (int pass = routing && wire ? 0 : 1; pass < 2; pass++)
+        for (int e = EFFORT_MINIMAL; e <= EFFORT_MAX; e++) {
+            bool listed = false;
+            json_t *it;
+            json_arr_foreach(efforts, i, it) if (str_eq(json_sv(it), effort_name((ai_effort_t)e))) listed = true;
+            if (listed && (pass == 1 || str_eq(json_get_str(routing, effort_name((ai_effort_t)e)), wire))) return (ai_effort_t)e;
+        }
+    ai_effort_t first;
+    return effort_parse(json_sv(json_at(efforts, 0)), &first) == 0 ? first : EFFORT_OFF;
+}
+
 json_t *ai_stream_dispatch(const ai_model_t *model, const ai_context_t *ctx, const ai_stream_opts_t *opts, ai_event_cb cb,
                            void *ud) {
     ai_stream_fn fn;
@@ -462,6 +485,14 @@ json_t *ai_stream_dispatch(const ai_model_t *model, const ai_context_t *ctx, con
         tiered = *opts;
         tiered.service_tier = ai_resolve_model_service_tier(&opts->service_tiers, model);
         opts = &tiered;
+    }
+    ai_stream_opts_t mandatory;
+    ai_effort_t floor = mandatory_reasoning_floor(model, opts);
+    if (floor != EFFORT_OFF) {
+        mandatory = *opts;
+        mandatory.reasoning = floor;
+        mandatory.disable_reasoning = mandatory.force_reasoning_off = false;
+        opts = &mandatory;
     }
     json_t *paused = paused_message(model, cb, ud);
     if (paused) return paused;

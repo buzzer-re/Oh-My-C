@@ -52,6 +52,10 @@ ADAPTIVE = {"properties": {"thinking": {"properties": {"type": {"enum": ["adapti
                            "max_tokens": {"maximum": 64000}}}
 
 
+# no advertised off value: discovery marks it requiresEffort, so thinking off runs at the lowest effort
+GPT = {"properties": {"reasoning": {"properties": {"effort": {"enum": ["low", "high"], "default": "high"}}}}}
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -108,7 +112,7 @@ class H(BaseHTTPRequestHandler):
             if body.get("origin") != "KIRO_CLI":
                 return self.reply(400, {"message": "origin"})
             if body.get("nextToken") == "p2":
-                return self.reply(200, {"models": [model("auto", "Auto"), model("claude-x", "dup")]})
+                return self.reply(200, {"models": [model("auto", "Auto"), model("claude-x", "dup"), model("gpt-k", "GPT K", GPT)]})
             return self.reply(200, {"models": [model("claude-x", "Claude X", ADAPTIVE, image=True)], "nextToken": "p2"})
         if target.endswith(".ListAvailableProfiles"):
             if region != "us-east-1":

@@ -31,6 +31,7 @@ check "kiro tool"         "Tool said: kiro-e2e"        "${KENV[@]}" "$B" --model
 check "kiro thinking"     '"thinking":"pondering","thinkingSignature":"sig-1"' "${KENV[@]}" "$B" --model kiro/claude-x:high --no-session --mode json -p "think"
 check "kiro usage tokens" '"input":120,"output":7,"cacheRead":30,"cacheWrite":5' "${KENV[@]}" "$B" --model kiro/auto --no-session --mode json -p "hi"
 check "kiro context"      '"contextTokens":3000'       "${KENV[@]}" "$B" --model kiro/auto --no-session --mode json -p "hi"
+check "kiro mandatory"    "plain kiro answer"          "${KENV[@]}" "$B" --model kiro/gpt-k:off --no-session -p "hi"
 check "kiro capacity"     "kiro answer after capacity retry" "${KENV[@]}" "$B" --model kiro/auto --no-session -p "capacity"
 check "kiro refusal"      "Refusal (cyber): not allowed" "${KENV[@]}" "$B" --model kiro/auto --no-session -p "filtered"
 check "kiro too long"     "Kiro HTTP 400 ValidationException: Input is too long." "${KENV[@]}" "$B" --model kiro/auto --no-session --mode json -p "toolong"
@@ -108,6 +109,8 @@ assert refreshed and refreshed[0]["body"] == {"grantType": "refresh_token", "ref
 social = [r for r in rows if r["path"] == "/social/refreshToken"]
 assert social and social[0]["body"] == {"refreshToken": "kiro-refresh"}, social
 assert any(r["headers"]["authorization"] == "Bearer kiro-access-2" for r in gen), "requests use the refreshed token"
+gptk = [r["body"] for r in gen if r["body"]["conversationState"]["currentMessage"]["userInputMessage"]["modelId"] == "gpt-k"]
+assert gptk[0]["additionalModelRequestFields"] == {"reasoning": {"mode": "standard", "effort": "low"}}, gptk[0]
 keyed = [r for r in gen if r["headers"]["authorization"] == "Bearer ksk_good"]
 assert keyed and keyed[0]["headers"]["tokentype"] == "API_KEY" and "profileArn" not in keyed[0]["body"], keyed
 models = [r for r in rows if r["path"].startswith("/mgmt-") and r["headers"]["x-amz-target"].endswith("ListAvailableModels")]
