@@ -238,7 +238,11 @@ void agent_abort(agent_t *a);
  * aborted assistant message reads "Interrupted by user" (errorId Flag.UserInterrupt) instead of the bare
  * "Request was aborted". */
 void agent_abort_user(agent_t *a);
+void agent_abort_kill(agent_t *a); /* abort({reason: AGENT_KILL_LABEL}) */
 #define AGENT_USER_INTERRUPT_LABEL "Interrupted by user"
+/* AGENT_KILL_LABEL: a parent agent's kill of its subagent (a cancelled task job, proc://<id>/kill); it interrupts
+ * exactly as the user's interrupt does, only the transcript text differs (omp 56eba3eed6) */
+#define AGENT_KILL_LABEL "Stopped by parent agent"
 /* markPlanInternalAbortPending + abort(): stop the running turn as an expected internal transition; its aborted
  * assistant message carries the silent-abort marker, so no "Operation aborted" line is drawn */
 void agent_abort_silently(agent_t *a);

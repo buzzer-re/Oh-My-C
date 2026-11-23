@@ -631,7 +631,7 @@ static void *cancel_watch(void *p) {
     watch_t *w = p;
     while (!__atomic_load_n(&w->done, __ATOMIC_ACQUIRE)) {
         if (__atomic_load_n(w->flag, __ATOMIC_RELAXED)) {
-            agent_abort(w->ag);
+            agent_abort_kill(w->ag); /* a cancelled task job: the parent's kill (AGENT_KILL_LABEL) */
             break;
         }
         sleep_ms(50);
@@ -2037,7 +2037,7 @@ bool agents_cancel(const char *id) {
         *r->cancel = 1;
         ok = true;
     } else if (r && !r->is_main && r->running && r->app) {
-        agent_abort(r->app->agent);
+        agent_abort_kill(r->app->agent);
         ok = true;
     }
     pthread_mutex_unlock(&g_mu);
@@ -2156,9 +2156,9 @@ bool agents_kill(const char *id, char **err) {
     bool was = r->killed;
     r->killed = true;
     r->last_activity = now_ms();
-    if (r->running) {
+    if (r->running) { /* a person's stop (the hub, RPC cancel_subagent): USER_INTERRUPT_LABEL, not the parent's kill */
+        if (r->app) agent_abort_user(r->app->agent);
         if (r->cancel) *r->cancel = 1;
-        else if (r->app) agent_abort(r->app->agent);
     }
     pthread_mutex_unlock(&g_mu);
     if (!was) notify_change();

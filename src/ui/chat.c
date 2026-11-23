@@ -595,7 +595,8 @@ static void error_block_rows(strvec_t *o, const char *message, int width, size_t
  * verbatim; a bare abort (no reason, or the generic "Request was aborted") reads "Operation aborted" */
 static const char *abort_label(const json_t *msg) {
     const char *err = json_get_str(msg, "errorMessage");
-    if (err && (!strcmp(err, "Interrupted by user") || !strcmp(err, "__omp.silent_abort__"))) return NULL;
+    if (err && (!strcmp(err, "Interrupted by user") || !strcmp(err, "Stopped by parent agent") || !strcmp(err, "__omp.silent_abort__")))
+        return NULL;
     if (!err || !*err || !strcmp(err, "Request was aborted")) return "Operation aborted";
     return err;
 }

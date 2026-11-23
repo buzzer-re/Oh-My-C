@@ -561,7 +561,9 @@ void ui_signals_user_message(const json_t *msg) {
 }
 
 static bool silent_abort(const json_t *m) { return str_eq(json_get_str(m, "errorMessage"), "__omp.silent_abort__"); }
-static bool user_interrupt(const json_t *m) { return str_eq(json_get_str(m, "errorMessage"), "Interrupted by user"); }
+static bool user_interrupt(const json_t *m) { /* isInterruptReason */
+    return str_eq(json_get_str(m, "errorMessage"), "Interrupted by user") || str_eq(json_get_str(m, "errorMessage"), "Stopped by parent agent");
+}
 
 /* lastAssistantStop */
 static void warp_stop(const json_t *msgs) {
