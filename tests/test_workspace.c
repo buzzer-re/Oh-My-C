@@ -101,6 +101,27 @@ static void test_restore_flag(void) {
     launch_args_free(&a);
 }
 
+/* bare --plan leaves a flag-looking successor alone (omp 91df35d353) */
+static void test_plan_flag(void) {
+    char *a1[] = {"--plan", "--model", "opus"};
+    launch_args_t a;
+    CHECK(launch_parse_args(3, a1, &a) == 0 && !a.plan && str_eq(a.model, "opus"), "bare --plan keeps --model");
+    launch_args_free(&a);
+    char *a2[] = {"--plan", "opus"};
+    CHECK(launch_parse_args(2, a2, &a) == 0 && str_eq(a.plan, "opus"), "--plan opus");
+    launch_args_free(&a);
+    char *a3[] = {"--plan=-x"};
+    CHECK(launch_parse_args(1, a3, &a) == 0 && str_eq(a.plan, "-x"), "--plan=value always consumes");
+    launch_args_free(&a);
+    char *r1[] = {"--plan", "--model", "opus", "acp"};
+    strvec_t out = {0};
+    char *err = NULL;
+    CHECK(resolve_cli_argv(4, r1, &out, &err) && out.n == 4 && str_eq(out.v[0], "acp") && str_eq(out.v[1], "--plan"),
+          "--plan before --model does not hide acp (%zu %s)", out.n, out.n ? out.v[0] : "");
+    strvec_free(&out);
+    free(err);
+}
+
 static void test_worktree_helpers(void) {
     char *b = session_wt_default_branch();
     CHECK(strlen(b) == strlen("wt/20261102-153000") && str_starts(b, "wt/") && b[11] == '-', "default branch %s", b);
@@ -201,6 +222,7 @@ int main(void) {
     test_workspace_dirs();
     test_restart_argv();
     test_restore_flag();
+    test_plan_flag();
     test_worktree_helpers();
     test_move_overlay();
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);

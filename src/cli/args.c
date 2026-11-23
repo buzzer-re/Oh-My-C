@@ -49,8 +49,10 @@ static bool unknown_long_value_candidate(const char *a) {
 static bool flag_consumes_value(const char *flag, const char *next) {
     if (str_starts(flag, "--") && strchr(flag, '=')) return false;
     if (!next) return false;
-    if (is_string_flag(flag)) return true;
+    /* extension-shadowable built-in string flags (`--plan`) consume value-like successors only */
     bool value_like = next[0] != '-';
+    if (!strcmp(flag, "--plan")) return value_like;
+    if (is_string_flag(flag)) return true;
     if (is_optional_flag(flag)) return value_like && next[0];
     if (unknown_long_value_candidate(flag)) return value_like;
     return false;
@@ -382,7 +384,18 @@ int launch_parse_args(int argc, char **argv, launch_args_t *r) {
             args.v[i + 1] = val;
             eq_index = (long)(i + 1);
         }
-        if (is_string_flag(arg)) {
+        if (!strcmp(arg, "--plan")) {
+            /* bare `--plan` leaves a flag-looking successor (`--plan --model opus`) as a flag of its own;
+             * `--plan=value` always consumes its value */
+            if (i + 1 < args.n && (eq_index != -1 || args.v[i + 1][0] != '-')) {
+                strvec_push(&g_pool, args.v[++i]);
+                if (!set_string(r, arg, g_pool.v[g_pool.n - 1])) {
+                    free(arg);
+                    strvec_free(&args);
+                    return 2;
+                }
+            }
+        } else if (is_string_flag(arg)) {
             if (!strcmp(arg, "--goal") &&
                 (i + 1 >= args.n || (eq_index == -1 && args.v[i + 1][0] == '-'))) {
                 strvec_push(&r->invalid_values, "--goal requires an objective.");
