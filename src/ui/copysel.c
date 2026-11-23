@@ -261,12 +261,65 @@ static char *trimmed(char *s) {
     return t;
 }
 
-/* assistantVisibleText: text blocks concatenated, trimmed */
+/* isReplyWrite: a `write` to an out:// URL; replyWriteText: its non-blank content */
+static const char *reply_write_text(const json_t *call) {
+    if (!str_eq(json_get_str(call, "name"), "write")) return NULL;
+    const json_t *a = json_get(call, "arguments");
+    const char *p = json_get_str(a, "path");
+    if (!p) p = json_get_str(a, "file_path");
+    if (!p || strncasecmp(p, "out:/", 5)) return NULL;
+    const char *t = json_get_str(a, "content");
+    return t && !blank(t) ? t : NULL;
+}
+
+static bool is_reply_write(const json_t *call) {
+    if (!str_eq(json_get_str(call, "name"), "write")) return false;
+    const json_t *a = json_get(call, "arguments");
+    const char *p = json_get_str(a, "path");
+    if (!p) p = json_get_str(a, "file_path");
+    return p && !strncasecmp(p, "out:/", 5);
+}
+
+/* joinProse: text blocks concatenate verbatim, an out:// reply forms its own paragraph */
+static void join_piece(sb_t *b, const char *text, bool reply, bool *after_reply) {
+    if (!text || !*text) return;
+    if ((reply || *after_reply) && b->len && b->s[b->len - 1] != '\n') sb_append(b, "\n\n");
+    sb_append(b, text);
+    *after_reply = reply;
+}
+
+/* assistantProsePieces: text blocks and out:// reply writes, in document order (omp 0ef71cbc5c) */
+static void assistant_pieces(sb_t *b, const json_t *m, bool *after_reply) {
+    const json_t *c;
+    json_arr_foreach(json_get_arr(m, "content"), i, c) {
+        const char *type = json_get_str(c, "type");
+        if (str_eq(type, "text")) join_piece(b, json_get_str(c, "text"), false, after_reply);
+        else if (str_eq(type, "toolCall")) join_piece(b, reply_write_text(c), true, after_reply);
+    }
+}
+
+/* the prose of one assistant message (joinProse(assistantProsePieces)), trimmed */
 static char *assistant_visible(const json_t *m) {
     sb_t b = SB_INIT;
-    const json_t *c;
-    json_arr_foreach(json_get_arr(m, "content"), i, c) if (str_eq(json_get_str(c, "type"), "text"))
-        sb_append(&b, json_get_str(c, "text") ? json_get_str(c, "text") : "");
+    bool after = false;
+    assistant_pieces(&b, m, &after);
+    return trimmed(sb_detach(&b));
+}
+
+/* turnProse: the assistant message's text and replies, then the replies its tool results carry (`bash > out://`)
+ * (omp a2f81bc721) */
+static char *turn_prose(const json_t *entries, const ui_tx_target_t *t) {
+    sb_t b = SB_INIT;
+    bool after = false;
+    const json_t *first = json_at(entries, t->ents.v[0]);
+    if (str_eq(entry_role(first), "assistant")) assistant_pieces(&b, entry_msg(first), &after);
+    for (size_t k = 0; k < t->ents.n; k++) {
+        const json_t *e = json_at(entries, t->ents.v[k]);
+        if (!str_eq(entry_role(e), "toolResult")) continue;
+        const json_t *r;
+        json_arr_foreach(json_get_arr(json_get(entry_msg(e), "details"), "replies"), i, r)
+            if (json_is_str(r)) join_piece(&b, json_sv(r), true, &after);
+    }
     return trimmed(sb_detach(&b));
 }
 
@@ -313,6 +366,7 @@ static void push_markdown_blocks(blocks_t *out, const char *text) {
 
 /* collectBlocks: markdown code/quotes, commands and tool output of a turn's entries */
 static void collect_blocks(const json_t *entries, const ui_tx_target_t *t, blocks_t *out) {
+    strvec_t reply_ids = {0}; /* reply writes */
     for (size_t k = 0; k < t->ents.n; k++) {
         const json_t *e = json_at(entries, t->ents.v[k]);
         const json_t *m = entry_msg(e);
@@ -328,12 +382,20 @@ static void collect_blocks(const json_t *entries, const ui_tx_target_t *t, block
             const json_t *c;
             json_arr_foreach(json_get_arr(m, "content"), i, c) {
                 if (!str_eq(json_get_str(c, "type"), "toolCall")) continue;
+                if (is_reply_write(c)) { /* its text came from the call; the result holds a placeholder */
+                    if (json_get_str(c, "id")) strvec_push(&reply_ids, json_get_str(c, "id"));
+                    continue;
+                }
                 const char *kind = NULL, *lang = NULL;
                 char *code = tool_call_command(c, &kind, &lang);
                 if (code)
                     add_block(out, xstrdup(str_eq(kind, "bash") ? "bash command" : "eval code"), code, "command", lang, NULL);
             }
         } else if (str_eq(role, "toolResult")) {
+            const char *tcid = json_get_str(m, "toolCallId");
+            if (!json_get_bool(m, "isError", false) && tcid && strvec_contains(&reply_ids, tcid)) continue;
+            const json_t *r;
+            json_arr_foreach(json_get_arr(json_get(m, "details"), "replies"), i, r) if (json_is_str(r)) push_markdown_blocks(out, json_sv(r));
             char *text = trimmed(text_join(json_get(m, "content"), "\n"));
             if (*text) add_block(out, xasprintf("%s result", json_get_str(m, "toolName") ? json_get_str(m, "toolName") : ""), text, NULL, NULL, NULL);
             else free(text);
@@ -344,6 +406,7 @@ static void collect_blocks(const json_t *entries, const ui_tx_target_t *t, block
             if (!blank(output)) add_block(out, xstrdup("output"), xstrdup(output), NULL, NULL, NULL);
         }
     }
+    strvec_free(&reply_ids);
 }
 
 /* targetCopy: the clipboard payload of a whole turn, falling back to its blocks when it has no prose */
@@ -356,13 +419,19 @@ static void target_copy(const json_t *entries, const ui_tx_target_t *t, const bl
         *content = text_join(json_get(m, "content"), "\n");
         *label = xstrdup("user message");
     } else if (str_eq(role, "assistant")) {
-        char *vis = assistant_visible(m);
+        char *vis = turn_prose(entries, t);
         if (*vis) *content = vis, *label = xstrdup("assistant message");
         else free(vis);
     } else if (str_eq(role, "toolResult")) {
+        sb_t b = SB_INIT;
+        const json_t *r;
+        json_arr_foreach(json_get_arr(json_get(m, "details"), "replies"), i, r) if (json_is_str(r) && !blank(json_sv(r)))
+            sb_appendf(&b, "%s%s", b.len ? "\n\n" : "", json_sv(r));
         char *text = trimmed(text_join(json_get(m, "content"), "\n"));
-        if (*text) *content = text, *label = xasprintf("%s result", json_get_str(m, "toolName") ? json_get_str(m, "toolName") : "");
-        else free(text);
+        if (*text) sb_appendf(&b, "%s%s", b.len ? "\n\n" : "", text);
+        free(text);
+        if (b.len) *content = sb_detach(&b), *label = xasprintf("%s result", json_get_str(m, "toolName") ? json_get_str(m, "toolName") : "");
+        else sb_free(&b);
     } else if (str_eq(role, "bashExecution") || str_eq(role, "pythonExecution")) {
         bool py = str_eq(role, "pythonExecution");
         const char *src = json_get_str(m, py ? "code" : "command"), *output = json_get_str(m, "output");

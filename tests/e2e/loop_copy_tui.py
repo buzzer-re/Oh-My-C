@@ -215,6 +215,19 @@ def copy_part():
     if opened != ["https://example.org/plain-link", "https://example.org/plain-link"]:
         fail("opener calls", opened)
 
+    # a turn whose prose is an out:// reply copies that prose whole (omp 0ef71cbc5c, a2f81bc721)
+    mark = len(out)
+    send('call:write:{"path":"out://","content":"Reply **prose** here"}\r')
+    if not wait_out("Tool said", 10, mark):
+        fail("reply fixture", out[-500:])
+    pump(0.8)
+    mark = len(out)
+    send("/copy\r", 0.8)
+    send("\x1b[A", 0.4)
+    send("\r", 0.8)
+    if clipboard_since(mark) != "Reply **prose** here":
+        fail("copy reply prose", clipboard_since(mark))
+
 if part == "loop":
     loop_part()
 else:
