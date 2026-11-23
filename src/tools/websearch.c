@@ -3259,6 +3259,35 @@ typedef struct {
     ws_err_t err;
 } failure_t;
 
+/* engines (`provider/id`) that answered HTTP 429, with when the automatic chain may try them again: a keyless
+ * engine's free tier rate-limits for minutes, so retrying it on every call only adds latency (omp 1d9d5d1d46) */
+#define RATE_LIMIT_COOLDOWN_MS (5 * 60 * 1000)
+static pthread_mutex_t g_cool_mu = PTHREAD_MUTEX_INITIALIZER;
+static json_t *g_cooldown; /* {"provider/id": until_ms} */
+
+static bool cooldown_active(const ai_model_t *m) {
+    char *key = xasprintf("%s/%s", m->provider, m->id);
+    pthread_mutex_lock(&g_cool_mu);
+    bool active = false;
+    json_t *v = json_get(g_cooldown, key);
+    if (v) {
+        if (json_d2i(v->u.num.d) > now_ms()) active = true;
+        else json_del(g_cooldown, key);
+    }
+    pthread_mutex_unlock(&g_cool_mu);
+    free(key);
+    return active;
+}
+
+static void cooldown_start(const ai_model_t *m) {
+    char *key = xasprintf("%s/%s", m->provider, m->id);
+    pthread_mutex_lock(&g_cool_mu);
+    if (!g_cooldown) g_cooldown = json_obj();
+    json_set_int(g_cooldown, key, now_ms() + RATE_LIMIT_COOLDOWN_MS);
+    pthread_mutex_unlock(&g_cool_mu);
+    free(key);
+}
+
 static char *format_failure(const failure_t *f);
 
 /* failureDetails: reason flattened and capped, the way the fallback note quotes it */
@@ -3546,6 +3575,11 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
         const ai_model_t *m = exp.v[i].model;
         failure_t f = {xstrdup(m->id), xstrdup(m->name ? m->name : m->id), {0}};
         const provider_t *prov = NULL;
+        if (!model_sel && cooldown_active(m)) {
+            fail_plain(&f.err, xasprintf("skipped: rate-limited (429) within the last %d minutes", RATE_LIMIT_COOLDOWN_MS / 60000));
+            vec_push(&fails, f);
+            continue;
+        }
         if (is_hosted(m)) {
             if (!exp.v[i].explicit_) {
                 free(f.id);
@@ -3627,6 +3661,11 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
                             sb_appendf(&b, "%s%s failed (%s)", k ? " and " : "", json_get_str(fx, "label"), json_get_str(fx, "reason"));
                         strvec_push_own(&notes, sb_detach(&b));
                     }
+                    const char *answer = json_get_str(r, "answer");
+                    if (!str_eq(mr_model_kind(m), "search") && answer && !str_blank(answer))
+                        strvec_push_own(&notes, xasprintf("synthesized answer by %s/%s hosted search, not a result list; check "
+                                                          "claims against the cited sources",
+                                                          m->provider, m->id));
                     text = format_for_llm(r, &notes);
                     strvec_free(&notes);
                     *details = json_obj();
@@ -3653,6 +3692,7 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
             break;
         }
         failed_provider = prov ? prov->id : "none";
+        if (f.err.prov && f.err.status == 429) cooldown_start(m);
         vec_push(&fails, f);
     }
     if (!text) {
