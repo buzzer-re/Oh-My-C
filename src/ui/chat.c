@@ -1532,6 +1532,7 @@ void add_notice(ui_t *u, const char *level, const char *text) {
             }
             ui_error_banner_clear(u);
             const char *colon = strstr(text, "s: ");
+            u->retry_announced = true;
             ui_working_retry(u, at, max, secs * 1000, colon ? colon + 3 : NULL);
             return;
         }

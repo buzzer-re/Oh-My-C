@@ -541,7 +541,11 @@ static void worker_done(void *ud) {
         u->async_hold = false;
     }
     ui_sync_retry_hint(u); /* #finishAgentEnd: a turn that died on a tool call offers F5 */
-    if (settled_done) pred_request(u); /* skipped when the queue, a loop or a goal started the next run */
+    bool retried = u->retry_announced;
+    u->retry_announced = false;
+    /* skipped when the queue, a loop or a goal started the next run, and after a run that retried (#settledRunStatus
+     * reads omp's still-pending retry as idle) */
+    if (settled_done && !retried) pred_request(u);
     tui_request_render(u->tui);
 }
 

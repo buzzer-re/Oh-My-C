@@ -77,6 +77,9 @@ struct ui {
      * that supersedes the turn removes them (omp #syntheticFailureCards) */
     VEC(msgview_t *) synthetic_cards;
     VEC(msgview_t *) retry_hidden; /* failed attempts whose error a pending retry keeps out of the transcript */
+    /* this run announced a retry (auto_retry_start): omp's retry is a new run whose agent_end reaches the UI before the
+     * saga's auto_retry_end, so the settled status reads idle and no composer prediction is requested */
+    bool retry_announced;
     pthread_t worker;
     bool worker_running;
     bool expand_tools;

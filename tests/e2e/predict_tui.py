@@ -2,7 +2,7 @@
 """Composer predictions under a pty (tests/e2e/run.sh, omp composer-prediction-controller.ts): after a completed turn
 one side request asks for the next message; its reply shows as ghost text in the empty composer, Tab inserts it
 without sending, Enter then sends it; NO_PREDICTION shows nothing; with composer.predictionAlternatives a second Tab
-lists the alternatives; a /compact keeps the ghost; with composer.predictions off no side request is made.
+lists the alternatives; a /compact keeps the ghost; a run that retried asks for none; with composer.predictions off no side request is made.
 usage: predict_tui.py <omc> <req.jsonl> <scratch dir>
 Prints "predict tui ok" or the first failing step."""
 import fcntl, json, os, pty, select, signal, struct, sys, termios, time
@@ -199,6 +199,18 @@ if not wait_out("compacted", 20, mark):
     fail("compact ran", out[mark:][-800:])
 if not wait_out("Keep going", 5, mark):
     fail("ghost after compact", out[mark:][-800:])
+
+# ---- a run that recovered through a retry asks for no prediction (omp's retry run ends before its auto_retry_end, so
+# the settled status reads idle)
+launch("retry:\n  baseDelayMs: 10\n")
+start = len(requests())
+mark = len(out)
+command("failfor:1:503:busy|say:retried reply predict=Never~shown")
+if not wait_out("retried reply", 30, mark):
+    fail("retried reply", out[mark:][-800:])
+pump(1.5)
+if predictions(start):
+    fail("prediction after a retry", [last_user(r)[:60] for r in predictions(start)])
 
 # ---- off: no side request
 launch("composer:\n  predictions: false\n")
