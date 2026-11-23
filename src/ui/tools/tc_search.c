@@ -337,8 +337,9 @@ void tc_grouped_tree(tc_grouped_t *g, const tc_ggroup_t *shown, size_t nshown, c
     for (size_t i = 0; i < nshown; i++) {
         bool last = !summary && i + 1 == nshown;
         char *conn = tc_fg(TUI_TC_DIM, tc_sym(last ? "tree.last" : "tree.branch"));
-        char *cp = last ? xstrdup("   ") : xasprintf("%s  ", tc_sym("tree.vertical"));
-        char *cont = tc_fg(TUI_TC_DIM, cp);
+        /* TreeView treeRowPrefix: the last row continues with bare spaces, others with a dim vertical + spaces */
+        char *cp = tc_fg(TUI_TC_DIM, tc_sym("tree.vertical"));
+        char *cont = last ? xstrdup("   ") : xasprintf("%s  ", cp);
         for (size_t k = 0; k < shown[i].n; k++) {
             char *st = style(g, shown[i].v[k], ud);
             char *rt = tc_replace_tabs(st);
