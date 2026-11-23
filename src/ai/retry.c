@@ -506,7 +506,7 @@ bool ai_provider_retryable_error(const char *message, int status) {
         "malformedfunctioncall", "unable to connect", "transport error reading codex response body",
         "received from peer", "1302", "unterminated string", "unexpected end of json input", "unexpected end of data",
         "unexpected eof", "end of file", "eof while parsing", "truncated", "stream disconnected before completion",
-        "closed before response.completed", "stream was interrupted", "stream ended before",
+        "closed before response.completed", "stream was interrupted", "stream interrupted", "stream ended before",
         "socket disconnected before secure tls connection", "stream event order", "before message_start",
         "connection reset", "connection closed", "aborted"};
     if (any_istr(msg, transient, ARRAY_LEN(transient))) return true;

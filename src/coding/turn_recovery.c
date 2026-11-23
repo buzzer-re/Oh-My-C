@@ -133,7 +133,7 @@ static const struct {
      "end of file|eof while parsing|truncated)|json\\.parse:\\s*(?:unterminated string|unexpected end of data)|unexpected "
      "end of json input|unexpected eof|eof while parsing)"},
     {P_STREAM_DROP, RX_ICASE,
-     "stream disconnected before completion|(?:stream|websocket) closed before response\\.completed|stream was "
+     "stream disconnected before completion|(?:stream|websocket) closed before response\\.completed|stream (?:was )?"
      "interrupted|stream ended before (?:terminal (?:chunk|completion event)|message_(?:start|delta|stop))|socket "
      "disconnected before secure tls connection"},
     {P_OVERFLOW_NO_BODY, RX_ICASE, "\\b4(00|13)\\s*(status code)?\\s*\\(no body\\)"},

@@ -270,6 +270,8 @@ int main(void) {
     CHECK(tr_billing_cap_usage_limit(429, zero));
     CHECK(ai_usage_limit_text(zero, 429));
     CHECK(str_eq(mr_rate_limit_reason(zero), "QUOTA_EXHAUSTED"));
+    /* a statusless gateway "stream interrupted" retries like "stream was interrupted" (omp 49543a3a3a) */
+    CHECK((aie_classify_text("Gateway error: stream interrupted", 0, NULL, NULL) & AIE_TRANSIENT) != 0);
     /* LiteLLM's spent virtual key (omp bba7495658) is an account usage limit */
     const char *budget = "422 litellm.BudgetExceededError: Budget has been exceeded! Current cost: 1.2, Max budget: 1.0";
     CHECK(ai_usage_limit_text(budget, 422) && str_eq(mr_rate_limit_reason(budget), "QUOTA_EXHAUSTED"));
