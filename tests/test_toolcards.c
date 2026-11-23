@@ -416,8 +416,9 @@ int main(void) {
      * token colors (omc's highlighter vs syntect), so those specs avoid such tokens or are compared via lsp2 only */
     static const char *const SPECS[] = {"ws", "goal", "find", "ast", "ask", "debug", "task", "wait", "lsp2", "github", "ghwatch", "located"};
     for (size_t i = 0; i < ARRAY_LEN(SPECS); i++) run_spec(SPECS[i]);
-    /* omp ec06d26987: the ask card draws the HTML form (pending) and each field's question over its answer. The
-     * spec_ask capture predates HTML forms (recapture pending against omp 18.18.6), so check the shapes here. */
+    /* omp 093f499464: the pending ask call paints no transcript card (the ask panel over the composer owns the
+     * questions while they wait); the result card draws each field's question over its answer. The spec_ask capture
+     * predates HTML forms (recapture pending), so check the shapes here. */
     {
         char *d = fs_read("tests/tui/specs/ask.json", NULL);
         json_t *spec = d ? json_parse_str(d) : NULL;
@@ -427,10 +428,7 @@ int main(void) {
         tc_call_t c = call("ask", json_get(e, "args"), NULL, false);
         strvec_t out = {0};
         tc_render(&c, 80, &out);
-        CHECK(has_row(&out, "Ask") && has_row(&out, " Session store") && has_row(&out, "\xe2\x97\x89 SQLite: one file") &&
-                  has_row(&out, "\xe2\x97\x8b Redis: shared") && has_row(&out, "\xe2\x97\x8b Other\xe2\x80\xa6") &&
-                  has_row(&out, " Session lifetime (days) *") && has_row(&out, "\xe2\x94\x82 30") && has_row(&out, "2 fields"),
-              "ask pending form");
+        CHECK(out.n == 0, "ask pending call paints nothing");
         strvec_free(&out);
         json_t *r = json_obj(), *content = json_arr(), *blk = json_obj();
         json_set_str(blk, "type", "text");

@@ -841,6 +841,19 @@ static void check_text(tui_editor_t *ed, const char *expect) {
     free(t);
 }
 
+/* an ask waiting above the editor: takes Up from the first line while it waits */
+static bool g_ask_waits;
+static int g_ask_taken;
+static bool up_to_ask(void *ud) {
+    (void)ud;
+    if (g_ask_waits) g_ask_taken++;
+    return g_ask_waits;
+}
+static bool faint_on(void *ud) {
+    (void)ud;
+    return true;
+}
+
 static char *g_submitted;
 static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
     free(g_submitted);
@@ -909,6 +922,39 @@ static void test_editor(void) {
     check_text(ed, "h\xc3\xa9");
     feed(ed, "\x1b[B\x1b[B");
     check_text(ed, "");
+    /* Editor.onUpFromTop (omp 093f499464): Up on the first line goes to the host when it takes it (an ask above),
+     * else recalls history */
+    g_ask_waits = true;
+    g_ask_taken = 0;
+    ed->up_from_top = up_to_ask;
+    ed->ask_hook_ud = ed;
+    feed(ed, "\x1b[A");
+    check_text(ed, "");
+    tui_editor_set_text(ed, "draft\nsecond line");
+    feed(ed, "\x1b[A"); /* second line -> first line: the cursor moves */
+    CHECK(g_ask_taken == 1);
+    feed(ed, "\x1b[A"); /* on the first line: out to the ask */
+    CHECK(g_ask_taken == 2);
+    check_text(ed, "draft\nsecond line");
+    g_ask_waits = false;
+    tui_editor_clear(ed);
+    feed(ed, "\x1b[A");
+    check_text(ed, "second");
+    feed(ed, "\x1b[B");
+    ed->up_from_top = NULL;
+    /* CustomEditor.faint: every row faint, re-applied after each reset */
+    {
+        ed->faint_fn = faint_on;
+        strvec_t fo = {0};
+        tui_component_render(&ed->base, 20, &fo);
+        CHECK(fo.n && str_starts(fo.v[0], "\x1b[2m") && str_ends(fo.v[0], "\x1b[22m"));
+        for (size_t i = 0; i < fo.n; i++) {
+            for (const char *q = fo.v[i]; (q = strstr(q, "\x1b[0m")); q += 4) CHECK(str_starts(q + 4, "\x1b[2m"));
+            for (const char *q = fo.v[i]; (q = strstr(q, "\x1b[m")); q += 3) CHECK(str_starts(q + 3, "\x1b[2m"));
+        }
+        strvec_free(&fo);
+        ed->faint_fn = NULL;
+    }
     /* large paste collapses into a marker */
     sb_t big = SB_INIT;
     sb_append(&big, "\x1b[200~");
