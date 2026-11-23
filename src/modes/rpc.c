@@ -1589,10 +1589,10 @@ static void notice_rpc(void *ud, const char *level, const char *text) {
     }
     json_t *j = json_obj();
     json_set_str(j, "type", "notice");
-    bool xdev = !strcmp(level, "xdev"); /* emitNotice("info", …, "xdev") */
-    json_set_str(j, "level", xdev ? "info" : level);
+    bool tc = !strcmp(level, "toolCommands"); /* emitNotice("info", …, "toolCommands") */
+    json_set_str(j, "level", tc ? "info" : level);
     json_set_str(j, "message", text);
-    if (xdev) json_set_str(j, "source", "xdev");
+    if (tc) json_set_str(j, "source", "toolCommands");
     else if (str_starts(text, "Prewalk: ")) json_set_str(j, "source", "prewalk");
     emit(r, j);
     json_free(j);
@@ -1799,7 +1799,7 @@ again:;
     free(r->prompt_id);
     r->prompt_id = NULL;
     /* a job may have settled between the run's last check and now: deliver it in this same thread */
-    char *late = jobs_undelivered(r->a->env->jobs) ? app_job_results_text(r->a) : NULL;
+    char *late = jobs_undelivered(r->a->env->jobs) || jobs_has_notices(r->a->env->jobs) ? app_job_results_text(r->a) : NULL;
     if (late) {
         r->text = late;
         r->hidden = "async-result";

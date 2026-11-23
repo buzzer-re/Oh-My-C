@@ -327,8 +327,31 @@ static void mutate_cmd(ui_t *u, const char *verb, const char *rest) {
             commit(u, json_arr(), "/todo rm (all)", true);
             status(u, "Cleared all todos.");
         } else {
+            /* the tool refuses a bare done/drop, so every task is named */
             char *action = xasprintf("/todo %s (all)", verb), *ok = xasprintf("Marked all tasks %s.", target);
-            op_cmd(u, verb, NULL, NULL, action, false, ok);
+            json_t *all = json_arr(), *p, *t;
+            json_arr_foreach(cur, i, p) json_arr_foreach(json_get(p, "tasks"), k, t) json_push_str(all, json_get_str(t, "content"));
+            if (json_len(all)) {
+                json_t *args = json_obj();
+                json_set(args, "task", all);
+                strvec_t errs = {0};
+                json_t *next = todo_apply_op(cur, verb, args, &errs);
+                if (errs.n) {
+                    char *e = strvec_join(&errs, "; ");
+                    add_notice(u, "error", e);
+                    free(e);
+                    json_free(next);
+                } else {
+                    commit(u, next, action, false);
+                    status(u, ok);
+                }
+                strvec_free(&errs);
+                json_free(args);
+            } else {
+                json_free(all);
+                commit(u, json_clone(cur), action, false);
+                status(u, ok);
+            }
             free(action), free(ok);
         }
     } else {

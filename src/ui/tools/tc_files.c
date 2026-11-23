@@ -27,9 +27,10 @@ bool tc_read_groupable(const json_t *args) {
     const char *p = json_get_str(args, "path");
     if (!p) p = json_get_str(args, "file_path");
     if (!p) return false;
-    /* internal URL schemes render full cards in omp; filesystem / external targets collapse */
-    static const char *internal[] = {"skill://", "rule://", "agent://", "artifact://", "local://", "memory://", "omp://",
-                                     "proc://", "cfg://", "xd://", "mcp://", "pr://", "issue://", "jobs://"};
+    /* internal URL schemes render full cards in omp, unless their spec is compactTranscript (help://); filesystem /
+     * external targets collapse */
+    static const char *internal[] = {"skill://", "rule://", "agent://", "local://", "memory://", "omp://",
+                                     "proc://", "cfg://", "mcp://", "pr://", "issue://", "jobs://"};
     for (size_t i = 0; i < ARRAY_LEN(internal); i++)
         if (str_starts(p, internal[i])) return false;
     return true;
@@ -479,131 +480,10 @@ static void write_preview(const char *content, const char *lang, bool expanded, 
     free(norm);
 }
 
-/* `write xd://<tool>`: the device dispatch renders as the mounted tool's own card (omp tools/xdev.ts
- * renderXdevCall / renderXdevResult). Returns false when the write is not a device dispatch. */
-static bool write_xdev(const tc_call_t *c, const char *raw, int width, strvec_t *out) {
-    if (strncasecmp(raw, "xd://", 5) != 0) return false;
-    const char *nm = strstr(raw, "://") + 3;
-    size_t nl = strcspn(nm, "/?#");
-    if (!nl || nm[nl]) return false; /* bare xd:// and xd://<tool>/<topic> keep the write card */
-    char *name = xstrndup(nm, nl);
-    bool resolution = !strcmp(name, "resolve") || !strcmp(name, "reject") || !strcmp(name, "propose");
-    if (resolution && !c->has_result) {
-        /* renderResolutionDeviceCall: nothing until the path settles, then `⏳ Propose: <first line>` */
-        const char *content = json_get_str(c->args, "content");
-        if (content) {
-            char *t = str_trim(content);
-            char *nl2 = strchr(t, '\n');
-            if (nl2) *nl2 = 0;
-            char *body = tc_replace_tabs(t), *desc = *body ? tui_truncate_to_width(body, 72, "") : NULL;
-            const char *title = !strcmp(name, "propose") ? "Propose" : !strcmp(name, "reject") ? "Reject" : "Resolve";
-            tc_status_line_t sl = {.icon = TC_ST_PENDING, .spinner = -1, .title = title, .title_slot = -1, .description = desc};
-            strvec_push_own(out, tc_status_line(&sl));
-            free(desc);
-            free(body);
-            free(t);
-        }
-        free(name);
-        return true;
-    }
-    if (resolution && !strcmp(name, "propose") && json_get_obj(c->details, "xdev")) {
-        /* no propose renderer: renderDefaultToolExecution(label "propose", the dispatch args, the result text) */
-        const json_t *xd = json_get_obj(c->details, "xdev");
-        json_t *empty = json_obj();
-        tc_call_t ic = *c;
-        ic.name = name;
-        ic.label = name;
-        ic.args = json_get_obj(xd, "args") ? json_get_obj(xd, "args") : empty;
-        ic.details = json_get_obj(xd, "inner");
-        tc_generic(&ic, width, out);
-        json_free(empty);
-        free(name);
-        return true;
-    }
-    if (!strcmp(name, "report_issue") || resolution) {
-        free(name);
-        return false;
-    }
-    const json_t *xd = c->has_result ? json_get_obj(c->details, "xdev") : NULL;
-    if (c->has_result && !xd) {
-        free(name);
-        return false;
-    }
-    const char *label = c->label_of ? c->label_of(name) : NULL;
-    tc_call_t ic = *c;
-    ic.name = name;
-    ic.label = label;
-    if (xd) {
-        bool ok = true;
-        if (str_eq(json_get_str(xd, "mode"), "help")) {
-            sb_t tb = SB_INIT;
-            const json_t *blk;
-            json_arr_foreach(c->content, i, blk) {
-                const char *t = str_eq(json_get_str(blk, "type"), "text") ? json_get_str(blk, "text") : NULL;
-                if (!t || !*t) continue;
-                if (tb.len) sb_putc(&tb, '\n');
-                sb_append(&tb, t);
-            }
-            if (tb.len) {
-                char *txt = tc_replace_tabs(sb_cstr(&tb));
-                char *col = tc_fg(TUI_TC_TOOL_OUTPUT, txt);
-                tc_push_wrapped(out, col, width);
-                free(col);
-                free(txt);
-            } else {
-                ok = false;
-            }
-            sb_free(&tb);
-            free(name);
-            return ok;
-        }
-        json_t *empty = json_obj();
-        const json_t *ia = json_get_obj(xd, "args");
-        ic.args = ia ? ia : empty;
-        ic.details = json_get_obj(xd, "inner");
-        if (!ic.label) ic.label = name;
-        tc_render(&ic, width, out);
-        json_free(empty);
-        free(name);
-        return true;
-    }
-    /* call phase: nothing until the path settles (content started), queued until execution, then the device card */
-    const json_t *cj = json_get(c->args, "content");
-    if (!cj) {
-        free(name);
-        return true;
-    }
-    const char *content = json_sv(cj);
-    json_t *args = content ? json_parse_partial(content, strlen(content)) : NULL;
-    if (!json_is_obj(args)) {
-        json_free(args);
-        args = json_obj();
-    }
-    ic.args = args;
-    ic.content = NULL;
-    ic.details = NULL;
-    ic.has_result = false;
-    if (!c->exec_started) {
-        char *ql = xasprintf("queued %s", label ? label : name);
-        ic.label = ql;
-        ic.partial = true;
-        ic.spinner = -1;
-        tc_generic(&ic, width, out);
-        free(ql);
-    } else {
-        if (!ic.label) ic.label = name;
-        tc_render(&ic, width, out);
-    }
-    json_free(args);
-    free(name);
-    return true;
-}
-
 void tc_write(const tc_call_t *c, int width, strvec_t *out) {
     const char *raw = json_get_str(c->args, "path");
     if (!raw) raw = json_get_str(c->args, "file_path");
     if (!raw) raw = "";
-    if (write_xdev(c, raw, width, out)) return;
     const char *content = json_get_str(c->args, "content");
     char *fp = tc_shorten_path(raw);
     const char *lang = *raw ? tc_lang_from_path(raw) : NULL;

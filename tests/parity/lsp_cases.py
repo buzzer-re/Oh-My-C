@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Emit the lsp tool parity cases (tests/parity/tool_diff.sh format) for the fixtures/lsp_c project.
-Every case calls the lsp device through `write xd://lsp` (omp mounts lsp under xd://)."""
-import json
+Every case runs lsp as a bash tool command (`lsp -j '<args>'`; omp mounts lsp as a command)."""
+import json, shlex
 
 CASES = [
     ("status", {"action": "status"}),
@@ -51,7 +51,7 @@ CASES = [
 ]
 
 def xd(args):
-    return ["write", {"path": "xd://lsp", "content": json.dumps(args)}]
+    return ["bash", {"command": "lsp -j " + shlex.quote(json.dumps(args))}]
 
 # several calls in one session (warm server: rebuild-path diagnostics, cached diagnostics for code actions, ...)
 SEQS = [
@@ -78,7 +78,7 @@ SEQS = [
 
 for name, args in CASES:
     print(f"# {name}")
-    print("call:write:" + json.dumps({"path": "xd://lsp", "content": json.dumps(args)}))
+    print("call:bash:" + json.dumps({"command": "lsp -j " + shlex.quote(json.dumps(args))}))
 for name, calls in SEQS:
     print(f"# {name}")
     print("seq:" + json.dumps([c if isinstance(c, list) else xd(c) for c in calls]))

@@ -35,11 +35,9 @@ typedef struct tool_ctx {
     /* stream partial output (tool_execution_update) */
     void (*update)(struct tool_ctx *ctx, const tool_result_t *partial);
     void *app; /* application context (coding-agent session) */
-    /* xd:// dispatch in progress: partial updates of the device are re-wrapped as {xdev: {tool, mode, args, inner}} */
-    void (*xdev_outer_update)(struct tool_ctx *ctx, const tool_result_t *partial);
-    const char *xdev_tool;
-    const json_t *xdev_args;
     const char *intent; /* the call's `i` intent as the model wrote it (trimmed; may be NULL) */
+    /* a program (eval's tool bridge) parses the result: `:raw` reads come back whole (omp context.programmatic) */
+    bool programmatic;
 } tool_ctx_t;
 
 struct agent_tool {
@@ -55,19 +53,19 @@ struct agent_tool {
     bool handles_tool_interrupt;
     bool hidden;        /* not sent to the model */
     bool lenient_args;  /* skip schema validation errors */
-    bool mounted;       /* presented as an xd://<name> device instead of top-level (implies hidden) */
-    bool discoverable;  /* upstream loadMode "discoverable": mountable under xd:// */
+    bool mounted;       /* presented as a bash tool command instead of top-level (implies hidden) */
+    bool discoverable;  /* upstream loadMode "discoverable": mountable as a tool command */
     bool strict;        /* upstream `strict = true`: providers send the schema in strict mode */
     int intent_mode;    /* INTENT_* : how the `i` intent field is injected into the wire schema */
     char *summary;      /* one-line catalog summary (owned, may be NULL) */
     json_t *examples;   /* [{caption?, call|good+bad|note}] appended to the wire description (owned, may be NULL) */
-    /* MCP ownership (omp MCPTool mcpServerName / mcpToolName) for the xd:// route guidance; owned, NULL otherwise */
+    /* MCP ownership (omp MCPTool mcpServerName / mcpToolName) for the MCP command guidance; owned, NULL otherwise */
     char *mcp_server, *mcp_tool;
     /* returns 0; errors are reported via out->is_error */
     int (*execute)(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
     void *ud;
     void (*destroy)(agent_tool_t *self);
-    /* named doc topics served at xd://<tool>/<topic>: owned object topic -> markdown (NULL: none) */
+    /* named doc topics served at help://<tool>/<topic>: owned object topic -> markdown (NULL: none) */
     json_t *(*doc_topics)(agent_tool_t *self);
 };
 
@@ -83,6 +81,10 @@ json_t *agent_tool_wire(const agent_tool_t *t); /* {name, description, parameter
 char *agent_tool_examples_jsdoc(const agent_tool_t *t);
 /* intent tracing (upstream tools.intentTracing; PI_NO_INTENT=1 disables injection). Process-wide. */
 void agent_set_intent_tracing(bool on);
+/* tools.intentTracing unset: tracing follows the interactive host (on in the TUI and its subagents, off in print, RPC,
+ * ACP and library sessions; omp 96078472c4) */
+void agent_reset_intent_tracing(void);
+void agent_set_interactive_host(bool on); /* isInteractiveHost: the process runs the interactive TUI */
 bool agent_intent_tracing(void);
 /* schema with the `i` intent field injected per mode (owned clone) */
 json_t *agent_schema_inject_intent(const json_t *schema, int mode);
@@ -181,6 +183,7 @@ struct agent {
     json_t *messages;      /* full history (owned) */
     VEC(agent_tool_t *) tools;
     VEC(agent_tool_t *) all_tools; /* includes hidden tools */
+    bool tool_commands; /* tool commands run inside `bash` (tools.commands on, bash active; set by tools_finalize) */
     VEC(struct { agent_listener_fn fn; void *ud; }) listeners;
     agent_hooks_t hooks;
     ai_stream_opts_t base_opts;  /* template options (headers, session id, ...) */

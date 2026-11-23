@@ -1,4 +1,6 @@
 #include "tools.h"
+#include "toolcmd.h"
+#include "patch.h"
 #include "ai/judgment_native.h"
 #include "config/model_resolver.h"
 #include "coding/memory.h"
@@ -154,7 +156,7 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
         free(p);
         return r;
     }
-    const char *schemes[] = {"skill://", "rule://", "artifact://"};
+    const char *schemes[] = {"skill://", "rule://"};
     size_t si = ARRAY_LEN(schemes);
     for (size_t i = 0; i < ARRAY_LEN(schemes); i++)
         if (str_starts(url, schemes[i])) si = i;
@@ -189,17 +191,6 @@ char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err) {
         const rule_t *r = discovery_find_rule(env->disc, target);
         if (!r) *err = xasprintf("Unknown rule: %s", target);
         else path = xstrdup(r->path);
-    } else {
-        /* artifact-protocol.ts parseArtifactId / resolveArtifactFile */
-        char *id = xstrndup(target, strcspn(target, "/?#"));
-        if (!*id) *err = xstrdup("artifact:// URL requires a numeric ID: artifact://0");
-        else if (id[strspn(id, "0123456789")]) *err = xasprintf("artifact:// ID must be numeric, got: %s", id);
-        else if (!env->artifacts) *err = xstrdup("No session - artifacts unavailable");
-        else {
-            path = artifacts_find(env->artifacts, id);
-            if (!path) *err = artifacts_missing_error(env->artifacts, id);
-        }
-        free(id);
     }
     free(target);
     if (!path) return NULL;
@@ -333,19 +324,19 @@ void format_hashline_header(sb_t *b, const char *display_path, const char *tag) 
 /* ---------- registration ---------- */
 
 /* Built-in tool order (upstream tools/index.ts BUILTIN_TOOLS key order); the request's tool list and the
- * xd:// device listing follow it. Names omc does not implement are kept so the order stays canonical. */
+ * tool-command catalog follow it. Names omc does not implement are kept so the order stays canonical. */
 static const char *const BUILTIN_ORDER[] = {
     "read",     "security_scan", "bash",       "edit",    "ast_grep",  "ast_edit", "ask",    "debug",
     "ida",      "eval",          "github",     "glob",    "grep",      "find",     "lsp",    "checkpoint",
     "rewind",   "context_notes", "new_context", "task",   "wait",      "todo",     "web_search", "write",
     "memory_edit", "retain",     "recall",     "reflect", "learn",     "manage_skill", NULL};
 
-/* upstream loadMode "discoverable" built-ins (mountable under xd:// unless kept top-level) */
+/* upstream loadMode "discoverable" built-ins (mountable as bash tool commands unless kept top-level) */
 static const char *const DISCOVERABLE[] = {"security_scan", "ast_grep", "ast_edit", "ask",      "debug",  "ida",
                                            "github",        "grep",     "lsp",      "checkpoint", "rewind", "todo",
                                            "web_search",    "memory_edit", "retain", "recall", "reflect", NULL};
-/* discoverable built-ins that stay top-level (xdev.ts XDEV_KEEP_TOP_LEVEL) + the read/write transport */
-static const char *const KEEP_TOP_LEVEL[] = {"todo", "yield", "ask", "grep", "web_search", "read", "write", NULL};
+/* discoverable built-ins that stay top-level (tool-commands.ts TOOL_COMMAND_KEEP_TOP_LEVEL) + the bash transport */
+static const char *const KEEP_TOP_LEVEL[] = {"todo", "yield", "ask", "grep", "web_search", "bash", NULL};
 
 static bool in_list(const char *const *l, const char *n) {
     for (; *l; l++)
@@ -416,6 +407,10 @@ void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled
     if (str_eq(tool_edit_mode_setting(), "none")) { /* no edit tool to read anchors for */
         free(env->edit_mode);
         env->edit_mode = xstrdup("none");
+    } else { /* read (built before edit) words its description for the session's edit mode */
+        const char *mode = tool_edit_mode_setting();
+        free(env->edit_mode);
+        env->edit_mode = xstrdup(str_eq(mode, "magic") || pe_mode_parse(mode) >= 0 ? mode : "hashline");
     }
     env->find_enabled = (!enabled || strvec_contains(enabled, "find")) && builtin_allowed(env, "find");
     for (size_t i = 0; i < ARRAY_LEN(CTORS); i++) {
@@ -429,7 +424,7 @@ void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled
     }
 }
 
-/* upstream tool `label` / `summary` (catalog line for xd:// devices) */
+/* upstream tool `label` / `summary` (catalog line for tool commands) */
 static const struct {
     const char *name, *label, *summary;
 } TOOL_META[] = {
@@ -485,44 +480,68 @@ void tools_finalize(agent_t *a, const strvec_t *requested) {
         }
         a->all_tools.v[j] = t;
     }
-    /* xd:// mounting: needs both transport halves; explicitly requested tools stay top-level */
-    bool have_read = false, have_write = false;
+    /* tool commands run inside `bash`: mounting engages only while it is enabled, and every mountable tool is
+     * presented top-level otherwise; explicitly requested tools stay top-level */
+    bool have_bash = false;
     for (size_t i = 0; i < a->all_tools.n; i++) {
         agent_tool_t *t = a->all_tools.v[i];
         if (t->hidden && !t->mounted) continue;
-        if (!strcmp(t->name, "read")) have_read = true;
-        if (!strcmp(t->name, "write")) have_write = true;
+        if (!strcmp(t->name, "bash")) have_bash = true;
     }
-    bool xdev = settings_bool("tools.commands", true) && have_read && have_write;
+    bool commands = settings_bool("tools.commands", true) && have_bash;
+    a->tool_commands = commands;
+    bool deferrable = false;
     for (size_t i = 0; i < a->all_tools.n; i++) {
         agent_tool_t *t = a->all_tools.v[i];
+        if (toolcmd_is_special(t->name)) continue;
         if (t->mounted) {
             t->mounted = false;
             t->hidden = false;
         }
         if (t->hidden) continue;
         bool pinned = requested && strvec_contains(requested, t->name);
-        if (xdev && t->discoverable && !pinned && !in_list(KEEP_TOP_LEVEL, t->name)) {
+        if (commands && t->discoverable && !pinned && !in_list(KEEP_TOP_LEVEL, t->name) && toolcmd_name_ok(t->name)) {
             t->mounted = true;
             t->hidden = true;
         }
+        if (!t->hidden && str_eq(t->name, "ast_edit")) deferrable = true; /* AstEditTool.deferrable */
+    }
+    /* special tools: commands while bash is on; top-level otherwise, when they have something to act on */
+    for (size_t i = 0; i < a->all_tools.n; i++) {
+        agent_tool_t *t = a->all_tools.v[i];
+        if (!toolcmd_is_special(t->name)) continue;
+        tool_env_t *env = t->ud;
+        bool applies = str_eq(t->name, "resolve") || str_eq(t->name, "reject")
+                           ? deferrable
+                           : str_eq(t->name, "propose") ? env && env->plan_mode_active && env->plan_mode_active(env) : true;
+        t->mounted = false;
+        t->hidden = commands || !applies;
     }
     a->tools.n = 0;
     for (size_t i = 0; i < a->all_tools.n; i++)
         if (!a->all_tools.v[i]->hidden) vec_push(&a->tools, a->all_tools.v[i]);
-    /* eval's bridge reaches every session tool: top-level ones, then xd:// devices */
+    /* eval's bridge reaches every session tool: top-level ones, then mounted tool commands */
     agent_tool_t *ev = NULL, *wr = NULL;
     bool read_active = false;
     json_t *names = json_arr();
     for (size_t i = 0; i < a->tools.n; i++) {
-        json_push_str(names, a->tools.v[i]->name);
+        const char *n = a->tools.v[i]->name;
+        /* checkpoint/rewind/yield need direct tool events: omitted from (and refused by) the bridge */
+        if (!str_eq(n, "checkpoint") && !str_eq(n, "rewind") && !str_eq(n, "yield")) json_push_str(names, n);
+        /* edit's unambiguous wire alias */
+        if (str_eq(n, "edit") && a->tools.v[i]->ud && str_eq(((tool_env_t *)a->tools.v[i]->ud)->edit_mode, "apply_patch")) {
+            bool taken = false; /* exact registered names shadow aliases */
+            for (size_t j = 0; j < a->all_tools.n && !taken; j++) taken = str_eq(a->all_tools.v[j]->name, "apply_patch");
+            if (!taken) json_push_str(names, "apply_patch");
+        }
         if (!strcmp(a->tools.v[i]->name, "eval")) ev = a->tools.v[i];
         if (!strcmp(a->tools.v[i]->name, "write")) wr = a->tools.v[i];
         if (!strcmp(a->tools.v[i]->name, "read")) read_active = true;
     }
     if (wr) write_set_read_active(wr, read_active);
     for (size_t i = 0; i < a->all_tools.n; i++)
-        if (a->all_tools.v[i]->mounted) json_push_str(names, a->all_tools.v[i]->name);
+        if (a->all_tools.v[i]->mounted && !str_eq(a->all_tools.v[i]->name, "checkpoint") && !str_eq(a->all_tools.v[i]->name, "rewind"))
+            json_push_str(names, a->all_tools.v[i]->name);
     if (ev) eval_set_tool_names(ev, names);
     json_free(names);
     pthread_mutex_unlock(&a->mu);

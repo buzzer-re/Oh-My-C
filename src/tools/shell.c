@@ -354,8 +354,9 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
         free(tmp);
         free(qtmp);
     }
-    char *script = xasprintf("%s\\cd -- %s 2>/dev/null\n{ \\. %s; __omc_rc=$?; %s} </dev/null >%s 2>&1; \\command printf '__OMC_DONE_%%d\\n' \"$__omc_rc\"; \\unset __omc_rc\n",
-                             snap ? snap : "", qcwd, qscript, exit_trap, qfifo);
+    const char *pre = o && o->shell_preamble ? o->shell_preamble : "";
+    char *script = xasprintf("%s\\cd -- %s 2>/dev/null\n{ %s\\. %s; __omc_rc=$?; %s} </dev/null >%s 2>&1; \\command printf '__OMC_DONE_%%d\\n' \"$__omc_rc\"; \\unset __omc_rc\n",
+                             snap ? snap : "", qcwd, pre, qscript, exit_trap, qfifo);
     free(snap);
     bool snap_seen = !s->is_bash;
     free(qcwd);

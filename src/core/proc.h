@@ -21,6 +21,9 @@ typedef struct {
     volatile sig_atomic_t *cancel;/* polled; nonzero => kill */
     proc_output_cb on_output;
     void *ud;
+    /* shell_run only: text run in the session shell right before the command file is sourced, on the wrapper line
+     * (the command's own line numbers stay as written); the bash tool's tool-command functions */
+    const char *shell_preamble;
 } proc_opts_t;
 
 typedef struct {

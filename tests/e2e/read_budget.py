@@ -87,7 +87,7 @@ check("wide line cut", s.get(151) == WIDE[:768] + "…")
 check("no continuation", "to continue" not in t, t[-200:])
 check("raw byte cap named", "Use :raw:151-151 to read line 151 uncut, byte-capped at 50.0KB" in t, t[-200:])
 
-s = rows(read(small + ":151"))
+s = rows(read(small + ":151-"))
 check("page through wide", s.get(150) == "r150" and s.get(151) == WIDE[:768] + "…" and 300 in s, sorted(s)[:5])
 
 t = read(small + ":raw:151-151")
@@ -95,11 +95,11 @@ check("raw byte-capped", t.startswith("H" * 40000) and "…" not in t and "parti
 
 t = read(small, "tools:\n  outputMaxColumns: 0\n")
 s = rows(t)
-check("cap off stops", 150 in s and 151 not in s and ":151 to continue" in t, t[-200:])
+check("cap off stops", 150 in s and 151 not in s and ":151- to continue" in t, t[-200:])
 
 stray = put("stray.bin", b"z" * 8500 + b"\xff" * 30000 + b"\nnext\n")
 t = read(stray, "tools:\n  outputMaxColumns: 30000\n")
-check("first cut overflow pages on", rows(t).get(1, "").startswith("z" * 8500) and "Showing 0" not in t and "Use :2 to continue" in t, t[-200:])
+check("first cut overflow pages on", rows(t).get(1, "").startswith("z" * 8500) and "Showing 0" not in t and "Use :2- to continue" in t, t[-200:])
 sole = put("sole.bin", b"z" * 8500 + b"\xff" * 30000 + b"\n")
 t = read(sole, "tools:\n  outputMaxColumns: 30000\n")
 check("sole overflow no continuation", rows(t).get(1, "").startswith("z" * 8500) and "to continue" not in t, t[-200:])
@@ -126,17 +126,17 @@ check("context retry", s.get(2) == "y" * 300, sorted(s))
 put("repeat.txt", "a\nb\n")
 t = calls([["read", {"path": "repeat.txt"}]] * 3)
 check("repeat hint", "[You have received this identical output 3 times. Re-reading 'repeat.txt' will not change it \u2014 use a narrower selector (path:A-B), or proceed with the edit.]" in t, t)
-t = calls([["read", {"path": "xd://debug"}]] * 3)
-# xd:// docs take line selectors since omp c51e68b454, so their hint suggests one too
-check("repeat hint xd://", "identical output 3 times" in t and "use a narrower selector (path:A-B), or proceed with the edit.]" in t, t[-300:])
+t = calls([["read", {"path": "help://read/urls"}]] * 3)
+# help:// docs take line selectors (omp c51e68b454), so their hint suggests one too
+check("repeat hint help://", "identical output 3 times" in t and "use a narrower selector (path:A-B), or proceed with the edit.]" in t, t[-300:])
 t = calls([["read", {"path": "repeat.txt"}]] * 2)
 check("no hint on second read", "identical output" not in t, t)
 
 # write: read-projection guard
 orig = "\n".join("line %d" % (i + 1) for i in range(60)) + "\n"
 p = put("sample.txt", orig)
-for notice in ["[Showing lines 1-20 of 60. Use :21 to continue]", "[Showing lines 1-20 of 60 (50.0KB limit). Use :21 to continue]",
-               "[40 more lines in notebook. Use :21 to continue]", "[More lines in file (120.0KB total; not scanned to EOF). Use :21 to continue]"]:
+for notice in ["[Showing lines 1-20 of 60. Use :21- to continue]", "[Showing lines 1-20 of 60 (50.0KB limit). Use :21- to continue]",
+               "[40 more lines in notebook. Use :21- to continue]", "[More lines in file (120.0KB total; not scanned to EOF). Use :21- to continue]"]:
     partial = "\n".join(orig.split("\n")[:20]) + "\n" + notice + "\n"
     r = call("write", {"path": p, "content": partial})
     check("refuse " + notice, "incomplete read projection" in r and "truncation notice" in r, r)

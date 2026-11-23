@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Emit the github tool / pr:// / issue:// parity cases (tests/parity/tool_diff.sh format).
-The github tool is a discoverable device: calls go through `write xd://github`."""
-import json
+The github tool is a discoverable tool: calls run it as a bash tool command (`github -j '<args>'`)."""
+import json, shlex
 
 GH = [
     ("repo_view", {"op": "repo_view"}),
@@ -96,7 +96,7 @@ READS = [
 
 for name, args in GH:
     print(f"# {name}")
-    print("call:write:" + json.dumps({"path": "xd://github", "content": json.dumps(args)}))
+    print("call:bash:" + json.dumps({"command": "github -j " + shlex.quote(json.dumps(args))}))
 for name, url in READS:
     print(f"# {name}")
     print("call:read:" + json.dumps({"path": url}))

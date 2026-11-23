@@ -22,7 +22,7 @@ def text(m):
     return c if isinstance(c, str) else "".join(x.get("text", "") for x in (c or []))
 sp = text(rs[0]["messages"][0]) if rs else ""
 tool = [text(m) for r in rs for m in r["messages"] if m["role"] == "tool"]
-print("route=%s instructions=%s result=%s" % ("xd://mcp__slowmcp_echo_text" in sp, "Mock MCP server instructions" in sp,
+print("route=%s instructions=%s result=%s" % ("→ `mcp__slowmcp_echo_text`" in sp, "Mock MCP server instructions" in sp,
                                               tool[-1] if tool else "-"))
 PY
 MCPC_SUM=(python3 -I "$T/mcpc_summary.py" "$T/mcpc.jsonl")

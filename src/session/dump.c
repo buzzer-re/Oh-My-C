@@ -8,7 +8,7 @@
 #include "session/anon.h"
 #include "session/session.h"
 #include "tools/outsink.h"
-#include "tools/xdev.h"
+#include "tools/schema_ts.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -299,7 +299,7 @@ static void append_assistant_content(strvec_t *l, const json_t *content) {
 }
 
 static const char *const CUSTOM_ACRONYMS[][2] = {{"acp", "ACP"}, {"irc", "IRC"}, {"lsp", "LSP"}, {"mcp", "MCP"},
-                                                  {"rpc", "RPC"}, {"ttsr", "TTSR"}, {"tui", "TUI"}, {"xdev", "XDev"}};
+                                                  {"rpc", "RPC"}, {"ttsr", "TTSR"}, {"tui", "TUI"}};
 
 /* systemNoticeTitle */
 static char *system_notice_title(const char *custom_type) {

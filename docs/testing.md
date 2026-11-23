@@ -54,7 +54,7 @@ Run one test with `make build/tests/test_text && ./build/tests/test_text`.
 The suite drives the real `build/omc` binary against local mocks. It creates a throwaway agent dir
 (`OMC_CODING_AGENT_DIR`) whose `models.yml` defines a `mock` provider on a random port, sets
 `OMC_NO_TITLE=1`, and runs `check <name> <expected substring> <command...>` assertions covering
-tools, sessions, edit modes, xd:// devices, MCP, eval, DAP, RPC (including host tools), ACP, the
+tools, sessions, edit modes, tool commands, MCP, eval, DAP, RPC (including host tools), ACP, the
 library example, providers and logins.
 
 `tests/e2e/mock_openai.py` is a scripted Chat Completions server. The **last user message decides

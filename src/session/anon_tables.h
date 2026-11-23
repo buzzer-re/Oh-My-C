@@ -327,7 +327,7 @@ static const char *const ANON_FIELD_RULES[][2] = {
     {"block", "opaque"},
     {"views", "opaque"},
     {"structured", "opaque"},
-    {"xdev", "opaque"},
+    {"toolCommands", "opaque"},
     {"response", "opaque"},
     {"results", "opaque"},
     {"projectAgentsDir", "opaque"},
@@ -465,9 +465,9 @@ static const char *const ANON_ENV_NAMES[] = {
 };
 
 static const char *const ANON_KNOWN_SCHEMES[] = {
-    "http", "https", "file", "ssh", "git", "ftp", "ws", "wss", "agent", "artifact", "attachment", "cfg",
+    "http", "https", "file", "ssh", "git", "ftp", "ws", "wss", "agent", "attachment", "cfg",
     "conflict", "history", "issue", "local", "mcp", "memory", "mr", "omp", "pr", "proc", "rule", "security",
-    "skill", "vault", "xd",
+    "skill", "vault",
     NULL,
 };
 

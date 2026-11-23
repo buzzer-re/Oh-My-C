@@ -20,6 +20,7 @@
 #include "modes/modes.h"
 #include "session/export_html.h"
 #include "tools/approval.h"
+#include "tools/toolcmd.h"
 #include "tools/tools.h"
 #include "tui/term.h"
 
@@ -560,6 +561,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     bool stdin_tty = isatty(0);
     bool auto_print = (piped || !stdin_tty) && !A->print && !A->mode;
     bool interactive = !A->print && !auto_print && !A->mode;
+    agent_set_interactive_host(interactive); /* main.ts setInteractiveHost */
     int rc = 0;
     char *cwd = NULL;
     app_t *app = NULL;
@@ -1095,6 +1097,8 @@ static void install_crash_handler(void) {
 }
 
 int omc_main(int argc, char **argv) {
+    /* a session tool command run inside a bash call (toolcmd.h): hand it to the omc process, nothing else */
+    if (argc >= 2 && !strcmp(argv[1], "__tool-command")) return toolcmd_client_main(argc, argv);
     proc_ignore_sigpipe();
     launch_remember_argv(argc, argv);
     install_crash_handler();

@@ -410,8 +410,8 @@ int main(void) {
     CHECK(details_is("bash", "{\"command\":\"ls -la\"}", "Command: ls -la"));
     CHECK(details_is("bash", "{}", "Command: (missing)"));
     CHECK(details_is("write", "{\"path\":\"a.txt\",\"content\":\"x\\ny\"}", "Path: a.txt|Content:\nx\ny"));
-    CHECK(details_is("write", "{\"path\":\"xd://lsp\",\"content\":\"{\\\"action\\\":\\\"hover\\\",\\\"n\\\":[1,2]}\"}",
-                     "Path: xd://lsp|Arguments:\n{\n  \"action\": \"hover\",\n  \"n\": [\n    1,\n    2\n  ]\n}"));
+    /* a write's content is shown as written, whatever the target (omp de21c0ac45 dropped the device-argument view) */
+    CHECK(details_is("write", "{\"path\":\"proc://x\",\"content\":\"{\\\"a\\\":1}\"}", "Path: proc://x|Content:\n{\"a\":1}"));
     CHECK(details_is("eval", "{\"language\":\"py\",\"code\":\"print(1)\"}", "Language: python|Code:\nprint(1)"));
     CHECK(details_is("mcp__s__t", "{\"q\":\"a\\nb\"}", "Arguments:\n{\n  \"q\": \"\n    a\n    b\n  \"\n}"));
     CHECK(details_is("mcp__s__t", "{}", ""));

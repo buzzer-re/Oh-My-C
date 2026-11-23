@@ -559,7 +559,7 @@ char *out_enforce_inline_cap(const char *text, size_t len, size_t max_bytes, con
     sb_appendn(&b, text + ts, len - ts);
     if (artifact_id) {
         if (!(b.len && b.s[b.len - 1] == '\n')) sb_putc(&b, '\n');
-        sb_appendf(&b, "[raw output: artifact://%s]", artifact_id);
+        sb_appendf(&b, "[raw output: local://%s.log]", artifact_id);
     }
     return sb_detach(&b);
 }
@@ -590,6 +590,8 @@ struct out_sink {
     bool col_unmapped;
 
     char *artifact_path, *artifact_id;
+    char *(*artifact_alloc)(void *ud, char **id);
+    void *artifact_alloc_ud;
     FILE *file;
     bool file_tried, finalized;
     const char *artifact_error;
@@ -612,6 +614,8 @@ out_sink_t *out_sink_new(const out_sink_opts_t *o) {
     }
     s->artifact_path = o->artifact_path ? xstrdup(o->artifact_path) : NULL;
     s->artifact_id = o->artifact_id ? xstrdup(o->artifact_id) : NULL;
+    s->artifact_alloc = o->artifact_path ? NULL : o->artifact_alloc;
+    s->artifact_alloc_ud = o->artifact_alloc_ud;
     s->spill = o->spill_threshold ? o->spill_threshold : OUT_DEFAULT_MAX_BYTES;
     s->head_limit = MIN(o->head_bytes, s->spill / 2);
     s->max_columns = o->max_columns;
@@ -705,6 +709,17 @@ static void art_write_chunk(out_sink_t *s, const char *p, size_t n) {
     if (!s->file) {
         if (s->file_tried) return;
         s->file_tried = true;
+        if (!s->artifact_path && s->artifact_alloc) { /* the first overflow claims the spill */
+            char *id = NULL;
+            s->artifact_path = s->artifact_alloc(s->artifact_alloc_ud, &id);
+            if (!s->artifact_path) {
+                free(id);
+                art_error(s, "open");
+                return;
+            }
+            free(s->artifact_id);
+            s->artifact_id = id;
+        }
         s->file = fopen(s->artifact_path, "w");
         if (!s->file) {
             art_error(s, "open");
@@ -865,7 +880,7 @@ static void store(out_sink_t *s, const char *c, size_t n) {
     bool capped_this = cn < n;
     size_t thr = s->spill > s->head.len ? s->spill - s->head.len : 0;
     bool will_overflow = s->buffer.len + cn > thr;
-    if (s->artifact_path && (s->file || capped_this || will_overflow)) art_write_chunk(s, c, n);
+    if ((s->artifact_path || s->artifact_alloc) && (s->file || capped_this || will_overflow)) art_write_chunk(s, c, n);
     if (cn == 0) {
         sb_free(&capbuf);
         return;
@@ -1270,10 +1285,10 @@ void out_meta_from_trunc(json_t **meta, const out_trunc_t *r, const char *direct
 static void full_output_ref(sb_t *b, const char *id, int64_t aeb) {
     if (aeb > 0) {
         char *f = out_format_bytes(aeb);
-        sb_appendf(b, "Read artifact://%s for a head/tail sample of the output; %s from its middle was not saved", id, f);
+        sb_appendf(b, "Read local://%s.log for a head/tail sample of the output; %s from its middle was not saved", id, f);
         free(f);
     } else {
-        sb_appendf(b, "Read artifact://%s for full output", id);
+        sb_appendf(b, "Read local://%s.log for full output", id);
     }
 }
 
@@ -1285,7 +1300,7 @@ static void truncation_notice(sb_t *b, const json_t *t, const json_t *source) {
     sb_t ref = SB_INIT;
     if (aid) {
         if (str_eq(json_get_str(source, "type"), "report"))
-            sb_appendf(&ref, "Read artifact://%s for full report (%s)", aid, json_get_str(source, "value"));
+            sb_appendf(&ref, "Read local://%s.log for full report (%s)", aid, json_get_str(source, "value"));
         else full_output_ref(&ref, aid, json_get_int(t, "artifactElidedBytes", 0));
     }
     int64_t total_lines = json_get_int(t, "totalLines", 0), total_bytes = json_get_int(t, "totalBytes", 0);
@@ -1310,7 +1325,7 @@ static void truncation_notice(sb_t *b, const json_t *t, const json_t *source) {
             sb_appendf(b, "Showing %lld of %lld lines; middle elided", (long long)MIN(ol, total_lines), (long long)total_lines);
         }
         free(fb);
-        if (has_key(t, "nextOffset")) sb_appendf(b, ". Use :%lld to continue", (long long)json_get_int(t, "nextOffset", 0));
+        if (has_key(t, "nextOffset")) sb_appendf(b, ". Use :%lld- to continue", (long long)json_get_int(t, "nextOffset", 0));
         if (ref.len) sb_appendf(b, ". %s", ref.s);
         sb_free(&ref);
         return;
@@ -1336,7 +1351,7 @@ static void truncation_notice(sb_t *b, const json_t *t, const json_t *source) {
         sb_appendf(b, " (%s limit)", f);
         free(f);
     }
-    if (has_key(t, "nextOffset")) sb_appendf(b, ". Use :%lld to continue", (long long)json_get_int(t, "nextOffset", 0));
+    if (has_key(t, "nextOffset")) sb_appendf(b, ". Use :%lld- to continue", (long long)json_get_int(t, "nextOffset", 0));
     if (ref.len) sb_appendf(b, ". %s", ref.s);
     sb_free(&ref);
 }
@@ -1432,7 +1447,7 @@ char *out_format_notice(const json_t *meta) {
         const char *aid = json_get_str(l, "artifactId");
         int64_t aeb = json_get_int(l, "artifactElidedBytes", 0);
         char *base = json_get_str(l, "selectorBase") ? xstrdup(json_get_str(l, "selectorBase"))
-                     : (aid && aeb <= 0)              ? xasprintf("artifact://%s", aid)
+                     : (aid && aeb <= 0)              ? xasprintf("local://%s.log", aid)
                                                       : NULL;
         const json_t *ln = json_get_obj(l, "lines");
         if (ln && base) {

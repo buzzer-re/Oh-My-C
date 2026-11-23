@@ -1,6 +1,7 @@
 /* astgrep.c - structural search/rewrite over a bracket-aware token tree (ast_grep, ast_edit). */
 #define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
 #include "tools.h"
+#include "toolcmd.h"
 
 #include "core/fs.h"
 #include "diff.h"
@@ -674,6 +675,7 @@ typedef struct {
 } staged_file_t;
 
 static VEC(staged_file_t) g_staged; /* one pending proposal per process (tools run serially; edit is exclusive) */
+static size_t g_staged_total;        /* replacements the pending proposal previewed */
 
 static void staged_clear(void) {
     for (size_t i = 0; i < g_staged.n; i++) {
@@ -818,9 +820,10 @@ static int astedit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
         tool_result_text(out, "No matches; nothing staged.");
         out->useless = true;
     } else {
-        tool_result_textf(out, "(proposed) %zu replacement%s · %zu file%s\n%s\nStaged, not applied: write a one-sentence reason "
-                               "to xd://resolve to apply, or to xd://reject to discard.",
-                          total, total == 1 ? "" : "s", g_staged.n, g_staged.n == 1 ? "" : "s", sb_cstr(&preview));
+        g_staged_total = total;
+        /* the renderer's proposed badge is TUI-only; this line is the model's signal that the diff is staged */
+        tool_result_textf(out, "%s\n\n(proposed) %zu replacement%s · %zu file%s\n%s", TOOLCMD_PREVIEW_PENDING_NOTICE, total,
+                          total == 1 ? "" : "s", g_staged.n, g_staged.n == 1 ? "" : "s", sb_cstr(&preview));
         out->details = json_obj();
         json_set_int(out->details, "replacements", (int64_t)total);
         json_set_int(out->details, "files", (int64_t)g_staged.n);
@@ -849,20 +852,27 @@ static int astedit_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *ar
     return 0;
 }
 
-/* xd://resolve and xd://reject (called from write) */
-char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error) {
+/* `resolve` / `reject` of the pending ast_edit preview (resolve.ts runResolveInvocation); NULL when none is pending */
+char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error, json_t **details) {
     *is_error = false;
-    if (!g_staged.n) {
-        *is_error = true;
-        return xstrdup("No staged ast_edit proposal to resolve.");
-    }
-    sb_t b = SB_INIT;
+    *details = NULL;
+    if (!g_staged.n) return NULL;
+    size_t files = g_staged.n, total = g_staged_total;
+    char *label = xasprintf("AST Edit: %zu replacement%s in %zu file%s", total, total == 1 ? "" : "s", files,
+                            files == 1 ? "" : "s");
+    json_t *d = json_obj();
+    json_set_str(d, "action", apply ? "apply" : "discard");
+    json_set_str(d, "reason", reason ? reason : "");
+    json_set_str(d, "sourceToolName", "ast_edit");
+    json_set_str(d, "label", label);
+    *details = d;
     if (!apply) {
-        sb_appendf(&b, "Rejected staged rewrite (%zu file%s)%s%s", g_staged.n, g_staged.n == 1 ? "" : "s",
-                   reason && *reason ? ": " : "", reason ? reason : "");
+        char *r = xasprintf("Discarded: %s. Reason: %s", label, reason ? reason : "");
+        free(label);
         staged_clear();
-        return sb_detach(&b);
+        return r;
     }
+    free(label);
     /* verify nothing changed since staging, then write all */
     for (size_t i = 0; i < g_staged.n; i++) {
         size_t n;
@@ -871,9 +881,10 @@ char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_
         free(cur);
         if (!same) {
             *is_error = true;
-            char *r = xasprintf("%s changed since the proposal; re-run ast_edit.", g_staged.v[i].path);
+            char *r = xasprintf("Preview is stale / no longer matches; no replacements were applied. Preview expected %zu "
+                                "replacement%s in %zu file%s.",
+                                total, total == 1 ? "" : "s", files, files == 1 ? "" : "s");
             staged_clear();
-            sb_free(&b);
             return r;
         }
     }
@@ -884,9 +895,10 @@ char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_
             edit_store_record(&env->store, g_staged.v[i].path, g_staged.v[i].new_text, 0, 0);
         }
     }
-    sb_appendf(&b, "Applied staged rewrite to %zu file%s%s%s", ok, ok == 1 ? "" : "s", reason && *reason ? " — " : "", reason ? reason : "");
+    char *r = xasprintf("Applied %zu replacement%s in %zu file%s.", ok == files ? total : ok, (ok == files ? total : ok) == 1 ? "" : "s",
+                        ok, ok == 1 ? "" : "s");
     staged_clear();
-    return sb_detach(&b);
+    return r;
 }
 
 agent_tool_t *tool_ast_edit_new(tool_env_t *env) {

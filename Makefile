@@ -180,6 +180,8 @@ T_test_slash         := $(LIB_OBJ)
 T_test_signals       := $(LIB_OBJ)
 T_test_tree          := $(LIB_OBJ)
 T_test_approval      := $(LIB_OBJ)
+T_test_toolcmd       := $(LIB_OBJ)
+T_test_magic         := $(LIB_OBJ)
 T_test_commands      := $(LIB_OBJ)
 T_test_compaction    := $(LIB_OBJ)
 T_test_tiers         := $(LIB_OBJ)
@@ -200,7 +202,7 @@ T_test_fuzz_regress  := $(LIB_OBJ) $(patsubst tests/fuzz/%.c,$(O)/tests/fuzz/%.o
 UNIT_TESTS := test_text test_tui test_providers_ag test_providers_oai test_providers_bedrock test_readfmt test_editmodes \
               test_chrome test_providers_google test_toolcards test_cursor test_judgment test_auth test_memory test_outsink test_catalog test_model_resolver test_compaction_point \
               test_planreview test_img test_img_jpeg test_img_webp test_btw test_queue test_guards test_keybindings test_slash test_commands test_export test_dump test_signals \
-              test_panels test_tree test_approval test_compaction test_tiers test_workspace test_agenthub test_mcp test_loop test_usage test_extracmds test_display test_turn_recovery test_dcr test_settings_audit test_htmlform test_update test_kiro test_fuzz_regress
+              test_panels test_tree test_approval test_compaction test_tiers test_workspace test_agenthub test_mcp test_loop test_usage test_extracmds test_display test_turn_recovery test_dcr test_settings_audit test_htmlform test_update test_kiro test_toolcmd test_magic test_fuzz_regress
 
 .SECONDEXPANSION:
 $(O)/tests/%: tests/%.c $$(T_$$*)

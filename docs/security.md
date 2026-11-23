@@ -85,7 +85,7 @@ strings. In practice:
   socket, and writes are staged to a temp file next to the target and then copied over an existing
   regular file or moved into place (directories and special files are refused).
 - **Path clamping:** `local://` paths are normalized and clamped to the session's local root.
-  `skill://<name>/<file>` cannot escape the skill directory. `artifact://` ids reject `/` and `..`.
+  `skill://<name>/<file>` cannot escape the skill directory.
   Theme names, `omc://` doc names and embedded asset lookups reject `/` and `..`.
 - **Managed skills** (auto-learn) refuse symlinked roots, directories and `SKILL.md` files
   (`lstat`, `O_NOFOLLOW`, `O_EXCL`), enforce strict names, and cap the size at 64 KB.
@@ -108,7 +108,7 @@ strings. In practice:
   stored), never to third parties. Keyless providers (`N/A` sentinel) send no Authorization header.
 - **Redaction:** the memory pipeline redacts secret-looking keywords and JWTs before anything is
   sent for summarization or written to memory files (`coding/memory.c`, port of
-  `memory-backend/redact.ts`). The login dialog masks secret answers. `xd://report_issue` QA reports
+  `memory-backend/redact.ts`). The login dialog masks secret answers. `report_issue` QA reports
   are written to a local file only, and only after consent (`dev.autoqaConsent`). They are never
   uploaded.
 - **Borrowing:** some login flows can reuse an installed desktop app's token (the Perplexity

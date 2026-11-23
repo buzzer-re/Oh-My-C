@@ -41,7 +41,9 @@ MOCK_LOG="$T/req.jsonl" python3 -I "$ROOT/tests/e2e/mock_openai.py" $PORT & MPID
 trap 'kill $(jobs -p) $MPID 2>/dev/null; rm -rf "$T"' EXIT
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
 # OMC_NO_UPDATE_CHECK: no interactive launch looks for a new omc release (tests/e2e/update.sh lifts it against a mock)
-export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1 OMC_NO_UPDATE_CHECK=1
+# PI_INTENT_TRACING=1: tools.intentTracing is off by default outside the TUI since omp 96078472c4; the checks below were
+# written against tool calls that carry `i` (the "intent default" check runs without it)
+export OMC_CODING_AGENT_DIR="$T/agent" MOCK_KEY=x OMC_NO_TITLE=1 OMC_NO_LOCAL_DISCOVERY=1 OMC_NO_UPDATE_CHECK=1 PI_INTENT_TRACING=1
 # the Codex client version stays at the pin unless a check unsets this (its npm refresh would reach the registry)
 export PI_AI_CODEX_CLIENT_VERSION=0.169.0
 cd "$T/work"
@@ -58,18 +60,47 @@ check "file content"   "written by omc"                  cat a/b.txt
 check "read hashline"  "1:written by omc"                "$B" --model mock/mock-1 -p "read:a/b.txt"
 # intent field: injected (required) into tool schemas, stripped before execution
 check "intent schema"  '"i": {"type": "string", "description": "concise intent"}'  bash -c "python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; t=[x for x in r if x.get(\"tools\")][-1][\"tools\"][0][\"function\"][\"parameters\"]; print(json.dumps(t[\"properties\"][\"i\"]) if \"i\" in t[\"required\"] else \"no i\")' '$T/req.jsonl' | sed 's/^/\"i\": /'"
+# unset tools.intentTracing follows the host: off in print mode (omp 96078472c4)
+check "intent default" "no i"  bash -c "env -u PI_INTENT_TRACING '$B' --model mock/mock-1 -p 'say:x' >/dev/null 2>&1 </dev/null; python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; t=[x for x in r if x.get(\"tools\")][-1][\"tools\"][0][\"function\"][\"parameters\"]; print(\"has i\" if \"i\" in t[\"properties\"] else \"no i\")' '$T/req.jsonl'"
 check "intent stripped" "Tool said: hi-intent"           "$B" --model mock/mock-1 -p 'call:bash:{"i":"Checking echo","command":"echo hi-intent"}'
 # a leading `cd <dir> &&` always hoists into cwd; `cd <dir>;` only onto an existing directory (omp 6ad51806eb)
 check "bash cd hoist"  "Tool said: Working directory does not exist: /nonexistent-omc-cd" "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd && echo hi"}'
 check "bash cd semi"   "after-cd"                         "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd; echo after-cd"}'
 check "bash cd root"   "Tool said: /"                     "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /; pwd"}'
-# xd:// devices: discoverable tools are mounted, listed, documented and dispatched through read/write
-check "xd listing"     "mounted tool devices"             "$B" --model mock/mock-1 -p "read:xd://"
-check "xd docs"        "type Args = {"                    "$B" --model mock/mock-1 -p "read:xd://debug"
-check "xd dispatch"    "Invalid args for xd://lsp: Validation failed" "$B" --model mock/mock-1 -p 'call:write:{"path":"xd://lsp","content":"{\"action\":\"bogus\"}"}'
-check "xd report"      "Noted, thanks!"                   "$B" --model mock/mock-1 -p 'call:write:{"path":"xd://report_issue","content":"read: wrong output"}'
-# a device called with the xd:// prefix spelled in underscores dispatches to it (omp dd536ce059)
-check "xd underscore call" "debug session"                "$B" --model mock/mock-1 -p 'call:xd__debug:{"action":"sessions"}'
+# bash `notify` (omp ab21189ab7): matching output of a background job arrives as an async-notify follow-up and ends a
+# blocked wait; a bad regex fails the call; cd targets the shell expands stay in the command (omp 25ba9cbe22)
+NOTIFYQ='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; print("\n".join((m["content"] if isinstance(m["content"],str) else "".join(b.get("text","") for b in m["content"])) for m in r[-1]["messages"] if m["role"] in ("user","tool")))'
+check "bash notify"    $'Wait interrupted by message.\n<system-notice>\nBackground job bg_1 (echo start; echo ERROR one; sleep 2) is still running. Its output matched /ERROR/:\nERROR one\n</system-notice>'  bash -c "'$B' --model mock/mock-1 --no-session -p 'seq:[[\"bash\",{\"command\":\"echo start; echo ERROR one; sleep 2\",\"notify\":\"ERROR\"}],[\"wait\",{}]]' >/dev/null 2>&1 </dev/null; python3 -I -c '$NOTIFYQ' '$T/req.jsonl'"
+# a service whose ready.port another process already listens on is refused before it starts (omp 04833e5623)
+BUSYP=$((PORT + 23))
+python3 -I -c 'import socket,sys,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(); time.sleep(15)' $BUSYP & BUSYPID=$!
+sleep 0.3
+check "service busy port" "Tool said: Port $BUSYP already accepts connections on 127.0.0.1 before busysvc started; another process holds it, so ready.port cannot tell when busysvc is ready. Stop that process or use another port."  "$B" --model mock/mock-1 --no-session -p "call:bash:{\"command\":\"sleep 5\",\"name\":\"busysvc\",\"ready\":{\"port\":$BUSYP}}"
+kill $BUSYPID 2>/dev/null; wait $BUSYPID 2>/dev/null
+check "bash notify bad" "Invalid notify regex: "  "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"true","notify":"(unclosed"}'
+check "bash cd glob"   "Tool said: /"  "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"cd /* 2>/dev/null; cd /; pwd"}'
+# tool commands: discoverable tools run as bash commands (`<tool> --help`, `<tool> args`, `-j` JSON), recorded on the
+# bash result as details.toolCommands; doc topics are help://<tool>/<topic> (omp de21c0ac45)
+tc() { python3 -I -c 'import json,shlex,sys; print("call:bash:"+json.dumps({"command": sys.argv[1]+" -j "+shlex.quote(sys.argv[2])}))' "$1" "$2"; }
+check "tc help"        $'Usage:\n  debug <action> [OPTIONS] [@FILE] [-]'  "$B" --model mock/mock-1 -p "bash:debug --help"
+check "tc dispatch"    'Invalid arguments for lsp: Validation failed for tool "lsp":'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"bogus"}')"
+check "tc usage"       $'lsp: invalid value for `bogus`; expected an enum member\nlsp: run `lsp --help`'  "$B" --model mock/mock-1 -p "bash:lsp bogus"
+# lsp rename_file: a bare new name stays beside the source; a rename no server rewrites imports for says so (omp 290d787845)
+mkdir -p rnf && echo x > rnf/old.txt
+check "lsp rename bare" $'Tool said: Renamed rnf/old.txt \u2192 rnf/new.txt; imports NOT rewritten: no language server handles these files'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"rename_file","file":"rnf/old.txt","new_name":"new.txt"}')"
+rm -rf rnf
+# no server for a file says why: none claims the type, or a claiming one lacks its root marker / binary (omp 290d787845)
+echo x > nols.zzz; echo 'package main' > nols.go
+check "lsp no server"  'Tool said: ✗ nols.zzz: No language server handles .zzz files'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"diagnostics","file":"nols.zzz"}')"
+check "lsp no marker"  $'Tool said: No language server for .go:\n  gopls: no go.mod, go.work, go.sum in the file\'s directory or its parents'  "$B" --model mock/mock-1 -p "$(tc lsp '{"action":"hover","file":"nols.go","line":1}')"
+rm -f nols.zzz nols.go
+check "tc pipeline"    $'No active debug session.\nok'  "$B" --model mock/mock-1 -p "bash:echo x | debug sessions && echo ok"
+check "tc report"      "Noted, thanks!"                   "$B" --model mock/mock-1 -p 'bash:report_issue "read: wrong output"'
+# a direct call by a mounted command's exact name still runs it (sdk.ts resolveToolCommandTool)
+check "tc direct call" "Tool said: No active debug session."  "$B" --model mock/mock-1 -p 'call:debug:{"action":"sessions"}'
+check "tc records"     '"toolCommands":[{"tool":"debug","mode":"help","exitCode":0},{"tool":"debug","mode":"execute","exitCode":0,"args":{"action":"sessions"},"tier":"read","inner":{"action":"sessions","success":true}}]'  "$B" --model mock/mock-1 --mode json -p "bash:debug --help >/dev/null; debug sessions"
+check "help topics"    $'Tool said: help://read/sources\nhelp://read/urls'  "$B" --model mock/mock-1 -p "read:help://read"
+check "help unknown"   "Unknown topic 'nope' for read. Available: sources, urls."  "$B" --model mock/mock-1 -p "read:help://read/nope"
 check "glob tool"      $'Tool said: # a/\nb.txt'          "$B" --model mock/mock-1 -p "glob:**/*.txt"
 check "grep tool"      "*1:written by omc"               "$B" --model mock/mock-1 -p "grep:written"
 # grep / glob result text as omp words it (grouped path tree, errors, empty results)
@@ -111,8 +142,17 @@ check "grep binary only" $'Tool said: No matches in text files\nBinary files als
 check "grep named binary" '*1:gqxbin'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"bin","path":"gq/d.bin"}'
 check "grep cross-line"  $'*1:gqa\n 2:gqb'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa\\ngqb","path":"gq/x.txt"}'
 check "grep url;path list" $'## x.txt#'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa","path":"local://nope.md;gq"}'
+# a gitignore-respecting directory search that found nothing names a gitignored match (omp 1d9d5d1d46)
+mkdir -p gig/gen && (cd gig && git init -q . 2>/dev/null; echo "gen/" > .gitignore; echo zqxtoken > gen/x.txt; echo other > y.txt)
+check "grep gitignored" $'Tool said: No matches found\nGitignored files match (e.g. gig/gen/x.txt); pass `gitignore: false` to search them.'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"zqxtoken","path":"gig"}'
+rm -rf gig
 check "glob none"      "No files found matching pattern" "$B" --model mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
-check "glob limit"     "Requested limit 500 clamped to the max of 200" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
+# the schema bounds limit to 1-200 (omp 1d9d5d1d46: no silent clamp); glob validates its own arguments: a `pattern` is
+# scoped under `path`, other unknown keys are refused, a list of missing paths names each
+check "glob limit"     "Tool said: limit must be a number at most 200 (was 500)" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
+check "glob pattern"   $'Tool said: # a/\nb.txt'  "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","pattern":"*.txt"}'
+check "glob unknown"   'Tool said: glob has no `bogus` argument; put the glob in `path`'  "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","bogus":1}'
+check "glob missing"   $'Tool said: None of the 2 paths exist:\n- nope/*.ts\n- also/*.ts'  "$B" --model mock/mock-1 -p 'call:glob:{"path":"nope/*.ts;also/*.ts"}'
 check "plain answer"   "plain answer"                    "$B" --model mock/mock-1 -p "hi"
 check "continue"       "plain answer"                    "$B" --model mock/mock-1 -c -p "again"
 check "json mode"      '"type":"agent_end"'              "$B" --model mock/mock-1 --mode json -p "bash:echo j"
@@ -166,11 +206,8 @@ CTAG=$(timeout 30 "$B" --model mock/mock-1 -p "read:blk.c" </dev/null | grep -o 
 check "edit block"     "PUT 1*: → resolved lines 1-3 (3 lines)"  "$B" --model mock/mock-1 -p "edit:[blk.c#$CTAG]\nPUT 1*:\n+int f(void) { return 2; }"
 printf 'a\r\nb\r\n' > crlf.txt
 check "write crlf"     "Note: kept the replaced file's CRLF line endings."  "$B" --model mock/mock-1 -p 'call:write:{"path":"crlf.txt","content":"x\ny\n"}'
-# xd://<wire alias> reaches the canonical tool: edit runs as apply_patch in apply_patch mode (omp 3eed7ca5ae, d247d81d34)
-check "xd:// wire alias" "[xdap.txt]"  env PI_EDIT_VARIANT=apply_patch "$B" --model mock/mock-1 --no-session -p 'seq:[["write",{"path":"xd://apply_patch","content":"{\"input\":\"*** Begin Patch\\n*** Add File: xdap.txt\\n+hi\\n*** End Patch\\n\"}"}]]'
-# xd:// docs take line selectors; a selector on a device write is refused (omp c51e68b454)
-check "xd:// doc range"  "more lines in resource. Use :6 to continue]"  "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"xd://ast_edit:1-2"}'
-check "xd:// write selector" 'write does not accept the trailing selector ":raw" on a device URL. Remove it.'  "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://ast_edit:raw","content":"{}"}'
+# help:// docs take line selectors (omp c51e68b454, de21c0ac45)
+check "help doc range"  "more lines in resource. Use :6- to continue]"  "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"help://read/sources:1-2"}'
 check "write no content" "content: content must be a string (was missing)"  "$B" --model mock/mock-1 -p 'call:write:{"path":"nc.txt"}'
 check "write eisdir"   "EISDIR: illegal operation on a directory, open '"  "$B" --model mock/mock-1 -p "write:a:x"
 # non-interactive env: a config-file sequence.editor and GCM prompts must not hang a command
@@ -188,7 +225,10 @@ check "apply_patch add" "fresh"  cat ap-new.txt
 [[ ! -e ap.txt && ! -e ap-gone.txt ]] && echo "   ok  apply_patch move/delete" || { echo "   FAIL apply_patch move/delete"; fail=1; }
 grep -q 'stripped-down, file-oriented diff' "$T/req.jsonl" && echo "   ok  apply_patch prompt" || { echo "   FAIL apply_patch prompt"; fail=1; }
 check "apply_patch err" "Failed to find expected lines in ap-moved.txt"  "$B" --model mock/mock-1 -p 'call:edit:{"input":"*** Begin Patch\n*** Update File: ap-moved.txt\n@@\n-missing\n+x\n*** End Patch"}'
-rm -f "$T/agent/config.yml"
+# apply_patch typed as a shell command runs the apply_patch tool (omp 04833e5623)
+check "bash apply_patch" $'Tool said: [bp.txt]\n1:hello'  "$B" --model mock/mock-1 --no-session -p "$(python3 -I -c 'import json; print("call:bash:" + json.dumps({"command": "apply_patch <<'"'"'EOF'"'"'\n*** Begin Patch\n*** Add File: bp.txt\n+hello\n*** End Patch\nEOF"}))')"
+check "bash apply_patch arg" "Tool said: apply_patch is a tool, not a shell command: call it with the patch text."  "$B" --model mock/mock-1 --no-session -p "bash:apply_patch --help"
+rm -f "$T/agent/config.yml" bp.txt
 printf 'def greet():\n    print("Hi")\n' > pm.py
 check "patch mode"      '2:    print("Hello")'  env PI_EDIT_VARIANT=patch "$B" --model mock/mock-1 -p 'call:edit:{"path":"pm.py","edits":[{"op":"update","diff":"@@ def greet():\n def greet():\n-    print(\"Hi\")\n+    print(\"Hello\")\n"}]}'
 check "patch result"    'print("Hello")'  cat pm.py
@@ -202,27 +242,32 @@ check "sloppy result"   $'start();\nconst timeout = 5000;\nlog();\nfinish();'  c
 check "todo tool"      "Remaining items (2)"  "$B" --model mock/mock-1 -p "todo:first,second"
 # done/drop/rm take several tasks: an array or a flattened list (omp f87959c6a6)
 check "todo several"   "Overall: 2/3 done, 1 open."  "$B" --model mock/mock-1 --no-session -p 'seq:[["todo",{"op":"init","items":["ta","tb","tc"]}],["todo",{"op":"done","task":"ta; tb"}]]'
-# tool output parity (omp OutputSink): middle elision + session artifact, column cap, sanitizing, exit notice
+# tool output parity (omp OutputSink): middle elision + session spill (local://N.log since omp b279532036), column cap,
+# sanitizing, exit notice
 LASTMSG='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; m=[x for x in r[-1]["messages"] if x.get("role")=="tool"][-1]; c=m["content"]; print(c if isinstance(c,str) else "".join(b.get("text","") for b in c), end="")'
 "$B" --model mock/mock-1 --session-dir "$T/sink" -p "bash:seq 1 30000" >/dev/null 2>&1 </dev/null
-check "sink elision"   "[Showing lines 1-4317 and 24882-30000 of 30000; 20,564 middle lines (114.9KB) elided. Read artifact://0 for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink elision"   "[Showing lines 1-4317 and 24882-30000 of 30000; 20,564 middle lines (114.9KB) elided. Read local://0.log for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 check "sink marker"    "4317"$'\n'"[…20564ln elided…]"$'\n'"24882"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "sink artifact"  "168894"  bash -c "wc -c < \"\$(ls $T/sink/*/0.bash.log)\""
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:raw:29999-29999" >/dev/null 2>&1 </dev/null
-check "artifact read"  "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:5-6" >/dev/null 2>&1 </dev/null
-check "artifact plain" $'4\n5\n6\n7\n8\n9\n\n[Backing file: '  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "artifact hint"  $' (164.9KB). Use artifact://0:raw:1-3000 for bounded verbatim chunks, artifact://0:1-3000 for numbered exploration, and the backing file path for search/copy workflows.]\n\n[Showing lines 4-9 of 30000. Use :10 to continue]'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "artifact source" '"source":{"type":"internal","value":"artifact://0"}'  bash -c 'cat "$0"/sink/*.jsonl' "$T"
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:raw" >/dev/null 2>&1 </dev/null
-check "artifact raw cap" 'Unbounded raw read blocked for artifact://0 (164.9KB). Reading the whole file verbatim can exhaust memory.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://0:40000" >/dev/null 2>&1 </dev/null
-check "artifact eof"   'Line 40000 is beyond end of file (30000 lines total). Use artifact://0:1 to read from the start, or artifact://0:30000 to read the last line.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:artifact://99" >/dev/null 2>&1 </dev/null
-check "artifact miss"  'Artifact 99 not found. Available: 0'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink spill"     "168894"  bash -c "wc -c < \"\$(ls $T/sink/*/local/0.log)\""
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:raw:29999-29999" >/dev/null 2>&1 </dev/null
+check "spill read"     "29999"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:5-6" >/dev/null 2>&1 </dev/null
+check "spill page"     $'#'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "spill lines"    $']\n4:4\n5:5\n6:6\n7:7\n8:8\n9:9\n\n[Showing lines 4-9 of 30000. Use :10- to continue]'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "spill source"   '"source":{"type":"internal","value":"local://0.log"}'  bash -c 'cat "$0"/sink/*.jsonl' "$T"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:raw" >/dev/null 2>&1 </dev/null
+check "spill raw cap"  'Unbounded raw read blocked for local://0.log (164.9KB). Reading the whole file verbatim can exhaust memory.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://0.log:40000" >/dev/null 2>&1 </dev/null
+check "spill eof"      'Line 40000 is beyond end of file (30000 lines total). Use local://0.log:1 to read from the start, or local://0.log:30000 to read the last line.'  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p "read:local://99.log" >/dev/null 2>&1 </dev/null
+check "spill miss"     "Path 'local://99.log' not found"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+# a model-written N.log is never clobbered: the next spill id skips it
+"$B" --model mock/mock-1 --session-dir "$T/sink" -c -p 'seq:[["write",{"path":"local://1.log","content":"mine\n"}],["bash",{"command":"seq 1 30000"}]]' >/dev/null 2>&1 </dev/null
+check "spill skips"    "Read local://2.log for full output]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "spill kept"     "mine"  bash -c 'cat "$0"/sink/*/local/1.log' "$T"
 "$B" --model mock/mock-1 --no-session -p "bash:python3 -c \"print('x'*2000)\"; printf 'a\\033[31mb\\rc\\n'; exit 3" >/dev/null 2>&1 </dev/null
 check "sink columns"   "…"$'\n'"ab"$'\n'"c"$'\n\n\n'"Command exited with code 3"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
-check "sink col note"  "[Some lines truncated to 768 bytes]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
+check "sink col note"  "[Some lines truncated to 768 bytes. Use local://0.log:raw:1-1 to read line 1 whole]"  python3 -I -c "$LASTMSG" "$T/req.jsonl"
 # tool result text parity with omp: argument validation (omptype messages, coercion, received args), todo/task
 # errors, bash without bash's job-status notices
 "$B" --model mock/mock-1 --no-session -p 'call:grep:{}' >/dev/null 2>&1 </dev/null
@@ -283,6 +328,18 @@ printf 'Project rule: always test.\n' > AGENTS.md
 check "skill url"      "SKILL BODY LINE"  "$B" --model mock/mock-1 -p "read:skill://demo"
 check "unknown skill"  $'Unknown skill: nope\nAvailable: demo'  "$B" --model mock/mock-1 -p "read:skill://nope"
 # located internal URLs read under the URL's identity (omp read.ts LocatedRead): an immutable scheme mints no
+# ranged :raw keeps each line's terminator, per-range :raw lists, an extensionless SQLite file (omp 49018fe880)
+printf 'A\nB\nC\nD\n' > rawr.txt
+RAWQ='import json,sys
+for l in sys.stdin:
+    try: e=json.loads(l)
+    except Exception: continue
+    if e.get("type")=="tool_execution_end": print(repr("".join(b.get("text","") for b in e["result"]["content"])))'
+check "raw terminators" "'A\\nC\\n'"  bash -c "'$B' --model mock/mock-1 --no-session --mode json -p 'read:rawr.txt:1-1:raw,3:raw' </dev/null 2>/dev/null | python3 -I -c '$RAWQ'"
+python3 -I -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("create table users(id integer primary key, name text)"); c.executemany("insert into users(name) values (?)",[("a",),("b",)]); c.commit()' state.vscdb 2>/dev/null
+check "sqlite noext"   "users (2 rows)"  "$B" --model mock/mock-1 --no-session -p "read:state.vscdb"
+check "sqlite noext q" $'| --- |\n| 2   |'  "$B" --model mock/mock-1 --no-session -p "read:state.vscdb?q=SELECT count(*) AS n FROM users"
+rm -f rawr.txt state.vscdb
 # hashline anchors, skill:// carries its provenance (not under :raw), hints name the URL
 printf 'extra file\nsecond\n' > "$T/agent/skills/demo/notes.txt"
 "$B" --model mock/mock-1 --no-session -p "read:skill://demo" >/dev/null 2>&1 </dev/null
@@ -442,6 +499,11 @@ printf '{"mcpServers":{"bad":{"command":"sh","args":["-c","read x; exit 3"]}}}' 
 check "mcp exit status"  'MCP server "bad" failed to connect: MCP subprocess exited with code 3 before responding'  env OMC_CODING_AGENT_DIR="$T/mcpexit" "$B" --model mock/mock-1 --no-session -p "say:x"
 grep -q "Mock MCP server instructions" "$T/req.jsonl" && echo "   ok  mcp instructions in prompt" || { echo "   FAIL mcp instructions"; fail=1; }
 rm -f "$T/agent/mcp.json"
+# mcp:// byte resources read like files under the URL (omp 578b47d077): images by content, other bytes as binary files
+printf '{"mcpServers":{"mockmcp":{"command":"python3","args":["-I","%s","--full","--blobs"]}}}' "$ROOT/tests/e2e/mock_mcp.py" > "$T/agent/mcp.json"
+check "mcp blob image" 'read `mcp://mem://blob/logo.png?q=<question>`'  "$B" --model mock/mock-1 --no-session -p "read:mcp://mem://blob/logo.png"
+check "mcp blob binary" "Tool said: [Cannot read binary file 'mcp://mem://blob/data' (6B); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]"  "$B" --model mock/mock-1 --no-session -p "read:mcp://mem://blob/data"
+rm -f "$T/agent/mcp.json"
 # MCP OAuth: discovery -> dynamic registration -> PKCE code (curl plays the browser) -> bearer token
 OPORT=$((PORT + 1)); python3 -I "$ROOT/tests/e2e/mock_mcp_oauth.py" $OPORT & OPID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$OPORT) 2>/dev/null && break; sleep 0.1; done
@@ -474,12 +536,21 @@ if command -v python3 >/dev/null; then
     check "eval wait number" "TypeError: wait() takes agent or completion handles; it is not a sleep."  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"wait(3)"}'
     # sh(): a command run to completion on the eval session's shell; a failure raises ShellError (omp d013a0a269)
     check "eval sh"        "Tool said: 'hi\\n/tmp\\n' 3 'bad\\n'"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"x = sh(\"echo hi; pwd\", cwd=\"/tmp\")\ntry:\n    sh(\"echo bad; exit 3\")\nexcept ShellError as e:\n    print(repr(x), e.exit_code, repr(e.output))"}'
+    # the bridge (omp 3967d6bcc6, 6b4d6f3122): a FREEFORM tool takes its raw text (`tool.apply_patch(...)` is edit's
+    # wire alias), a program's `:raw` read comes back whole, checkpoint/rewind/yield are refused
+    check "eval freeform"  $'Tool said: [ev-ap.txt]\n1:hi'  env PI_EDIT_VARIANT=apply_patch "$B" --model mock/mock-1 --no-session -p 'call:eval:{"language":"py","code":"print(await tool.apply_patch(\"*** Begin Patch\\n*** Add File: ev-ap.txt\\n+hi\\n*** End Patch\"))"}'
+    seq 4000 > ev-big.txt
+    check "eval raw whole" "Tool said: 4000 4000"  "$B" --model mock/mock-1 --no-session -p 'call:eval:{"language":"py","code":"x = await tool.read({\"path\":\"ev-big.txt:raw\"})\nprint(len(x.splitlines()), len(read(\"ev-big.txt\").splitlines()))"}'
+    printf "checkpoint:\n  enabled: true\n" > "$T/agent/config.yml"
+    check "eval no checkpoint" 'ERR `checkpoint` cannot run through the eval bridge; call the direct `checkpoint` tool.'  "$B" --model mock/mock-1 --no-session -p 'call:eval:{"language":"py","code":"try:\n    await tool.checkpoint({\"goal\":\"g\"})\nexcept Exception as e:\n    print(\"ERR\", e)"}'
+    rm -f "$T/agent/config.yml" ev-big.txt ev-ap.txt
     # a kernel that exits during startup says why: its exit code and the end of its stderr (omp af92dbc0b2)
-    printf '#!/bin/sh\necho "no module named boom" >&2\nexit 3\n' > "$T/fakepy" && chmod +x "$T/fakepy"
+    # (it passes the 3.9+ version probe, omp 3967d6bcc6, then dies starting the kernel)
+    printf '#!/bin/sh\ncase "$*" in *version_info*) exit 0;; esac\necho "no module named boom" >&2\nexit 3\n' > "$T/fakepy" && chmod +x "$T/fakepy"
     printf "python:\n  interpreter: $T/fakepy\n" > "$T/agent/config.yml"
     check "eval init exit" "Python kernel init failed: Python kernel exited with code 3; its last stderr output: no module named boom"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"1"}'
     rm -f "$T/agent/config.yml"
-    # eval helpers: completion/wait, judge, judge_batch (drain/iter/attach/cancel/min_ok), budget, timeouts, xd://eval docs
+    # eval helpers: completion/wait, judge, judge_batch (drain/iter/attach/cancel/min_ok), budget, timeouts, help://eval docs
     python3 -I "$ROOT/tests/e2e/eval_client.py" "$B" || fail=1
 fi
 # checkpoint / rewind (off by default: checkpoint.enabled)
@@ -526,10 +597,13 @@ mkdir -p "$T/sshhome/.ssh/conf.d" && printf 'Host cfgalias box *.corp !neg\n  Ho
 printf 'Host included\n' > "$T/sshhome/.ssh/conf.d/a.conf"
 check "ssh config hosts" $'- [box](ssh://box/) — `me@localhost` (test box)\n- [cfgalias](ssh://cfgalias/)\n- [included](ssh://included/)'  env HOME="$T/sshhome" PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://"
 check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
+# a directory listing's script goes to the remote shell over stdin (fish/csh login shells, omp 34bcf8dde8)
+mkdir -p "$T/sshlsd/inner"
+check "ssh listing"    "inner/"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://box$T/sshlsd/"
 check "ssh write"      "Successfully wrote 7 bytes to ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
 # a read projection written to a new remote file has no source to discard; over a longer one it is refused
-SSHPROJ='remote one\n\n[Showing lines 1-1 of 60. Use :2 to continue]'
+SSHPROJ='remote one\n\n[Showing lines 1-1 of 60. Use :2- to continue]'
 check "ssh projection new" "Successfully wrote"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/newproj.txt\",\"content\":\"$SSHPROJ\"}"
 check "ssh projection over" "Refusing to overwrite"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/remote.txt\",\"content\":\"$SSHPROJ\"}"
 check "ssh edit refused" 'is written through `write`, not edited'  env PI_EDIT_VARIANT=replace PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:edit:{\"path\":\"ssh://box$T/sub/w.txt\",\"old_string\":\"via ssh\",\"new_string\":\"replaced over ssh\"}"
@@ -556,15 +630,15 @@ check "rpc host exclusive"  "host exclusive ok"  python3 -I "$ROOT/tests/e2e/hos
 # branch summary on navigation (WP-8): omp's branch_summary entry at the new leaf and summarizer request
 check "branch summary entry" $'summary leaf True fromId parent True\nsummary "User explored another conversation branch, then returned here.\\nExploration summary:plain answer"\ndetails {"readFiles": [], "modifiedFiles": []} fromExtension False' python3 -I "$ROOT/tests/e2e/rpc_tree.py" "$B" "$T/req.jsonl"
 check "branch summary request" 'request "<conversation>\n\n\nAssistant: plain answer\n</conversation>\n\nYou MUST create a structured summary' python3 -I "$ROOT/tests/e2e/rpc_tree.py" "$B" "$T/req.jsonl"
-# plan mode without a review surface: xd://propose auto-approves (ACP-without-elicitation semantics)
+# plan mode without a review surface: `propose` auto-approves (ACP-without-elicitation semantics)
 check "plan propose"   'Tool said: Plan approved at local://retry-plan.md. Plan mode exited; proceed with the implementation.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
-check "plan propose dispatch" '"xdev": {"args": {"title": "retry"}, "inner": {"planExists": true, "planFilePath": "local://retry-plan.md", "title": "retry"}, "mode": "execute", "tool": "propose"}' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
+check "plan propose dispatch" '"toolCommands": [{"args": {"title": "retry"}, "exitCode": 0, "inner": {"planExists": true, "planFilePath": "local://retry-plan.md", "title": "retry"}, "mode": "execute", "tier": "read", "tool": "propose"}]' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-mode
 # omp 5fd26783af: the approval is recorded, so a resumed session trusts only an approved plan as its reference
 check "plan approval entry" '"mode":"none","data":{"approvedPlanFilePath":"local://retry-plan.md"}' bash -c 'grep -ho "\"mode\":\"none\",\"data\":{[^}]*}" $(ls -t "$0"/agent/sessions/*/*.jsonl | head -1)' "$T"
 check "plan propose off" 'No plan is awaiting approval' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B"
 check "plan ends at new"  'plan new ok' python3 -I "$ROOT/tests/e2e/plan_new_rpc.py" "$B"
 # --plan-yolo: plan phase first, approved on the first propose, then implemented on the hand-off model
-check "plan yolo"      '"tool": "propose"}} Plan approved. Implementing now with mock-1.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-yolo --plan-yolo-into mock/mock-1
+check "plan yolo"      '"wallTimeNoticeEmitted": false} Plan approved. Implementing now with mock-1.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-yolo --plan-yolo-into mock/mock-1
 check "plan yolo into" '--plan-yolo-into requires --plan-yolo' "$B" --model mock/mock-1 --plan-yolo-into mock/mock-1 -p hi
 check "plan yolo model" 'Model "nope/none" not found' "$B" --model mock/mock-1 --plan-yolo --plan-yolo-into nope/none -p hi
 check "rpc btw"        "btw ok"                   python3 -I "$ROOT/tests/e2e/rpc_btw.py" "$B"
@@ -852,7 +926,7 @@ check "cursor text"     "plain cursor answer"   "${CENV[@]}" "$B" --model "$CM" 
 check "cursor shell"    "Tool said: cur-e2e"    "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -p "bash:echo cur-e2e"
 check "cursor history"  "user,assistant,tool,assistant"  "${CENV[@]}" "$B" --model "$CM" --session-dir "$T/cur" -c -p "history"
 check "cursor read"     "Read said: cursor line one"     "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:$T/cur/r.txt"
-check "cursor xd read"  "Read said: # debug"              "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:xd://debug"
+check "cursor help read" "Read said: help://read/sources"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "read:help://read"
 printf 'orig\n' > "$T/cur/e.txt"
 check "cursor edit order" "Order: write,shell; Shell said: edited"  "${CENV[@]}" "$B" --model "$CM" --no-session -p "editorder:$T/cur/e.txt"
 printf 'orig\n' > "$T/cur/e2.txt"
@@ -874,7 +948,8 @@ grep -q '"requestedModel": "gpt-5.4", "maxMode": false, "parameters": \[{"id": "
 grep -q '"modelDetails": "gpt-5.4-high"' "$T/cursor.jsonl" && echo "   ok  cursor model details" || { echo "   FAIL cursor model details"; fail=1; }
 grep -q '"clientVersion": "cli-2026.09.02-c22c1a3", "clientType": "cli", "streaming": "true"' "$T/cursor.jsonl" \
     && echo "   ok  cursor client headers" || { echo "   FAIL cursor client headers"; fail=1; }
-grep -q '"requestContext": {"tools": \[[^]]*"write"' "$T/cursor.jsonl" && echo "   ok  cursor request context" || { echo "   FAIL cursor request context"; fail=1; }
+# the built-in bash rides along with the pi-agent tools: staged previews resolve through its commands (omp de21c0ac45)
+grep -q '"requestContext": {"tools": \[[^]]*"bash"' "$T/cursor.jsonl" && echo "   ok  cursor request context" || { echo "   FAIL cursor request context"; fail=1; }
 grep -q '"originalRequestId": "[0-9a-f-]\{36\}"' "$T/cursor.jsonl" && echo "   ok  cursor retry original id" || { echo "   FAIL cursor retry original id"; fail=1; }
 # Cursor login hook (deep-control browser login polled with the PKCE verifier) and token refresh, against the mock
 CAUTH=(env HOME="$T" OMC_TEST_CURSOR_API="http://127.0.0.1:$CPORT" OMC_NO_BROWSER=1)
@@ -955,13 +1030,14 @@ if command -v clangd >/dev/null; then
     # omp only configures servers whose root markers exist in the cwd (.clangd here)
     mkdir -p lspw && pushd lspw >/dev/null && : > .clangd
     printf 'static int add(int a, int b) { return a + b; }\nint main(void) { return add(1, 2); }\n' > l.c
-    lsp() { echo "call:write:{\"path\":\"xd://lsp\",\"content\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1")}"; }
+    lsp() { tc lsp "$1"; }
     check "lsp status"      "Language servers: clangd (configured, not started)" "$B" --model mock/mock-1 -p "$(lsp '{"action":"status"}')"
     check "lsp definition"  $'Found 1 definition(s):\n  l.c:1:12\n    1: static int add'  "$B" --model mock/mock-1 -p "$(lsp '{"action":"definition","file":"l.c","line":2,"symbol":"add"}')"
     check "lsp symbols"     $'Symbols in l.c:\n\xe2\x9f\xb2 add int (int, int) @ line 1'  "$B" --model mock/mock-1 -p "$(lsp '{"action":"symbols","file":"l.c"}')"
     check "lsp no symbol"   'LSP error: Symbol "nope" not found on line 2'  "$B" --model mock/mock-1 -p "$(lsp '{"action":"hover","file":"l.c","line":2,"symbol":"nope"}')"
+    printf 'int main(void) { return nope; }\n' > bad.c
     check "lsp diagnostics" $'1 error(s):\n# bad.c\n  1:25 [error] [clang] Use of undeclared identifier \'nope\' (undeclared_var_use)' \
-        bash -c "printf 'int main(void) { return nope; }\n' > bad.c; '$B' --model mock/mock-1 -p '$(lsp '{"action":"diagnostics","file":"bad.c"}')'"
+        "$B" --model mock/mock-1 -p "$(lsp '{"action":"diagnostics","file":"bad.c"}')"
     check "lsp write diags" $'\n\nLSP Diagnostics (1 error(s)):\n# bad2.c\n  1:25 [error] [clang] Use of undeclared identifier'  "$B" --model mock/mock-1 -p 'write:bad2.c:int main(void) { return nope; }'
     popd >/dev/null
 fi
@@ -972,6 +1048,7 @@ source "$ROOT/tests/e2e/providers_gitlab.sh"
 source "$ROOT/tests/e2e/providers_kiro.sh"
 source "$ROOT/tests/e2e/images.sh"
 source "$ROOT/tests/e2e/compaction.sh"
+source "$ROOT/tests/e2e/magic_edit.sh"
 source "$ROOT/tests/e2e/date_reminder.sh"
 source "$ROOT/tests/e2e/leaked_thinking.sh"
 source "$ROOT/tests/e2e/cli.sh"
@@ -1009,10 +1086,10 @@ kill $APID 2>/dev/null
 # github tool + pr:// / issue:// through the fake `gh` (tests/e2e/bin-gh: canned acme/widgets data, never GitHub)
 mkdir -p "$T/ghagent" "$T/ghcfg"; cp "$T/agent/models.yml" "$T/ghagent/"; printf 'github:\n  enabled: true\n' > "$T/ghagent/config.yml"
 GENV=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST PATH="$ROOT/tests/e2e/bin-gh:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent")
-check "gh repo_view"     "Default branch: main"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\",\"repo\":\"acme/widgets\"}"}'
-check "gh search"        "Labels: bug, p1"       "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_issues\",\"query\":\"crash\",\"repo\":\"acme/widgets\"}"}'
-check "gh run_watch"     "All jobs passed."      "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"run_watch\",\"run\":\"1001\",\"repo\":\"acme/widgets\"}"}'
-check "gh bad op"        "op must be github operation (was \"nope\")"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"nope\"}"}'
+check "gh repo_view"     "Default branch: main"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"repo_view","repo":"acme/widgets"}')"
+check "gh search"        "Labels: bug, p1"       "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"search_issues","query":"crash","repo":"acme/widgets"}')"
+check "gh run_watch"     "All jobs passed."      "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"run_watch","run":"1001","repo":"acme/widgets"}')"
+check "gh bad op"        "op must be github operation (was \"nope\")"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"nope"}')"
 check "pr:// view"       "Review Comments (2)"   "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:pr://acme/widgets/12"
 check "pr:// diff list"  "3. new.txt  +0 -0  [renamed]  (renamed from old.txt)"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:pr://acme/widgets/12/diff"
 check "issue:// list"    "# Issues in acme/widgets (open, up to 30)"  "${GENV[@]}" "$B" --model mock/mock-1 --no-session -p "read:issue://acme/widgets"
@@ -1030,12 +1107,12 @@ SH
 chmod +x "$T/ghorigin/bin/gh"
 (cd "$T/ghorigin/w" && git init -q . && git remote add origin git@github.com:me/fork.git && git remote add upstream https://github.com/merged/from.git)
 GORIGIN=(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST HOME="$T" PATH="$T/ghorigin/bin:$PATH" GH_CONFIG_DIR="$T/ghcfg" OMC_CODING_AGENT_DIR="$T/ghagent" FAKE_GH_LOG="$T/ghorigin/log")
-gh_search_q() { : > "$T/ghorigin/log"; (cd "$T/ghorigin/w" && "${GORIGIN[@]}" FAKE_GH_PARENT="$1" timeout 30 "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"search_prs\",\"query\":\"bug\"}"}' </dev/null >/dev/null 2>&1); cat "$T/ghorigin/log"; }
+gh_search_q() { : > "$T/ghorigin/log"; (cd "$T/ghorigin/w" && "${GORIGIN[@]}" FAKE_GH_PARENT="$1" timeout 30 "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"search_prs","query":"bug"}')" </dev/null >/dev/null 2>&1); cat "$T/ghorigin/log"; }
 gh_search_q null > "$T/ghorigin/a"
 check "gh prefers origin"  "repo:me/fork"  cat "$T/ghorigin/a"
 gh_search_q '{"name":"from","owner":{"login":"merged"}}' > "$T/ghorigin/b"
 check "gh keeps fork parent"  "repo:merged/from"  cat "$T/ghorigin/b"
-check "gh needs enable"  "No such tool: xd://github"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" --model mock/mock-1 --no-session -p 'call:write:{"path":"xd://github","content":"{\"op\":\"repo_view\"}"}'
+check "gh needs enable"  "github: command not found"  env PATH="$ROOT/tests/e2e/bin-gh:$PATH" "$B" --model mock/mock-1 --no-session -p "$(tc github '{"op":"repo_view"}')"
 # implicit local servers (ollama / llama.cpp / LM Studio discovery) against tests/e2e/mock_local.py
 DPORT=$((PORT + 9)); python3 -I "$ROOT/tests/e2e/mock_local.py" $DPORT & DPID=$!
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$DPORT) 2>/dev/null && break; sleep 0.1; done
@@ -1081,11 +1158,11 @@ n=$(mark); "$B" --model mock/mock-1 --no-session -p 'say:' >/dev/null 2>&1 </dev
 check "empty stop retry" "Stopped without actionable output; task incomplete."  python3 -I -c "$REQS" "$T/req.jsonl" $n
 n=$(mark); "$B" --model mock/mock-1 --no-session -p 'calls:[["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}],["bash",{"command":"echo same"}]]' >/dev/null 2>&1 </dev/null
 check "tool-call loop guard" 'You called `bash` 5 consecutive times with identical arguments:'  python3 -I -c "$REQS" "$T/req.jsonl" $n
-# an exemption naming an xd:// device covers writes dispatched to it (omp 7a6f101b82)
+# an exemption naming a tool command covers the bash calls that run it (omp 7a6f101b82, de21c0ac45)
 mkdir -p "$T/lgx" && cp "$T/agent/models.yml" "$T/lgx/" && printf 'model:\n  toolCallLoopGuard:\n    exemptTools: [wait, report_issue]\n' > "$T/lgx/config.yml"
-LGX='calls:'$(python3 -I -c 'import json; print(json.dumps([["write",{"path":"xd://report_issue","content":"read: same"}]]*6))')
+LGX='calls:'$(python3 -I -c 'import json; print(json.dumps([["bash",{"command":"report_issue \"read: same\""}]]*6))')
 n=$(mark); OMC_CODING_AGENT_DIR="$T/lgx" "$B" --model mock/mock-1 --no-session -p "$LGX" >/dev/null 2>&1 </dev/null
-out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"consecutive times"* ]] && echo "   ok  loop guard device exemption" || { echo "   FAIL loop guard device exemption"; fail=1; }
+out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"consecutive times"* ]] && echo "   ok  loop guard command exemption" || { echo "   FAIL loop guard command exemption"; fail=1; }
 check "todo reminder (rpc)" '"type": "todo_reminder", "todos": [{"content": "alpha", "status": "in_progress"}, {"content": "beta", "status": "pending"}], "attempt": 1, "maxAttempts": 3'  python3 -I "$ROOT/tests/parity/rpc_drive.py" "$B" "todo:alpha,beta" 1
 n=$(mark); "$B" --model mock/mock-think --thinking auto --no-session -p 'say:medium sized change' >/dev/null 2>&1 </dev/null
 check "auto thinking judge" $'2\nlow State:\n<request>say:medium sized change</request>'  python3 -I -c "$REQS" "$T/req.jsonl" $n all

@@ -155,6 +155,18 @@ static json_t *env_layer(void) {
         if (!e) e = json_obj();
         set_path(e, "tui.motion", json_str(m == TUI_MOTION_NONE ? "none" : m == TUI_MOTION_REDUCED ? "reduced" : "full"));
     }
+    if ((v = env_get("PI_INTENT_TRACING"))) { /* tools.intentTracing env (boolean parser: true/1/yes/on, false/0/no/off) */
+        char *t = str_trim(v);
+        for (char *p = t; *p; p++) *p = (char)tolower((unsigned char)*p);
+        int b = !strcmp(t, "true") || !strcmp(t, "1") || !strcmp(t, "yes") || !strcmp(t, "on")     ? 1
+                : !strcmp(t, "false") || !strcmp(t, "0") || !strcmp(t, "no") || !strcmp(t, "off") ? 0
+                                                                                                  : -1;
+        free(t);
+        if (b >= 0) {
+            if (!e) e = json_obj();
+            set_path(e, "tools.intentTracing", json_bool(b));
+        }
+    }
     return e;
 }
 

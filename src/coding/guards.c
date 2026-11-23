@@ -9,6 +9,7 @@
 #include "text/regex.h"
 #include "text/rxbt.h"
 #include "tools/jobs.h"
+#include "tools/toolcmd.h"
 
 #include <ctype.h>
 #include <pthread.h>
@@ -156,52 +157,12 @@ static bool exempt_tool(const char *name) {
     return false;
 }
 
-/* unwrapHashlineHeaderPath: `[PATH]` / `[PATH#XXXX]` -> PATH (owned) */
-static char *unwrap_header_path(const char *p) {
-    size_t n = strlen(p);
-    while (n && isspace((unsigned char)p[n - 1])) n--;
-    if (n < 2 || p[0] != '[' || p[n - 1] != ']') return xstrdup(p);
-    char *inner = xstrndup(p + 1, n - 2);
-    size_t il = strlen(inner);
-    bool tagged = il >= 5 && inner[il - 5] == '#';
-    for (size_t i = il >= 4 ? il - 4 : 0; tagged && i < il; i++) tagged = isxdigit((unsigned char)inner[i]) != 0;
-    if (tagged) inner[il - 5] = 0;
-    if (!*inner || (!tagged && strchr(inner, '#'))) {
-        free(inner);
-        return xstrdup(p);
-    }
-    return inner;
-}
-
-/* resolve.ts writeDeviceName (omp 7a6f101b82): the `xd://<device>` a write dispatches to, so an exemption names the
- * device without exempting every write (owned, NULL when the call is no device write) */
-static char *write_device_name(const json_t *call) {
-    if (!str_eq(json_get_str(call, "name"), "write")) return NULL;
-    const json_t *args = json_get(call, "arguments");
-    const char *path = json_get_str(args, "path") ? json_get_str(args, "path") : json_get_str(args, "file_path");
-    if (!path) return NULL;
-    char *target = unwrap_header_path(path);
-    char *name = NULL;
-    /* splitUrlScheme: a scheme at the very start; parseXdUrl then trims */
-    const char *q = target;
-    if (isalpha((unsigned char)*q)) {
-        while (isalnum((unsigned char)*q) || *q == '+' || *q == '.' || *q == '-') q++;
-        if (!strncmp(q, "://", 3) && (size_t)(q - target) == 2 && !strncasecmp(target, "xd", 2)) {
-            char *t = str_trim(target);
-            const char *n = t + 5;
-            if (*n && !strpbrk(n, "/?#")) name = xstrdup(n);
-            free(t);
-        }
-    }
-    free(target);
-    return name;
-}
-
 static bool exempt_call(const json_t *call) {
     if (exempt_tool(json_get_str(call, "name"))) return true;
-    char *dev = write_device_name(call);
-    bool r = dev && exempt_tool(dev);
-    free(dev);
+    /* exemptionAlias toolCommandCallName: a `bash` call running an exempt tool command */
+    char *cmd = toolcmd_call_name(json_get_str(call, "name"), json_get(call, "arguments"));
+    bool r = cmd && exempt_tool(cmd);
+    free(cmd);
     return r;
 }
 

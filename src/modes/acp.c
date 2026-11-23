@@ -370,7 +370,11 @@ static bool is_command_tool(const char *t) { return str_eq(t, "bash") || str_eq(
 
 /* mapToolKind */
 static const char *tool_kind(const char *name, const json_t *args) {
-    if (str_eq(name, "write") && str_starts(str_prop(args, "path") ? str_prop(args, "path") : "", "xd://")) return "execute";
+    /* a write to a device-backed URL (proc:// control, out:// replies) is an action, not a file change */
+    if (str_eq(name, "write")) {
+        const char *wp = str_prop(args, "path") ? str_prop(args, "path") : "";
+        if (!strncasecmp(wp, "proc://", 7) || !strncasecmp(wp, "out://", 6)) return "execute";
+    }
     if (str_eq(name, "read")) return "read";
     if (str_eq(name, "write") || str_eq(name, "edit")) return "edit";
     if (str_eq(name, "delete")) return "delete";
@@ -1980,7 +1984,7 @@ static bool acp_plan_choice(void *ud, const char *title, const char *content) {
     return ok;
 }
 
-/* plan approved (xd://propose): current_mode_update + config_option_update */
+/* plan approved (`propose`): current_mode_update + config_option_update */
 static void acp_plan_mode_changed(void *ud) {
     asess_t *s = ud;
     push_mode_update(s);

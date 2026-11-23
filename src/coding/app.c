@@ -24,9 +24,10 @@
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "tools/notify.h"
 #include "coding/jobcaption.h"
 #include "tools/patch.h"
-#include "tools/xdev.h"
+#include "tools/toolcmd.h"
 #include "agents.h"
 
 #include "config/auth.h"
@@ -265,6 +266,27 @@ static json_t *job_batch_details(const json_t *done) {
     return d;
 }
 
+/* buildAsyncNotifyBatchMessage: the queued `notify` batches as one `async-notify` custom message (shown, agent-attributed) */
+static char *notify_text(app_t *a, json_t **details) {
+    json_t *entries = jobs_take_notices(a->env->jobs);
+    char *txt = notify_build_message(entries, details);
+    json_free(entries);
+    return txt;
+}
+
+static json_t *notify_message(app_t *a) {
+    json_t *details = NULL;
+    char *txt = notify_text(a, &details);
+    if (!txt) return NULL;
+    json_t *m = msg_user_text(txt);
+    json_set_bool(m, "synthetic", true);
+    json_set_str(m, "customType", "async-notify");
+    json_set_str(m, "attribution", "agent");
+    json_set(m, "details", details);
+    free(txt);
+    return m;
+}
+
 static json_t *job_results_message(app_t *a) {
     json_t *done = jobs_take_finished(a->env->jobs);
     if (!json_len(done)) {
@@ -379,6 +401,11 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     if (ev->type == AGENT_EV_TOOL_END) app_plan_note_tool_end(a, ev->tool_name, ev->result, ev->is_error);
     guards_on_event(a, ev); /* tool-call loop redirect at the turn end, ahead of async results */
     if (ev->type == AGENT_EV_TURN_END) prewalk_on_turn_end(a, ev);
+    /* `notify` matches inject ahead of results at the same boundary (registered first in omp's yield queue) */
+    if (ev->type == AGENT_EV_TURN_END && a->env && jobs_has_notices(a->env->jobs)) {
+        json_t *m = notify_message(a);
+        if (m) agent_steer(a->agent, m);
+    }
     if (ev->type == AGENT_EV_TURN_END && a->env && jobs_undelivered(a->env->jobs)) {
         json_t *m = job_results_message(a);
         if (m) agent_steer(a->agent, m);
@@ -948,9 +975,9 @@ static tool_gate_t hook_before_tool(void *ud, agent_t *ag, const json_t *call, c
     json_t *args = json_get(call, "arguments");
     if (str_eq(name, "write")) {
         const char *p = json_get_str(args, "path");
-        if (p && (str_starts(p, "local://") || !strcmp(p, "xd://propose"))) return TOOL_ALLOW;
+        if (p && str_starts(p, "local://")) return TOOL_ALLOW;
         *reason = xstrdup("Plan mode is active: the working tree is read-only. Write plans to local://<slug>-plan.md and "
-                          "propose with xd://propose.");
+                          "submit them with `propose`.");
         return TOOL_BLOCK;
     }
     if (str_eq(name, "edit")) {
@@ -991,7 +1018,9 @@ static tool_gate_t hook_before_tool(void *ud, agent_t *ag, const json_t *call, c
 static void app_bind_local(app_t *a) {
     const char *sid = session_id(a->session);
     free(a->env->local_dir);
-    char *adir = a->session->persist ? artifacts_dir_for_session(a->session->file) : NULL;
+    /* a subagent adopts its parent's store, whose session directory keys its local:// root (getArtifactsDir) */
+    const char *shared = a->opts.subagent ? artifacts_dir(a->env->artifacts) : NULL;
+    char *adir = shared ? xstrdup(shared) : a->session->persist ? artifacts_dir_for_session(a->session->file) : NULL;
     if (adir) { /* resolveLocalRoot: <artifacts dir>/local; sessions from before this keep <sessions>/<id>/local */
         a->env->local_dir = path_join(adir, "local");
         free(adir);
@@ -1003,11 +1032,20 @@ static void app_bind_local(app_t *a) {
             free(old);
         }
     } else if (a->session->dir) a->env->local_dir = xasprintf("%s/%s/local", a->session->dir, sid);
-    else {
-        char *base = omc_agent_path("local");
-        a->env->local_dir = xasprintf("%s/%s", base, sid);
-        free(base);
+    else { /* resolveLocalRoot without a session file: $TMPDIR/omp-local/<safe session id> (omc-local here) */
+        const char *tmp = getenv("TMPDIR");
+        char *safe = xstrdup(sid ? sid : "session");
+        for (char *p = safe; *p; p++)
+            if (!isalnum((unsigned char)*p) && *p != '_' && *p != '.' && *p != '-') *p = '_';
+        if (!*safe || !strcmp(safe, ".") || !strcmp(safe, "..")) {
+            free(safe);
+            safe = xstrdup("session");
+        }
+        a->env->local_dir = xasprintf("%s/omc-local/%s", tmp && *tmp ? tmp : "/tmp", safe);
+        free(safe);
     }
+    /* spills (local://N.log) live at the local:// root; a subagent's store is the parent's, already bound */
+    if (!a->opts.subagent) artifacts_set_root(a->env->artifacts, a->env->local_dir);
 }
 
 /* point the tool env at the session's artifact directory (session file minus `.jsonl`) */
@@ -1620,6 +1658,10 @@ static json_t *app_tool_judge(tool_env_t *env, const char *lead_model, const jso
     return evalhost_judge_lead(env->session, lead_model, state, questions, cancel, usage, err);
 }
 
+static void app_tool_side_usage(tool_env_t *env, const char *purpose, const json_t *msg) {
+    app_note_side_usage(env->session, purpose, msg);
+}
+
 static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *args, int64_t cell,
                                volatile sig_atomic_t *cancel, char **err) {
     app_t *a = env->session;
@@ -1628,6 +1670,16 @@ static json_t *app_eval_bridge(tool_env_t *env, const char *name, const json_t *
         return NULL;
     }
     return evalhost_call(a->evalhost, name, args, cell, cancel, err);
+}
+
+/* AgentSession.promptCacheEntry ttlMs (wait.ts agentWaitTopMs): the lifetime of the entry the latest request wrote */
+static int64_t app_prompt_cache_ttl(tool_env_t *env) {
+    app_t *a = env->session;
+    cache_status_t st;
+    if (!a || !cachewarm_status(a, now_ms(), 0, &st)) return -1;
+    int64_t ttl = st.ttl_ms;
+    cache_status_free(&st);
+    return ttl;
 }
 
 static char *app_after_write(tool_env_t *env, const char *abs) {
@@ -1781,7 +1833,9 @@ static void install_agent(app_t *a) {
     a->env->can_prompt_user = a->opts.has_ui;
     a->env->ask_ui = a->opts.rpc_ui || a->opts.interactive_prompts;
     a->env->delegation_bias = model_delegation_bias(a->model);
-    agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
+    /* intentTracingActive: an explicit tools.intentTracing (any layer or PI_INTENT_TRACING) wins; unset, the host decides */
+    if (settings_configured("tools.intentTracing")) agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
+    else agent_reset_intent_tracing();
     if (!a->opts.no_tools) tools_register_builtin(ag, a->env, a->opts.tools);
     if (a->mcp && a->opts.subagent) { /* subagents share the parent's connections, each with its own view */
         free(ag->mcp_scope);
@@ -1829,13 +1883,15 @@ static void install_agent(app_t *a) {
     if (!a->opts.no_tools && !a->opts.subagent && settings_bool("generate_image.enabled", false) &&
         (!a->opts.tools || strvec_contains(a->opts.tools, "generate_image")))
         agent_add_tool(ag, imagegen_tool_new(a));
-    /* discoverable (xd://-mountable) tools added outside tools_register_builtin; MCP tools too */
+    /* discoverable (command-mountable) tools added outside tools_register_builtin; MCP tools too */
     for (size_t i = 0; i < ag->all_tools.n; i++) {
         agent_tool_t *t = ag->all_tools.v[i];
         if (str_eq(t->name, "lsp") || str_eq(t->name, "debug") || str_eq(t->name, "github") || str_eq(t->name, "checkpoint") ||
             str_eq(t->name, "rewind") || str_starts(t->name, "mcp__"))
             t->discoverable = true;
     }
+    /* resolve / reject / propose / report_issue: commands while bash is on, top-level otherwise */
+    if (!a->opts.no_tools) toolcmd_register_special(ag, a->env);
     tools_finalize(ag, a->opts.tools);
 }
 
@@ -1851,7 +1907,7 @@ void app_rebuild_system_prompt(app_t *a) {
         if (a->agent->tools.v[i]->label) json_set_str(labels, a->agent->tools.v[i]->name, a->agent->tools.v[i]->label);
     }
     char *label = app_model_label(a);
-    json_t *xdev_tools = xdev_entries(a->agent);
+    json_t *mounted = toolcmd_entries(a->agent);
     /* sdk.ts appendParts: memory backend instructions, then auto-learn guidance (driven by the tools present) */
     sb_t gen = SB_INIT;
     char *mem = memory_instructions(a);
@@ -1863,13 +1919,13 @@ void app_rebuild_system_prompt(app_t *a) {
     /* mounted MCP route guidance (a routed tool carries its catalog summary on the route line, no catalog line),
      * then the connected servers' instructions */
     strvec_t routed = {0};
-    char *routes = xdev_mcp_route_guidance(a->agent, &routed);
+    char *routes = toolcmd_mcp_guidance(a->agent, &routed);
     if (routes) sb_appendf(&gen, "%s%s", gen.len ? "\n\n" : "", routes);
     free(routes);
     char *mi = a->mcp ? mcp_instructions(a->mcp) : NULL;
     if (mi && *mi) sb_appendf(&gen, "%s%s", gen.len ? "\n\n" : "", mi);
     free(mi);
-    char *xdev_docs = json_len(xdev_tools) ? xdev_prompt_docs_ex(a->agent, &routed) : xstrdup("");
+    char *tc_docs = json_len(mounted) ? toolcmd_prompt_docs(a->agent, &routed) : xstrdup("");
     strvec_free(&routed);
     strvec_t roots = {0};
     if (a->session) roots = session_additional_dirs(a->session);
@@ -1888,9 +1944,9 @@ void app_rebuild_system_prompt(app_t *a) {
                            .skill_desc = skilldesc_render,
                            .skill_desc_ud = a->skilldesc,
                            .tool_labels = labels,
-                           .xdev_tools = xdev_tools,
-                           .xdev_docs = xdev_docs,
-                           .auto_qa = !a->opts.tools && xdev_autoqa_enabled(),
+                           .mounted_commands = mounted,
+                           .tool_command_docs = tc_docs,
+                           .auto_qa = !a->opts.tools && toolcmd_autoqa_enabled(),
                            .tool_refs = refs,
                            .delegation_bias = model_delegation_bias(a->model),
                            .irc_enabled = !a->opts.tools && agent_find_tool(a->agent, "task") != NULL,
@@ -1901,11 +1957,12 @@ void app_rebuild_system_prompt(app_t *a) {
     sb_free(&gen);
     json_free(labels);
     json_free(refs);
-    json_free(xdev_tools);
-    free(xdev_docs);
+    json_free(mounted);
     if (a->plan_mode) {
         json_t *pc = json_obj();
         json_set_str(pc, "writeToolName", "write");
+        json_set_str(pc, "bashToolName", "bash");
+        json_set_bool(pc, "proposeIsCommand", toolcmd_transport_active(a->agent));
         json_set_str(pc, "editToolName", "edit");
         json_set_str(pc, "askToolName", "ask");
         json_set_bool(pc, "askAvailable", agent_find_tool(a->agent, "ask") != NULL);
@@ -1922,9 +1979,10 @@ void app_rebuild_system_prompt(app_t *a) {
         free(pm);
         json_free(pc);
     }
-    /* xdevCatalogNames: the mounted devices count as delivered when block 0 carries the xd:// section */
+    /* toolCommandCatalogNames: the mounted commands count as delivered when block 0 carries the tool-command docs */
     const char *b0 = json_sv(json_at(blocks, 0));
-    xdnotice_base_rebuilt(a, !a->sys_custom && b0 && strstr(b0, "xd://") && xdev_mounted_count(a->agent) > 0);
+    xdnotice_base_rebuilt(a, !a->sys_custom && b0 && *tc_docs && strstr(b0, tc_docs));
+    free(tc_docs);
     agent_set_system_prompt_parts(a->agent, blocks);
     free(label);
     strvec_free(&names);
@@ -2092,7 +2150,9 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!o->subagent) agents_register_main(a);
     a->env->run_subagent = app_run_subagent;
     a->env->plan_mode_active = app_env_plan_mode;
+    a->env->prompt_cache_ttl_ms = app_prompt_cache_ttl;
     a->env->judge = app_tool_judge;
+    a->env->side_usage = app_tool_side_usage;
     a->env->active_model = app_tool_active_model;
     a->evalhost = evalhost_new(a);
     a->env->eval_bridge = app_eval_bridge;
@@ -2612,8 +2672,17 @@ bool app_set_advisor(app_t *a, bool on) {
 }
 
 char *app_job_results_text(app_t *a) {
+    json_t *nd = NULL;
+    char *ntxt = notify_text(a, &nd); /* a job's matches read before its result */
+    json_free(nd);
     json_t *done = jobs_take_finished(a->env->jobs);
     char *txt = json_len(done) ? jobs_render_results(done) : NULL;
+    if (ntxt) {
+        char *both = txt ? xasprintf("%s\n\n%s", ntxt, txt) : xstrdup(ntxt);
+        free(ntxt);
+        free(txt);
+        txt = both;
+    }
     json_free(a->job_batch);
     a->job_batch = json_len(done) ? job_batch_details(done) : NULL;
     json_free(done);
@@ -2660,7 +2729,7 @@ char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type,
         while (mono_ms() < deadline && !agents_has_pending(a) &&
                !jobs_wait_any(a->env->jobs, NULL, MIN(500, MAX(1, deadline - mono_ms()))) && jobs_running(a->env->jobs)) {}
     }
-    if (jobs_undelivered(a->env->jobs) || agents_has_pending(a)) {
+    if (jobs_undelivered(a->env->jobs) || jobs_has_notices(a->env->jobs) || agents_has_pending(a)) {
         char *t = app_job_results_text(a);
         if (t) {
             *custom_type = "async-result";
@@ -3589,7 +3658,7 @@ int app_prompt_ex(app_t *a, const char *text, json_t *images, json_t *notices) {
     json_arr_foreach(notices, i, img) json_push(msgs, json_clone(img));
     json_free(notices);
     a->think_force = a->forced_step == 0; /* the turn's first request (a pending /force directive wins) */
-    /* the pending xd:// mount delta rides with the next user prompt, right before it */
+    /* the pending tool-command mount delta rides with the next user prompt, right before it */
     json_t *xn = xdnotice_take(a);
     if (xn) json_push(msgs, xn);
     json_t *sn = autolearn_take_skill_notice(a); /* skills written or found since the prompt listed them */
@@ -4270,6 +4339,7 @@ app_t *app_subagent_new_at(app_t *parent, const char *agent_name, const char *mo
     /* subagents share the parent's artifact id space and directory (omp adoptArtifactManager) */
     artifacts_unref(child->env->artifacts);
     child->env->artifacts = artifacts_ref(parent->env->artifacts);
+    app_bind_local(child); /* the parent's local:// root (spills included) */
     child->thinking = parent->thinking;
     child->agent->thinking = parent->thinking;
     child->auto_thinking = parent->auto_thinking;

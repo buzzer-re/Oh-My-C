@@ -109,7 +109,7 @@ static void test_seq(const char *dir) {
     out_meta_from_summary(&meta, &sum, "tail", 1, 0);
     char *notice = out_format_notice(meta);
     CHECK_STR(notice, "\n\n[Showing lines 1-4317 and 24882-30000 of 30000; 20,564 middle lines (114.9KB) elided. Read "
-                      "artifact://0 for full output]");
+                      "local://0.log for full output]");
     char *warn = out_format_warning(meta);
     CHECK(warn && !strncmp(warn, "Showing lines 1-4317", 20));
     char *text = xasprintf("%s%s", sum.output, notice);
@@ -146,12 +146,12 @@ static void test_columns(const char *dir) {
     json_t *meta = NULL;
     out_meta_from_summary(&meta, &sum, "tail", 1, 0);
     char *notice = out_format_notice(meta);
-    CHECK_STR(notice, "\n\n[Some lines truncated to 768 bytes. Use artifact://1:raw:3-3 to read line 3 whole; cut lines run to "
+    CHECK_STR(notice, "\n\n[Some lines truncated to 768 bytes. Use local://1.log:raw:3-3 to read line 3 whole; cut lines run to "
                       "line 39, each read the same way]");
     free(notice);
     out_meta_column_raw_cap(meta, 50 * 1024);
     notice = out_format_notice(meta);
-    CHECK_STR(notice, "\n\n[Some lines truncated to 768 bytes. Use artifact://1:raw:3-3 to read line 3 uncut, byte-capped at 50.0KB; "
+    CHECK_STR(notice, "\n\n[Some lines truncated to 768 bytes. Use local://1.log:raw:3-3 to read line 3 uncut, byte-capped at 50.0KB; "
                       "cut lines run to line 39, each read the same way]");
     free(notice);
     json_free(meta);
@@ -268,7 +268,7 @@ static void test_artifact_cap(const char *dir) {
     json_t *meta = NULL;
     out_meta_from_summary(&meta, &sum, "tail", 1, 0);
     char *notice = out_format_notice(meta);
-    CHECK(strstr(notice, "Read artifact://2 for a head/tail sample of the output; 400B from its middle was not saved"));
+    CHECK(strstr(notice, "Read local://2.log for a head/tail sample of the output; 400B from its middle was not saved"));
     free(notice);
     json_free(meta);
     out_summary_free(&sum);
@@ -291,7 +291,7 @@ static void test_truncate(void) {
     json_t *meta = NULL;
     out_meta_from_trunc(&meta, &r, "middle", 1, 0, "3", 0, 0);
     char *n = out_format_notice(meta);
-    CHECK(strstr(n, "middle lines") && str_ends(n, "Read artifact://3 for full output]"));
+    CHECK(strstr(n, "middle lines") && str_ends(n, "Read local://3.log for full output]"));
     free(n);
     json_free(meta);
     out_trunc_free(&r);
@@ -300,7 +300,7 @@ static void test_truncate(void) {
     out_trunc_free(&r);
     bool capped;
     char *c = out_enforce_inline_cap(b.s, b.len, 1000, "7", &capped);
-    CHECK(capped && strstr(c, "B elided") && str_ends(c, "[raw output: artifact://7]"));
+    CHECK(capped && strstr(c, "B elided") && str_ends(c, "[raw output: local://7.log]"));
     free(c);
     sb_free(&b);
 }

@@ -110,5 +110,8 @@ rm -f "$T/wsagent/config.yml"
 out=$(ws_search web/kimi "no key")
 [[ "$out" == *"Error: Kimi web search is unavailable. Configure its credentials or select the automatic"* ]] \
     && echo "   ok  web search: explicit unavailable" || { echo "   FAIL web search explicit unavailable: $out"; fail=1; }
+# providers.webKeyless off: keyless services are skipped (omp d1ab1a86c9)
+mkdir -p "$T/wkagent" && cp "$T/agent/models.yml" "$T/wkagent/" && printf 'providers:\n  webKeyless: false\n' > "$T/wkagent/config.yml"
+check "web search keyless off" "providers.webKeyless is off. Configure a search credential or turn providers.webKeyless on."  env -u PARALLEL_API_KEY -u EXA_API_KEY OMC_CODING_AGENT_DIR="$T/wkagent" timeout 30 "$B" --model mock/mock-1 --no-session -p 'call:web_search:{"query":"x"}'
 kill $WSPID 2>/dev/null
 wait $WSPID 2>/dev/null

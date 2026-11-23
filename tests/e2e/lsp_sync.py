@@ -3,7 +3,8 @@
 open document is closed for a read-only query and fails an action that writes edits; documents unused for the idle window close before the next
 open. Uses the fake server tests/e2e/bin-lsp/rust-analyzer (FAKE_LSP_LOG).
 Usage: lsp_sync.py <omc> <mock request log> <models.yml> <dir>"""
-import json, os, shutil, subprocess, sys
+import json
+import shlex, os, shutil, subprocess, sys
 
 omc, reqlog, models, root = sys.argv[1:5]
 here = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +28,7 @@ def check(name, ok, got=""):
         print(f"FAIL {name}: {str(got)[-600:]!r}")
 
 
-def lsp(**args): return ["write", {"path": "xd://lsp", "content": json.dumps(args)}]
+def lsp(**args): return ["bash", {"command": "lsp -j " + shlex.quote(json.dumps(args))}]  # a bash tool command
 
 
 def run(script, extra=None):

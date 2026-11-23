@@ -118,12 +118,15 @@ void agent_tool_free(agent_tool_t *t) {
  * `i: {type: string, description: "concise intent"}` property (required unless the tool opts for optional/omit);
  * the harness strips it before validation/execution and reports it on tool_execution_start. */
 
-static int g_intent_tracing = -1; /* -1 = default (on unless PI_NO_INTENT=1) */
+static int g_intent_tracing = -1; /* -1 = unset: follows the interactive host (omp intentTracingActive) */
+static bool g_interactive_host;
 
 void agent_set_intent_tracing(bool on) { g_intent_tracing = on ? 1 : 0; }
+void agent_reset_intent_tracing(void) { g_intent_tracing = -1; }
+void agent_set_interactive_host(bool on) { g_interactive_host = on; }
 
 bool agent_intent_tracing(void) {
-    if (g_intent_tracing == 0) return false;
+    if (g_intent_tracing == 0 || (g_intent_tracing < 0 && !g_interactive_host)) return false;
     const char *no = getenv("PI_NO_INTENT");
     if (no && !strcmp(no, "1")) return false;
     no = getenv("OMC_NO_INTENT");
@@ -697,25 +700,8 @@ agent_tool_t *agent_find_tool(agent_t *a, const char *name) {
     return NULL;
 }
 
-/* sdk.ts resolveDeviceSpelling: a name the exact lookup missed may be a mounted xd:// device called as `xd://<name>` */
-static agent_tool_t *find_device_spelling(agent_t *a, const char *name) {
-    const char *bare = !strncasecmp(name, "xd://", 5) ? name + 5 : name;
-    for (size_t i = 0; i < a->all_tools.n; i++)
-        if (a->all_tools.v[i]->mounted && !strcmp(a->all_tools.v[i]->name, bare)) return a->all_tools.v[i];
-    return NULL;
-}
-
-/* the tool a model's call names: the exact tool, a mounted device spelled `xd://<name>`, then (omp dd536ce059) the
- * prefix spelled with underscores by a model whose tool-name charset cannot carry `://` (`xd_recall`, `xd__recall`) */
-static agent_tool_t *find_call_tool(agent_t *a, const char *name) {
-    agent_tool_t *t = agent_find_tool(a, name);
-    if (t) return t;
-    if ((t = find_device_spelling(a, name))) return t;
-    if (strncasecmp(name, "xd_", 3) != 0) return NULL;
-    const char *p = name + 2;
-    while (*p == '_') p++;
-    return *p ? find_device_spelling(a, p) : NULL;
-}
+/* the tool a model's call names: the exact tool (a mounted tool command's exact name is the name itself) */
+static agent_tool_t *find_call_tool(agent_t *a, const char *name) { return agent_find_tool(a, name); }
 
 void agent_remove_tool(agent_t *a, const char *name) {
     pthread_mutex_lock(&a->mu);
@@ -1465,8 +1451,8 @@ static void tool_update_cb(tool_ctx_t *ctx, const tool_result_t *partial) {
 }
 
 /* agent-loop.ts formatToolNotFoundMessage / suggestToolNames: `Tool <name> not found`, plus the tools whose name is a
- * tail of it (the last `__` and `_` segments, at least 3 chars, longest first): advertised tools, then mounted xd://
- * devices. Advisory only; it never selects a tool. */
+ * tail of it (the last `__` and `_` segments, at least 3 chars, longest first): advertised tools, then mounted tool
+ * commands. Advisory only; it never selects a tool. */
 static char *tool_not_found_message(agent_t *a, const char *name) {
     strvec_t cand = {0}, seg = {0}, match = {0};
     pthread_mutex_lock(&a->mu);

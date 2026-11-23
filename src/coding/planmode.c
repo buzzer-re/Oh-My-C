@@ -1,6 +1,7 @@
 /* planmode.c - plan mode state, plan files and approval helpers (ports of omp plan-mode/approved-plan.ts,
  * plan-files.ts, plan-autosave.ts, the plan-mode parts of AgentSession / InteractiveMode and
  * tools/resolve.ts's propose dispatch, plus model-controls.ts getRoleModelCycle / applyRoleModel). */
+#include "tools/toolcmd.h"
 #include "coding/app.h"
 
 #include "config/settings.h"
@@ -514,7 +515,7 @@ char *app_plan_approved_prompt(app_t *a, const char *path, const char *content, 
     return msg;
 }
 
-/* ---------- xd://propose handlers ---------- */
+/* ---------- `propose` handlers ---------- */
 
 /* review-mode hosts (the TUI): AgentSession.preparePlanForReview; the next model request is aborted
  * silently (handlePlanApproval's #abortPlanApprovalTurnSilently) so the model does not loop */
@@ -558,7 +559,7 @@ static char *propose_auto(tool_env_t *env, const char *title, bool *is_error, js
         if (!str_eq(a->plan_file, path)) app_set_plan_file(a, path);
         char *nerr = NULL;
         char *norm = app_plan_normalize_title(rt, &nerr);
-        char *r = xasprintf("Plan refinement requested. Update the plan file, then write %s to xd://propose again when ready.",
+        char *r = xasprintf("Plan refinement requested. Update the plan file, then submit %s with `propose` again when ready.",
                             norm ? norm : rt);
         *details = json_obj();
         json_set_str(*details, "planFilePath", path);
@@ -672,21 +673,15 @@ void app_plan_note_user_turn(app_t *a) {
 
 void app_plan_note_tool_end(app_t *a, const char *tool, const tool_result_t *res, bool is_error) {
     a->plan_reminder_awaiting = false;
-    const json_t *x = res && !is_error ? json_get(res->details, "xdev") : NULL;
-    if (str_eq(tool, "ask") || (str_eq(tool, "write") && str_eq(json_get_str(x, "tool"), "propose"))) {
+    /* a submitted plan: a direct `propose`, or one run as a bash command (proposeDispatchDetails) */
+    if (str_eq(tool, "ask") || (res && toolcmd_propose_details(tool, res->details, is_error))) {
         a->plan_reminder_count = 0;
         a->plan_reminder_awaiting = false;
     }
 }
 
 static bool is_decision_call(const json_t *blk) {
-    const char *name = json_get_str(blk, "name");
-    if (str_eq(name, "ask")) return true;
-    if (!str_eq(name, "write")) return false;
-    const json_t *args = json_get(blk, "arguments");
-    const char *path = json_get_str(args, "path");
-    if (!path) path = json_get_str(args, "file_path");
-    return path && !strcasecmp(path, "xd://propose");
+    return str_eq(json_get_str(blk, "name"), "ask") || toolcmd_is_propose_call(blk);
 }
 
 static bool plan_decision_reminder(app_t *a) {
@@ -713,7 +708,7 @@ static bool plan_decision_reminder(app_t *a) {
             a->plan_reminder_count = 0;
             a->plan_reminder_awaiting = false;
         } else if (!any_tool && !a->plan_reminder_awaiting && a->plan_reminder_count < PLAN_MODE_REMINDER_MAX &&
-                   agent_find_tool(a->agent, "ask") && agent_find_tool(a->agent, "write")) {
+                   agent_find_tool(a->agent, "ask") && agent_find_tool(a->agent, "propose")) {
             fire = true;
         }
     }
@@ -722,9 +717,10 @@ static bool plan_decision_reminder(app_t *a) {
     a->plan_reminder_count++;
     a->plan_reminder_awaiting = true;
     a->plan_force_tool_choice = true;
-    /* upstream renders only askToolName: the write tool name comes out empty */
     json_t *ctx = json_obj();
     json_set_str(ctx, "askToolName", "ask");
+    json_set_str(ctx, "bashToolName", "bash");
+    json_set_bool(ctx, "proposeIsCommand", toolcmd_transport_active(a->agent));
     char *txt = prompt_render("coding-agent/prompts/system/plan-mode-tool-decision-reminder.md", ctx);
     json_free(ctx);
     json_t *m = msg_developer_text(txt);

@@ -558,6 +558,17 @@ static char *openai_error_detail(const char *body) {
     return sb_detach(&b);
 }
 
+/* searchReasoningEffort: the web role's level as the wire `reasoning.effort`, clamped to the model's ladder and mapped
+ * like chat requests; NULL (omit the field) when unset, auto, off, inherit, or the model does not reason */
+static const char *search_reasoning_effort(const ai_model_t *m, const char *level) {
+    if (!m || !m->reasoning || !level || !*level) return NULL;
+    ai_effort_t e;
+    if (effort_parse(level, &e) != 0 || e == EFFORT_OFF) return NULL;
+    ai_effort_t c = model_clamp_effort(m, e);
+    if (c == EFFORT_OFF) return NULL;
+    return oai_effort_wire(m, NULL, effort_name(c));
+}
+
 static json_t *s_openai(const ws_params_t *p, ws_err_t *e) {
     const ai_model_t *m = p->model;
     if (str_eq(key_kind(m->provider), "oauth")) {
@@ -588,10 +599,13 @@ static json_t *s_openai(const ws_params_t *p, ws_err_t *e) {
     json_push_str(inc, "web_search_call.action.sources");
     json_set(body, "include", inc);
     json_set_bool(body, "store", false);
+    /* effort follows the web role's level; `mode` is the catalog pro alias */
     const char *rmode = m->raw ? json_get_str(m->raw, "reasoningMode") : NULL;
-    if (rmode) {
+    const char *reff = search_reasoning_effort(m, p->level);
+    if (rmode || reff) {
         json_t *rs = json_obj();
-        json_set_str(rs, "mode", rmode);
+        if (reff) json_set_str(rs, "effort", reff);
+        if (rmode) json_set_str(rs, "mode", rmode);
         json_set(body, "reasoning", rs);
     }
     if (!isnan(p->max_tokens)) json_set_num(body, "max_output_tokens", p->max_tokens);
@@ -1038,6 +1052,12 @@ static json_t *s_codex(const ws_params_t *p, ws_err_t *e) {
     json_set_str(tc, "type", "web_search");
     json_set(body, "tool_choice", tc);
     json_set_str(body, "instructions", p->system_prompt);
+    const char *reff = search_reasoning_effort(m, p->level);
+    if (reff) {
+        json_t *rs = json_obj();
+        json_set_str(rs, "effort", reff);
+        json_set(body, "reasoning", rs);
+    }
     char *payload = json_dump(body, 0);
     json_free(body);
     http_resp_t r;
@@ -3256,6 +3276,17 @@ static const provider_t GROUNDED[] = {
 /* SearchProvider.label (codex reads "OpenAI" there, "OpenAI Codex" in the renderer labels) */
 static const char *provider_label(const char *id) { return str_eq(id, "codex") ? "OpenAI" : label_of(id); }
 
+/* SearchProvider.isKeyless: the search would reach a third party without a user credential or endpoint */
+static bool provider_keyless(const provider_t *prov, const ai_model_t *m) {
+    const char *id = prov->id;
+    if (str_eq(id, "duckduckgo")) return true;
+    if (str_eq(id, "parallel")) return !env_get("PARALLEL_API_KEY") && !key_kind("parallel");
+    if (str_eq(id, "exa")) return !env_get("EXA_API_KEY") && !key_kind("exa");
+    if (str_eq(id, "keenable")) return !has_keenable(m);
+    if (str_eq(id, "perplexity")) return !has_perplexity(m);
+    return false;
+}
+
 static const provider_t *find_provider(const provider_t *tab, size_t n, const char *id) {
     for (size_t i = 0; i < n; i++)
         if (str_eq(tab[i].id, id)) return &tab[i];
@@ -3268,6 +3299,35 @@ typedef struct {
     char *id, *label; /* provider meta */
     ws_err_t err;
 } failure_t;
+
+/* engines (`provider/id`) that answered HTTP 429, with when the automatic chain may try them again: a keyless
+ * engine's free tier rate-limits for minutes, so retrying it on every call only adds latency (omp 1d9d5d1d46) */
+#define RATE_LIMIT_COOLDOWN_MS (5 * 60 * 1000)
+static pthread_mutex_t g_cool_mu = PTHREAD_MUTEX_INITIALIZER;
+static json_t *g_cooldown; /* {"provider/id": until_ms} */
+
+static bool cooldown_active(const ai_model_t *m) {
+    char *key = xasprintf("%s/%s", m->provider, m->id);
+    pthread_mutex_lock(&g_cool_mu);
+    bool active = false;
+    json_t *v = json_get(g_cooldown, key);
+    if (v) {
+        if (json_d2i(v->u.num.d) > now_ms()) active = true;
+        else json_del(g_cooldown, key);
+    }
+    pthread_mutex_unlock(&g_cool_mu);
+    free(key);
+    return active;
+}
+
+static void cooldown_start(const ai_model_t *m) {
+    char *key = xasprintf("%s/%s", m->provider, m->id);
+    pthread_mutex_lock(&g_cool_mu);
+    if (!g_cooldown) g_cooldown = json_obj();
+    json_set_int(g_cooldown, key, now_ms() + RATE_LIMIT_COOLDOWN_MS);
+    pthread_mutex_unlock(&g_cool_mu);
+    free(key);
+}
 
 static char *format_failure(const failure_t *f);
 
@@ -3549,12 +3609,18 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
                      .timeout_ms = (secs > 0 ? MIN(secs, (int64_t)300) : 60) * 1000};
     VEC(failure_t) fails = {0};
     int available = 0;
+    bool keyless_skipped = false;
     char *text = NULL;
     const char *failed_provider = "none";
     for (size_t i = 0; i < exp.n && !text; i++) {
         const ai_model_t *m = exp.v[i].model;
         failure_t f = {xstrdup(m->id), xstrdup(m->name ? m->name : m->id), {0}};
         const provider_t *prov = NULL;
+        if (!model_sel && cooldown_active(m)) {
+            fail_plain(&f.err, xasprintf("skipped: rate-limited (429) within the last %d minutes", RATE_LIMIT_COOLDOWN_MS / 60000));
+            vec_push(&fails, f);
+            continue;
+        }
         if (is_hosted(m)) {
             if (!exp.v[i].explicit_) {
                 free(f.id);
@@ -3581,6 +3647,13 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
                 fail_plain(&f.err, xasprintf("%s web search grounding is not supported by omc.", label_of(model_web_search(m))));
         } else {
             fail_plain(&f.err, xasprintf("Model %s/%s does not support web search", m->provider, m->id));
+        }
+        /* providers.webKeyless off: only a per-request selector reaches a keyless service */
+        if (prov && !model_sel && !settings_bool("providers.webKeyless", true) && provider_keyless(prov, m)) {
+            keyless_skipped = true;
+            free(f.id);
+            free(f.label);
+            continue;
         }
         if (prov) {
             free(f.id);
@@ -3629,6 +3702,11 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
                             sb_appendf(&b, "%s%s failed (%s)", k ? " and " : "", json_get_str(fx, "label"), json_get_str(fx, "reason"));
                         strvec_push_own(&notes, sb_detach(&b));
                     }
+                    const char *answer = json_get_str(r, "answer");
+                    if (!str_eq(mr_model_kind(m), "search") && answer && !str_blank(answer))
+                        strvec_push_own(&notes, xasprintf("synthesized answer by %s/%s hosted search, not a result list; check "
+                                                          "claims against the cited sources",
+                                                          m->provider, m->id));
                     text = format_for_llm(r, &notes);
                     strvec_free(&notes);
                     *details = json_obj();
@@ -3655,13 +3733,16 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
             break;
         }
         failed_provider = prov ? prov->id : "none";
+        if (f.err.prov && f.err.status == 429) cooldown_start(m);
         vec_push(&fails, f);
     }
     if (!text) {
         char *msg;
         if (available == 0 && fails.n == 0)
-            msg = model_sel ? xasprintf("No web search model matches selector \"%s\".", model_sel)
-                            : xstrdup("No web search model configured.");
+            msg = model_sel        ? xasprintf("No web search model matches selector \"%s\".", model_sel)
+                  : keyless_skipped ? xstrdup("No configured web search service is available, and providers.webKeyless is off. "
+                                              "Configure a search credential or turn providers.webKeyless on.")
+                                    : xstrdup("No web search model configured.");
         else if (fails.n > 1) {
             sb_t b = SB_INIT;
             sb_append(&b, "All web search providers failed: ");

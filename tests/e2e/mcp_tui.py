@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Drive /mcp and /ssh in the interactive TUI under a pty (WP-18): the add wizard end to end on a stdio
 server (name from the arguments, transport, command, arguments, connection test, scope, review, save),
-/mcp test, /mcp list, wizard cancel with Ctrl+C and /ssh add; the xd:// mount notices (the `xdev: xd://: mounted …` /
-`unmounted …` status lines and, with a request log, the model-facing xdev-mount-notice before the next prompt).
+/mcp test, /mcp list, wizard cancel with Ctrl+C and /ssh add; the tool-command mount notices (the
+`toolCommands: Tool commands: added …` / `removed …` status lines and, with a request log, the model-facing
+tool-command-mount-notice before the next prompt).
 
 usage: mcp_tui.py <omc> <mock_mcp.py> [mock request log]
 Runs in a throwaway project dir; OMC_CODING_AGENT_DIR comes from the caller. Prints "mcp tui ok" or what the
@@ -91,7 +92,7 @@ if cfg.get("mcpServers", {}).get("demo") != {"type": "stdio", "command": "python
 if 'Added server "demo" to project config' not in text() or "Successfully connected to server" not in text():
     print("mcp tui FAIL: add result:", text()[-800:])
     finish(1)
-if "xdev: xd://: mounted mcp__demo_echo_text" not in text():
+if "toolCommands: Tool commands: added mcp__demo_echo_text" not in text():
     print("mcp tui FAIL: no mount notice:", text()[-800:])
     finish(1)
 step(["/mcp test demo", "\r"], 'Successfully connected to "demo"', 20)
@@ -105,15 +106,15 @@ hosts = json.load(open(os.path.join(proj, ".omc", "ssh.json")))
 if hosts != {"hosts": {"box": {"host": "10.1.2.3", "port": 2200}}}:
     print("mcp tui FAIL: ssh.json", json.dumps(hosts))
     finish(1)
-# the model learns of an unmount of a device its prompt listed with the next prompt
+# the model learns of an unmount of a command its prompt listed with the next prompt
 step(["say:first", "\r"], "first")
-step(["/mcp disable demo", "\r"], "xdev: xd://: unmounted mcp__demo_echo_text")
+step(["/mcp disable demo", "\r"], "toolCommands: Tool commands: removed mcp__demo_echo_text")
 step(["say:second", "\r"], "second")
 if reqlog:
     time.sleep(0.5)
     reqs = [json.loads(l) for l in open(reqlog)]
     last = [r for r in reqs if r.get("tools") and "say:second" in json.dumps(r["messages"][-1:])]
-    want = "<system-notice>\nxd:// device inventory changed.\nUnmounted; writes fail:\n- xd://mcp__demo_echo_text\n</system-notice>"
+    want = "<system-notice>\nTool command inventory changed.\nUnavailable; invocations fail:\n- `mcp__demo_echo_text`\n</system-notice>"
     msgs = last[-1]["messages"] if last else []
     if len(msgs) < 2 or json.dumps(msgs[-2]) != json.dumps({"role": "user", "content": [{"type": "text", "text": want}]}):
         print("mcp tui FAIL: mount notice request:", json.dumps(msgs[-2:])[:800])

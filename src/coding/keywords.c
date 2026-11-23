@@ -308,7 +308,7 @@ json_t *keywords_notices(app_t *a, const char *text) {
             ctx = json_obj();
             json_t *tools = json_arr();
             pthread_mutex_lock(&a->agent->mu);
-            /* getEnabledToolNames: the active tools plus the mounted xd:// devices */
+            /* getEnabledToolNames: the active tools plus the mounted tool commands */
             for (size_t t = 0; t < a->agent->tools.n; t++) json_push(tools, json_str(a->agent->tools.v[t]->name));
             for (size_t t = 0; t < a->agent->all_tools.n; t++)
                 if (a->agent->all_tools.v[t]->mounted) json_push(tools, json_str(a->agent->all_tools.v[t]->name));

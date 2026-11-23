@@ -880,7 +880,6 @@ strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
         }
     }
     push_url_doc(&out, "history", NULL, NULL);
-    push_url_doc(&out, "artifact", NULL, NULL);
     push_url_doc(&out, "local", NULL, NULL);
     push_url_doc(&out, "proc", NULL, NULL);
     if (h->settings_approval) push_url_doc(&out, "cfg", "omp settings", "omc settings");
@@ -899,8 +898,8 @@ strvec_t internal_url_docs(const sysprompt_url_host_t *h) {
 }
 
 /* InternalUrlRouter.reference(): the protocol handlers' promptReference entries in registration order (proc, ssh
- * when the ssh CLI is installed, issue/pr when gh is); the body of xd://read/urls, inlined into the system prompt
- * when `read` is off */
+ * when the ssh CLI is installed, issue/pr when gh is, help); the body of help://read/urls, inlined into the system
+ * prompt when `read` is off */
 strvec_t internal_url_reference(void) {
     strvec_t out = {0};
     push_url_doc(&out, "proc-reference", NULL, NULL);
@@ -910,6 +909,7 @@ strvec_t internal_url_reference(void) {
     char *gh = which("gh");
     if (gh) push_url_doc(&out, "issue-reference", NULL, NULL);
     free(gh);
+    push_url_doc(&out, "help-reference", NULL, NULL);
     return out;
 }
 
@@ -1046,22 +1046,24 @@ json_t *build_system_prompt(const sysprompt_opts_t *o) {
         json_set_str(ti, "label", lbl ? lbl : "");
         json_push(info, ti);
     }
-    /* xd://-mounted tools count as present for prompt gates and resolve to their xd:// URL */
+    /* mounted tool commands count as present for prompt gates and are referred to by their bare name, which is also
+     * the command to run; the Tool Inventory list stays limited to tools with a top-level definition */
     json_t *xe;
-    json_arr_foreach(o->xdev_tools, xi, xe) {
+    bool dynamic = false;
+    json_arr_foreach(o->mounted_commands, xi, xe) {
         const char *n = json_get_str(xe, "name");
+        dynamic |= json_get_bool(xe, "dynamic", false);
         if (!n || json_get(refs, n)) continue;
         json_push_str(tools, n);
-        char *u = xasprintf("xd://%s", n);
-        json_set_str(refs, n, u);
-        free(u);
+        json_set_str(refs, n, n);
     }
     json_set(data, "tools", tools);
     json_set(data, "toolRefs", refs);
     json_set(data, "toolInfo", info);
     json_set_bool(data, "toolListMode", true);
-    json_set(data, "xdevTools", o->xdev_tools ? json_clone(o->xdev_tools) : json_arr());
-    json_set_str(data, "xdevDocs", o->xdev_docs ? o->xdev_docs : "");
+    json_set(data, "mountedCommands", o->mounted_commands ? json_clone(o->mounted_commands) : json_arr());
+    json_set_bool(data, "hasDynamicToolCommands", dynamic);
+    json_set_str(data, "toolCommandDocs", o->tool_command_docs ? o->tool_command_docs : "");
     json_set_bool(data, "autoQaEnabled", o->auto_qa);
     json_set_bool(data, "intentTracing", agent_intent_tracing());
     json_set_str(data, "intentField", agent_intent_tracing() ? INTENT_FIELD : "");

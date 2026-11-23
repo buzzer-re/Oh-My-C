@@ -14,7 +14,7 @@ ports of a named omp file, and the docs below always say which one.
 | [build.md](build.md) | `make`, dependencies, hardening flags, embedded assets, dev-only tools, `make lib` and the public C API |
 | [ai.md](ai.md) | Provider layer: model catalog, API registry, stream events, every provider and transport, credentials and login flows, retries, model roles |
 | [agent.md](agent.md) | Agent loop, tool execution, hooks, sessions (JSONL tree, compaction, branching), system prompt and discovery, TTSR, goal mode, advisor, memory, titles, plan mode, checkpoints, subagents and jobs |
-| [tools.md](tools.md) | Every tool and its omp counterpart, `xd://` devices, internal URLs, output capture and artifacts, the eval kernel protocol, MCP/LSP/DAP clients |
+| [tools.md](tools.md) | Every tool and its omp counterpart, tool commands, internal URLs, output capture and artifacts, the eval kernel protocol, MCP/LSP/DAP clients |
 | [tui.md](tui.md) | TUI framework (components, differential renderer, terminal), theme and symbols, UI modules, and how parity with omp is checked |
 | [modes.md](modes.md) | Interactive, print/json, RPC, ACP and library embedding |
 | [testing.md](testing.md) | Unit tests, e2e suite and mocks, side-by-side TUI harness, request parity diff, golden captures, adding tests |

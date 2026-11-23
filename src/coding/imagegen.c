@@ -12,6 +12,7 @@
 #include "img/img.h"
 #include "net/http.h"
 #include "prompt/template.h"
+#include "tools/gh.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -326,6 +327,40 @@ static int decode_images(json_t *v, gen_result_t *r, int *http_status, char **er
 }
 
 /* resolveOpenAIImageSize */
+/* atRequestedSize: providers treat the size as a hint, so a different one is resampled to the requested WIDTHxHEIGHT
+ * (JPEG stays JPEG at quality 92, anything else becomes PNG); the image then reports the requested size */
+static void at_requested_size(gen_image_t *gi, const char *requested) {
+    int w = 0, h = 0;
+    if (sscanf(requested, "%dx%d", &w, &h) != 2 || w <= 0 || h <= 0) return;
+    size_t n = 0;
+    unsigned char *bytes = base64_decode(gi->data, strlen(gi->data), &n);
+    img_t im = {0};
+    char *err = NULL;
+    if (bytes && img_decode(bytes, n, &im, NULL, &err) == 0) {
+        if (im.w != w || im.h != h) {
+            img_t rs = {0};
+            if (img_resize(&im, w, h, &rs) == 0) {
+                bool jpeg = str_eq(gi->mime, "image/jpeg");
+                size_t len = 0;
+                uint8_t *enc = jpeg ? img_jpeg_encode(&rs, 92, &len) : img_png_encode(&rs, 6, &len);
+                if (enc) {
+                    free(gi->data);
+                    gi->data = base64_encode(enc, len);
+                    free(gi->mime);
+                    gi->mime = xstrdup(jpeg ? "image/jpeg" : "image/png");
+                    free(enc);
+                }
+                img_free(&rs);
+            }
+        }
+        img_free(&im);
+        free(gi->size);
+        gi->size = xstrdup(requested);
+    }
+    free(err);
+    free(bytes);
+}
+
 static const char *openai_size(const char *aspect, const char *size) {
     if (size) return size;
     if (!aspect) return NULL;
@@ -828,56 +863,60 @@ static int ig_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, t
                           skipped.len ? " Skipped: " : "", sb_cstr(&skipped), skipped.len ? "." : "");
         sb_free(&att);
     } else {
-        /* buildToolResult: images saved to the temp dir */
-        json_t *paths = json_arr(), *images = json_arr();
+        /* buildToolResult: no image is an error; each image at the requested size, saved to the temp dir
+         * (omp-image-<Bun.hash>.<ext>) and returned as an image block after the text */
+        const char *model_ran = res.model ? res.model : ran->id;
+        if (!res.n) {
+            tool_result_error(out, "%s/%s returned no image.%s%s", ran->provider, model_ran, res.text ? "\n\n" : "",
+                              res.text ? res.text : "");
+            goto done;
+        }
+        json_t *paths = json_arr();
         const char *tmp = getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
         for (size_t i = 0; i < res.n; i++) {
+            if (json_get_str(args, "image_size")) at_requested_size(&res.v[i], json_get_str(args, "image_size"));
             const char *mt = res.v[i].mime;
             const char *ext = str_eq(mt, "image/jpeg") ? "jpg" : str_eq(mt, "image/gif") ? "gif" : str_eq(mt, "image/webp") ? "webp" : "png";
-            char *sf = snowflake_next();
-            char *p = xasprintf("%s/omc-image-%s.%s", tmp, sf, ext);
-            free(sf);
             size_t n = 0;
             unsigned char *raw = base64_decode(res.v[i].data, strlen(res.v[i].data), &n);
+            char *p = xasprintf("%s/omc-image-%llx.%s", tmp, (unsigned long long)gh_wyhash(raw ? raw : (const unsigned char *)"", raw ? n : 0, 0), ext);
             if (raw) fs_write_atomic(p, raw, n, 0644);
             free(raw);
             json_push_str(paths, p);
-            json_t *gi = json_obj();
-            json_set_str(gi, "data", res.v[i].data);
-            json_set_str(gi, "mimeType", mt);
-            json_push(images, gi);
             free(p);
         }
-        const char *model_ran = res.model ? res.model : ran->id;
         sb_t t = SB_INIT;
-        if (!res.n) sb_appendf(&t, "No image data returned.%s%s", res.text ? "\n\n" : "", res.text ? res.text : "");
-        else {
-            sb_appendf(&t, "Provider: %s\n", ran->provider);
-            if (str_eq(model_ran, ran->id)) sb_appendf(&t, "Model: %s\n", model_ran);
-            else sb_appendf(&t, "Model: %s (catalog entry %s/%s)\n", model_ran, ran->provider, ran->id);
-            sb_appendf(&t, "Generated %zu image(s):", res.n);
-            const json_t *p;
-            json_arr_foreach(paths, k, p) {
-                const gen_image_t *gi = &res.v[k];
-                sb_appendf(&t, "\n  %s", json_sv(p));
-                if (gi->size || gi->quality)
-                    sb_appendf(&t, " (%s%s%s%s)", gi->size ? gi->size : "", gi->size && gi->quality ? ", " : "",
-                               gi->quality ? "quality " : "", gi->quality ? gi->quality : "");
-            }
-            if (res.text) {
-                char *tt = str_trim(res.text);
-                sb_appendf(&t, "\n\n%s", tt);
-                free(tt);
-            }
+        sb_appendf(&t, "Provider: %s\n", ran->provider);
+        if (str_eq(model_ran, ran->id)) sb_appendf(&t, "Model: %s\n", model_ran);
+        else sb_appendf(&t, "Model: %s (catalog entry %s/%s)\n", model_ran, ran->provider, ran->id);
+        sb_appendf(&t, "Generated %zu image(s):", res.n);
+        const json_t *p;
+        json_arr_foreach(paths, k, p) {
+            const gen_image_t *gi = &res.v[k];
+            sb_appendf(&t, "\n  %s", json_sv(p));
+            if (gi->size || gi->quality)
+                sb_appendf(&t, " (%s%s%s%s)", gi->size ? gi->size : "", gi->size && gi->quality ? ", " : "",
+                           gi->quality ? "quality " : "", gi->quality ? gi->quality : "");
+        }
+        if (res.text) {
+            char *tt = str_trim(res.text);
+            sb_appendf(&t, "\n\n%s", tt);
+            free(tt);
         }
         tool_result_text(out, sb_cstr(&t));
         sb_free(&t);
+        for (size_t i = 0; i < res.n; i++) {
+            json_t *blk = json_obj();
+            json_set_str(blk, "type", "image");
+            json_set_str(blk, "data", res.v[i].data);
+            json_set_str(blk, "mimeType", res.v[i].mime);
+            json_push(out->content, blk);
+        }
         json_t *d = json_obj();
         json_set_str(d, "provider", ran->provider);
         json_set_str(d, "model", model_ran);
         json_set_int(d, "imageCount", (int64_t)res.n);
         json_set(d, "imagePaths", paths);
-        json_set(d, "images", images);
         if (res.text) json_set_str(d, "responseText", res.text);
         json_t *u = json_obj();
         json_set_int(u, "input", res.input_tokens);
@@ -893,6 +932,7 @@ static int ig_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, t
         json_set(d, "usage", u);
         out->details = d;
     }
+done:
     gen_result_free(&res);
     free(fatal);
     json_free(inputs);
@@ -912,6 +952,6 @@ agent_tool_t *imagegen_tool_new(app_t *a) {
     free(d);
     t->ud = a;
     t->exclusive = true; /* approval "write" */
-    t->discoverable = true; /* custom tools mount under xd:// */
+    t->discoverable = true; /* custom tools mount as tool commands */
     return t;
 }

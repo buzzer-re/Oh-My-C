@@ -46,12 +46,15 @@ M=$(ac_mark)
 check "task whitespace" "assignment kept" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
 sub=[r for r in main if "Complete assignment thoroughly" in text(r["messages"][-1])]
 print("assignment kept" if sub and text(sub[0]["messages"][-1]).endswith("Complete assignment thoroughly:\n\nsay:keep\n\n\n\nspacing  \n|  a  |  b |") else "got %r" % (sub and text(sub[0]["messages"][-1])))'
-# subagents always get the shared lsp tool (xd://lsp); task.enableLsp only gates edit checks (omp 3312e428d0)
+# subagents always get the shared lsp tool (a tool command under bash since de21c0ac45); task.enableLsp only gates
+# edit checks (omp 3312e428d0)
 M=$(ac_mark)
-(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 -p 'call:task:{"context":"lsp","tasks":[{"task":"read:xd://lsp"}]}' </dev/null >/dev/null 2>&1)
-check "task subagent lsp" "lsp device" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
-res=[text(m) for r in main for m in r["messages"] if m.get("role")=="tool" and "xd://lsp" in json.dumps(r["messages"])]
-print("lsp device" if any("Unknown" not in x and "not found" not in x and "lsp" in x.lower() for x in res) else res[-2:])'
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 -p 'call:task:{"context":"lsp","tasks":[{"task":"say:lsp-check"}]}' </dev/null >/dev/null 2>&1)
+check "task subagent lsp" "lsp tool" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+sysp=lambda r: text(r["messages"][0])
+sub=[r for r in main if "say:lsp-check" in text(r["messages"][-1])]
+names=lambda r: [t["function"]["name"] for t in r.get("tools", [])]
+print("lsp tool" if sub and ("lsp" in names(sub[0]) or "lsp --help" in sysp(sub[0]) or "`lsp`" in sysp(sub[0])) else (sub and (names(sub[0]), sysp(sub[0])[-400:])))'
 # task model placeholders (9c75a72acd, ad36b9ac35, 05a8b9c180): "" / whitespace / [] route like an omitted model, a
 # real per-call model is still refused, and the schema declares no `model` (seance and its selector list are gone:
 # omp db5d932058)

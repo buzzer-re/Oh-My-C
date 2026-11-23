@@ -1,7 +1,8 @@
 /* write + bash tools */
 #include "tools.h"
+#include "toolcmd.h"
 #include "jobs.h"
-#include "xdev.h"
+#include "notify.h"
 #include "services.h"
 #include "vurl.h"
 #include "iurl.h"
@@ -124,24 +125,12 @@ static char *unwrap_header(const char *p) {
     return inner;
 }
 
-static bool one_edit_away(const char *typo, const char *word) {
-    size_t a = strlen(typo), b = strlen(word);
-    if (!strcmp(typo, word) || (a > b ? a - b : b - a) > 1) return false;
-    size_t c = 0;
-    while (c < a && c < b && typo[c] == word[c]) c++;
-    const char *x = typo + c, *y = word + c;
-    size_t xl = a - c, yl = b - c;
-    if (xl && yl && !strcmp(x + 1, y + 1)) return true;
-    if (xl && !strcmp(x + 1, y)) return true;
-    if (yl && !strcmp(x, y + 1)) return true;
-    return xl >= 2 && yl >= 2 && x[0] == y[1] && x[1] == y[0] && !strcmp(x + 2, y + 2);
-}
-
 /* assertWriteTargetAddressable: URI-like targets no router scheme handles */
 static char *write_target_error(const char *target) {
-    static const char *const KNOWN[] = {"local", "xd",  "ssh",   "proc",     "agent", "history", "artifact",
-                                        "memory", "skill", "rule", "omp", "omc", "mcp", "pr",
-                                        "issue", "conflict", "jobs", "file", "out", "cfg"};
+    static const char *const KNOWN[] = {"skill", "rule",  "memory", "out",      "agent",      "history",  "local",
+                                        "proc",  "cfg",   "ssh",    "security", "vault",      "issue",    "pr",
+                                        "mr",    "mcp",   "omp",    "omc",      "help",       "attachment", "conflict",
+                                        "jobs",  "file"};
     char *t = str_trim(target);
     char *msg = NULL;
     size_t sl = 0;
@@ -155,19 +144,11 @@ static char *write_target_error(const char *target) {
     for (size_t i = 0; scheme && i < sizeof KNOWN / sizeof KNOWN[0]; i++)
         if (!strcmp(scheme, KNOWN[i])) known = true;
     if (scheme && t[sl] == ':' && t[sl + 1] == '/' && t[sl + 2] == '/' && known) goto done;
-    if (scheme && t[sl] == '/' && !strcmp(scheme, "xd")) {
-        const char *rest = t + sl;
-        while (*rest == '/') rest++;
-        msg = xasprintf("Unknown URI-like write target '%s'. Did you mean 'xd://%s'? Prefix the path with './' to write it "
-                        "as a filesystem path.",
-                        t, rest);
-        goto done;
-    }
+    if (scheme && known && !strcmp(scheme, "local") && t[sl] == ':' && t[sl + 1] == '/') goto done; /* `local:/x` */
     if (scheme && t[sl] == ':' && t[sl + 1] == '/') {
         const char *rest = t + sl + 2;
         if (*rest == '/') rest++;
-        char *sugg = known || one_edit_away(scheme, "xd") ? xasprintf(" Did you mean '%s://%s'?", known ? scheme : "xd", rest)
-                                                          : xstrdup(" Tool devices use 'xd://<tool>'.");
+        char *sugg = known ? xasprintf(" Did you mean '%s://%s'?", scheme, rest) : xstrdup("");
         msg = xasprintf("Unknown URI-like write target '%s'.%s Prefix the path with './' to write it as a filesystem path.",
                         t, sugg);
         free(sugg);
@@ -178,7 +159,6 @@ done:
     return msg;
 }
 
-/* restore the replaced file's BOM / CRLF convention (write.ts applyTextFileConvention) */
 static char *apply_text_convention(const char *abs, const char *content, bool *crlf_applied, bool *bom_applied) {
     *crlf_applied = *bom_applied = false;
     int fd = open(abs, O_RDONLY | O_CLOEXEC);
@@ -328,16 +308,6 @@ static char *read_projection_refusal(const char *display, const char *raw_conten
                            "less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use "
                            "edit for a partial change.",
                            display);
-}
-
-/* a `lines` selector token (`raw`, `conflicts`, `raw:1-5`, `5`, `1-20`, `-30`, `L5`, `1-20,40`) after a URL's last ':' */
-static bool xd_selector_like(const char *s) {
-    if (!strncmp(s, "raw", 3) && (!s[3] || s[3] == ':')) s += s[3] ? 4 : 3;
-    else if (!strcmp(s, "conflicts")) return true;
-    if (!*s) return true;
-    for (const char *p = s; *p; p++)
-        if (!strchr("0123456789L-,.", *p)) return false;
-    return strpbrk(s, "0123456789") != NULL;
 }
 
 static int write_local(tool_env_t *env, tool_ctx_t *ctx, const char *raw_path, const char *raw_content, tool_result_t *out) {
@@ -568,51 +538,6 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
         return 0;
     }
     if (!content) content = "";
-    if (!strcmp(path, "xd://resolve") || !strcmp(path, "xd://reject")) {
-        bool err = false;
-        char *r = astedit_resolve(env, !strcmp(path, "xd://resolve"), content, &err);
-        tool_result_text(out, r);
-        out->is_error = err;
-        free(r);
-        return 0;
-    }
-    if (!strcmp(path, "xd://propose")) { /* resolve.ts dispatchResolutionDevice */
-        if (!env->propose_plan) {
-            tool_result_error(out, "No plan is awaiting approval \xe2\x80\x94 xd://propose only accepts a plan title while plan mode is active.");
-            return 0;
-        }
-        char *title = str_trim(content);
-        bool err = false;
-        json_t *inner = NULL;
-        char *r = env->propose_plan(env, title, &err, &inner);
-        tool_result_text(out, r ? r : "");
-        out->is_error = err;
-        if (!err) { /* XdevDispatch {tool, mode, args, inner} on the write details */
-            json_t *x = json_obj(), *xa = json_obj();
-            json_set_str(x, "tool", "propose");
-            json_set_str(x, "mode", "execute");
-            json_set_str(xa, "title", title);
-            json_set(x, "args", xa);
-            if (inner) json_set(x, "inner", inner);
-            inner = NULL;
-            out->details = json_obj();
-            json_set(out->details, "xdev", x);
-        }
-        json_free(inner);
-        free(r);
-        free(title);
-        return 0;
-    }
-    /* router.peelWriteSelector: a device URL refuses every trailing selector, since approval judged the unpeeled URL
-     * (omp c51e68b454) */
-    if (!strncasecmp(path, "xd://", 5)) {
-        const char *colon = strrchr(path + 5, ':');
-        if (colon && xd_selector_like(colon + 1)) {
-            tool_result_error(out, "write does not accept the trailing selector \":%s\" on a device URL. Remove it.", colon + 1);
-            return 0;
-        }
-    }
-    if (xdev_write(ctx, path, content, out)) return 0;
     if (!str_starts(path, "ssh://")) return write_local(env, ctx, path, raw_content, out);
     char *err = NULL;
     size_t n = strlen(content);
@@ -649,7 +574,7 @@ static int write_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args
     return 0;
 }
 
-/* WriteTool.description: the archive/SQLite target grammar lives in xd://read/sources; it is inlined when that doc
+/* WriteTool.description: the archive/SQLite target grammar lives in help://read/sources; it is inlined when that doc
  * is unreachable (`read` off: docTopicsReadable) */
 static char *write_description(bool read_active) {
     json_t *ctx = json_obj();
@@ -711,11 +636,12 @@ static bool has_url_scheme(const char *s) {
 
 /* extractLeadingCdTarget: a leading `cd <path> && rest` or `cd <path>; rest` → (literal path, rest, separator ';' or '&').
  * Bails (false) on anything but exactly `cd`, one path token and a top-level `&&`/`;`: redirects, extra arguments,
- * paths needing expansion (`$`, backticks, `(`), line continuations, `;;`/`;&` case terminators. */
+ * paths needing expansion (unquoted `$`, backticks, parentheses, globs, braces; `$`/backticks inside double quotes), directory-stack operands, named-user tildes, line continuations, `;;`/`;&` case terminators. */
 bool bash_extract_leading_cd(const char *cmd, char **dir, char **rest, char *sep) {
     if (strncmp(cmd, "cd", 2) != 0 || (cmd[2] != ' ' && cmd[2] != '\t')) return false;
     size_t i = 2;
     while (cmd[i] == ' ' || cmd[i] == '\t') i++;
+    bool unquoted_tilde = cmd[i] == '~';
     sb_t path = SB_INIT;
     bool in_single = false, in_double = false;
     for (; cmd[i]; i++) {
@@ -736,6 +662,7 @@ bool bash_extract_leading_cd(const char *cmd, char **dir, char **rest, char *sep
                 }
             }
             if (ch == '"') in_double = false;
+            else if (ch == '$' || ch == '`') goto fail;
             else sb_putc(&path, ch);
             continue;
         }
@@ -752,10 +679,17 @@ bool bash_extract_leading_cd(const char *cmd, char **dir, char **rest, char *sep
             sb_putc(&path, cmd[++i]);
             continue;
         }
-        if (strchr(" \t\n\r&|;<>()", ch)) break;
+        if (strchr("$`()*?[]{}", ch)) goto fail; /* CD_TARGET_EXPANSION_CHARS: the shell expands these */
+        if (strchr(" \t\n\r&|;<>", ch)) break;
         sb_putc(&path, ch);
     }
-    if (in_single || in_double || !path.len || strpbrk(sb_cstr(&path), "$`(")) goto fail;
+    if (in_single || in_double || !path.len) goto fail;
+    {
+        /* directory-stack operands (`-`, `+N`, `-N`) and named-user tildes are the shell's own */
+        const char *p = sb_cstr(&path);
+        bool stack = !strcmp(p, "-") || ((p[0] == '+' || p[0] == '-') && p[1] && !p[1 + strspn(p + 1, "0123456789")]);
+        if (stack || (unquoted_tilde && strcmp(p, "~") != 0 && !str_starts(p, "~/"))) goto fail;
+    }
     while (cmd[i] == ' ' || cmd[i] == '\t') i++;
     if (cmd[i] == '&' && cmd[i + 1] == '&') {
         *sep = '&';
@@ -913,8 +847,9 @@ static void bash_service(tool_env_t *env, tool_ctx_t *ctx, const char *name, con
     json_t *snap = NULL;
     bool timed_out = false;
     char *err = NULL;
-    if (services_start(env->jobs, env->cwd, name, cmd, cwd, pty, has_ready ? &ready : NULL, ctx ? ctx->cancel : NULL, &snap,
-                       &timed_out, &err) != 0) {
+    const char *notify = blank_null(json_get_str(args, "notify"));
+    if (services_start(env->jobs, env->cwd, name, cmd, cwd, pty, has_ready ? &ready : NULL, notify, ctx ? ctx->cancel : NULL,
+                       &snap, &timed_out, &err) != 0) {
         tool_result_error(out, "%s", err ? err : "service start failed");
         free(err);
         return;
@@ -927,6 +862,7 @@ static void bash_service(tool_env_t *env, tool_ctx_t *ctx, const char *name, con
         sb_appendf(&b, "\nNOT ready — readiness timed out after %gs; process state: %s.", ready.timeout > 0 ? ready.timeout : 30,
                    json_get_str(snap, "state"));
     for (size_t i = 0; i < notices->n; i++) sb_appendf(&b, "\n%s", notices->v[i]);
+    if (notify) sb_appendf(&b, "\nOutput lines matching /%s/ arrive as follow-ups while it runs.", notify);
     char *log = services_logs(env->cwd, name);
     if (*log) sb_appendf(&b, "\n%s", log);
     free(log);
@@ -955,6 +891,78 @@ static bool steer_queued(tool_ctx_t *ctx) {
     return ctx && agent_tool_interrupted(ctx->agent);
 }
 
+/* applyPatchShellInput (omp 04833e5623): the patch text of a Codex-style `apply_patch` shell call (`apply_patch <<'EOF'
+ * … EOF`, `apply_patch '<patch>'`, `apply_patch "<patch>"`), taken literally. *is_call false when the command does not run
+ * apply_patch; NULL with *is_call true for any other apply_patch command. Owned. */
+static bool sp_ch(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+static char *apply_patch_shell_input(const char *command, bool *is_call) {
+    const char *p = command;
+    while (sp_ch(*p)) p++;
+    *is_call = false;
+    if (strncmp(p, "apply_patch", 11) || (p[11] && !sp_ch(p[11]))) return NULL;
+    *is_call = true;
+    const char *q = p + 11;
+    const char *end = command + strlen(command);
+    const char *te = end; /* trimmed end */
+    while (te > q && sp_ch(te[-1])) te--;
+    const char *h = q;
+    while (sp_ch(*h)) h++;
+    if (h[0] == '<' && h[1] == '<') {
+        h += 2;
+        if (*h == '-') h++;
+        while (sp_ch(*h)) h++;
+        char quote = 0;
+        if (*h == '\'' || *h == '"') quote = *h++;
+        const char *ds = h;
+        if (!(isalpha((unsigned char)*h) || *h == '_')) return NULL;
+        while (isalnum((unsigned char)*h) || *h == '_' || *h == '-') h++;
+        size_t dl = (size_t)(h - ds);
+        if (quote) {
+            if (*h != quote) return NULL;
+            h++;
+        }
+        while (*h == ' ' || *h == '\t') h++;
+        if (*h != '\n') return NULL;
+        const char *body = h + 1;
+        /* the last line (before trailing whitespace) is the delimiter, optionally indented */
+        const char *ls = te;
+        while (ls > body && ls[-1] != '\n') ls--;
+        if (ls <= body) return NULL;
+        const char *d = ls;
+        while (*d == ' ' || *d == '\t') d++;
+        const char *de = te;
+        while (de > d && (de[-1] == ' ' || de[-1] == '\t')) de--;
+        if ((size_t)(de - d) != dl || strncmp(d, ds, dl)) return NULL;
+        return xstrndup(body, (size_t)(ls - 1 - body));
+    }
+    if (q == h) return NULL; /* `apply_patch` needs whitespace before a quoted argument */
+    if (*h == '\'') {
+        const char *e = strchr(h + 1, '\'');
+        if (!e || e + 1 != te) return NULL;
+        return xstrndup(h + 1, (size_t)(e - h - 1));
+    }
+    if (*h == '"') {
+        sb_t b = SB_INIT;
+        const char *r = h + 1;
+        for (; *r && *r != '"'; r++) {
+            if (*r == '\\' && r[1]) {
+                r++;
+                if (*r == '\n') continue;
+                if (!strchr("\\\"$`", *r)) sb_putc(&b, '\\');
+                sb_putc(&b, *r);
+            } else {
+                sb_putc(&b, *r);
+            }
+        }
+        if (*r != '"' || r + 1 != te) {
+            sb_free(&b);
+            return NULL;
+        }
+        return sb_detach(&b);
+    }
+    return NULL;
+}
+
 static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     const char *command = json_get_str(args, "command");
@@ -965,7 +973,10 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     bool launch = settings_bool("launch.enabled", true);
     bool async_on = settings_bool("async.enabled", true);
     const char *name = blank_null(json_get_str(args, "name"));
-    bool async_req = json_get_bool(args, "async", false);
+    /* `notify` reports output while the command runs: a service does that as it is, anything else starts in the
+     * background as `async` does */
+    const char *notify = blank_null(json_get_str(args, "notify"));
+    bool async_req = json_get_bool(args, "async", false) || (notify && !name);
     strvec_t notices = {0};
     if (name) {
         if (!launch) {
@@ -984,7 +995,75 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             return 0;
         }
     }
+    if (notify && !env->jobs) {
+        tool_result_error(out, "notify is unavailable in this session.");
+        strvec_free(&notices);
+        return 0;
+    }
+    /* compiled before anything runs: a bad regex fails the call instead of a job that never reports (a service's
+     * regex is checked when it starts) */
+    if (notify && !name) {
+        char *nerr = NULL;
+        if (!notify_pattern_ok(notify, &nerr)) {
+            tool_result_error(out, "%s", nerr);
+            free(nerr);
+            strvec_free(&notices);
+            return 0;
+        }
+    }
+
+    /* models trained on Codex call the apply_patch tool as a shell command; omc ships no such program, so a patch given
+     * that way goes to the tool (through its own approval) */
+    if (!name && ctx && ctx->agent && str_eq(env->edit_mode, "apply_patch")) {
+        bool is_call = false;
+        char *patch = apply_patch_shell_input(command, &is_call);
+        char *found = is_call ? which("apply_patch") : NULL;
+        agent_tool_t *ed = is_call && !found ? agent_find_tool(ctx->agent, "edit") : NULL;
+        free(found);
+        if (ed) {
+            if (!patch) {
+                tool_result_error(out, "apply_patch is a tool, not a shell command: call it with the patch text.");
+            } else {
+                json_t *ea = json_obj();
+                json_set_str(ea, "input", patch);
+                char *reason = NULL;
+                agent_t *a = ctx->agent;
+                bool blocked = false;
+                if (a->hooks.approve_tool) {
+                    json_t *call = json_obj();
+                    json_set_str(call, "type", "toolCall");
+                    json_set_str(call, "id", ctx->tool_call_id ? ctx->tool_call_id : "");
+                    json_set_str(call, "name", "edit");
+                    json_set(call, "arguments", json_clone(ea));
+                    blocked = a->hooks.approve_tool(a->hooks.ud, a, call, ea, &reason) == TOOL_BLOCK;
+                    json_free(call);
+                }
+                if (blocked) {
+                    tool_result_error(out, "%s", reason ? reason : "Tool call was blocked");
+                } else {
+                    tool_result_t r = {0};
+                    ed->execute(ed, ctx, ea, &r);
+                    out->content = r.content;
+                    r.content = NULL;
+                    out->is_error = r.is_error;
+                    tool_result_free(&r);
+                    out->details = json_obj();
+                }
+                free(reason);
+                json_free(ea);
+            }
+            free(patch);
+            strvec_free(&notices);
+            return 0;
+        }
+        free(patch);
+    }
+
     char *cmd = xstrdup(command);
+    strvec_t tc_names = {0};
+    toolcmd_run_t *tc_run = NULL;
+    bool auto_bg_run = false;
+    json_t *tc_records = NULL;
     const char *cwd_arg = json_get_str(args, "cwd");
     char *cwd = NULL;
     char *full = NULL;
@@ -1028,6 +1107,17 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         bash_service(env, ctx, name, full, cwd, args, &notices, out);
         goto done;
     }
+    /* tool commands exist only in the session shell: a line naming one never leaves it */
+    toolcmd_names(ctx ? ctx->agent : NULL, &tc_names);
+    {
+        char *invoked = toolcmd_invoked(cmd, &tc_names);
+        if (invoked && json_get_bool(args, "pty", false)) {
+            tool_result_error(out, "`%s` is a session tool command and cannot run in a PTY; run it without `pty`.", invoked);
+            free(invoked);
+            goto done;
+        }
+        free(invoked);
+    }
     double tsec = json_get_num(args, "timeout", 300);
     double req_tsec = json_get(args, "timeout") ? tsec : -1;
     int64_t max_to = settings_int("tools.maxTimeout", 0);
@@ -1037,7 +1127,11 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int64_t timeout_ms = tsec > 0 ? (int64_t)(tsec * 1000) : 0;
     bool pty = json_get_bool(args, "pty", false);
     if (async_req && env->jobs) {
-        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL);
+        toolcmd_run_t *jrun = tc_names.n && !pty ? toolcmd_run_begin(ctx, env) : NULL;
+        if (jrun) toolcmd_run_detach(jrun);
+        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL, jrun, notify);
+        /* tells the model which output reaches it before the command ends */
+        if (notify) strvec_push_own(&notices, xasprintf("Output lines matching /%s/ arrive as follow-ups while it runs.", notify));
         background_result(out, jid, NULL, &notices, tsec);
         free(jid);
         goto done;
@@ -1050,16 +1144,12 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         free(full);
         full = redirected;
     }
-    /* omp allocates the call's artifact up front (ids advance per call); the sink writes it only on spill */
-    char *art_id = NULL;
-    char *art_path = artifacts_alloc(env->artifacts, "bash", &art_id);
+    /* the spill is claimed on the first overflow (omp 4fa93996d4): output that fits inline leaves no empty N.log */
     out_sink_opts_t so;
     out_sink_opts_from_settings(&so);
-    so.artifact_path = art_path;
-    so.artifact_id = art_id;
+    so.artifact_alloc = env->artifacts ? artifacts_alloc_lazy : NULL;
+    so.artifact_alloc_ud = env->artifacts;
     bash_stream_t bs = {.ctx = ctx, .sink = out_sink_new(&so)};
-    free(art_path);
-    free(art_id);
     /* the client terminal (an ACP client advertising `terminal`) shows a live terminal card in the editor; it wins
      * over auto-backgrounding. PTY runs need the local terminal UI. */
     if (!pty && env->bridge && env->bridge->run_terminal) {
@@ -1116,12 +1206,16 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     int64_t cap = MIN(100, settings_int("async.maxJobs", 100));
     bool auto_bg = !pty && env->jobs && async_on && settings_bool("bash.autoBackground.enabled", true) &&
                    (int64_t)jobs_running(env->jobs) < cap;
+    if (tc_names.n && !pty) tc_run = toolcmd_run_begin(ctx, env);
+    auto_bg_run = auto_bg && tc_run;
     int64_t t0 = mono_ms();
     proc_result_t r;
     if (auto_bg) {
         int64_t thr = settings_int("bash.autoBackground.thresholdMs", 60000);
         int64_t wait_ms = thr <= 0 ? 0 : timeout_ms ? MAX(0, MIN(thr, timeout_ms - 1000)) : thr;
-        char *fid = jobs_start_bash_fg(env->jobs, full, cwd, timeout_ms, ctx ? ctx->intent : NULL, persistent ? env->shell : NULL, bash_on_output, &bs);
+        toolcmd_run_ref(tc_run); /* the job ends the run with its shell; this call still reads its records */
+        char *fid = jobs_start_bash_fg(env->jobs, full, cwd, timeout_ms, ctx ? ctx->intent : NULL, persistent ? env->shell : NULL,
+                                       bash_on_output, &bs, tc_run);
         bool fin = false, steered = false;
         int64_t deadline = mono_ms() + wait_ms;
         for (;;) {
@@ -1138,6 +1232,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         if (!fin) {
             char *jid = jobs_fg_detach(env->jobs, fid);
             if (jid) {
+                toolcmd_run_detach(tc_run);
                 if (steered) strvec_push(&notices, "Backgrounded early to handle an incoming message; the command keeps running.");
                 char *pv = out_sink_preview(bs.sink);
                 background_result(out, jid, pv, &notices, tsec);
@@ -1171,15 +1266,38 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                          .cancel = ctx->cancel,
                          .on_output = bash_on_output,
                          .ud = &bs};
+        char *pre = tc_run ? toolcmd_run_preamble(tc_run) : NULL;
+        o.shell_preamble = pre;
         int rc = (!pty && persistent) ? shell_run(env->shell, full, cwd, &o, &r) : shell_exec_once(full, &o, &r);
         if (rc != 0 && !r.spawn_errno) r.spawn_errno = errno ? errno : EIO;
+        free(pre);
     }
     int64_t dur = mono_ms() - t0;
+    if (tc_run) tc_records = toolcmd_run_records(tc_run);
     bash_finish(env, out, &r, &bs, tsec, req_tsec, timeout_ms, cwd, dur, &notices);
+    if (tc_run) { /* the commands' images follow the output text (bash.ts: [text, ...result.images]) */
+        json_t *imgs = toolcmd_run_images(tc_run), *im;
+        if (!out->content) out->content = json_arr();
+        json_arr_foreach(imgs, i, im) json_push(out->content, json_clone(im));
+        json_free(imgs);
+    }
     out_redirect_collect(&reply_files, out);
     out_sink_free(bs.sink);
     proc_result_free(&r);
 done:
+    /* details.toolCommands: each tool command the run dispatched, in invocation order */
+    if (json_len(tc_records) && (out->details || !out->is_error)) {
+        if (!out->details) out->details = json_obj();
+        json_set(out->details, "toolCommands", tc_records);
+        tc_records = NULL;
+    }
+    json_free(tc_records);
+    if (tc_run) {
+        /* the auto-background job owns the run (its shell may still call); a direct run is over */
+        if (auto_bg_run) toolcmd_run_unref(tc_run);
+        else toolcmd_run_end(tc_run);
+    }
+    strvec_free(&tc_names);
     /* details.cwd / cdSeparator: the directory the command actually ran in (a thrown error carries no details) */
     if (ran_cwd && (out->details || !out->is_error)) {
         if (!out->details) out->details = json_obj();
@@ -1221,7 +1339,13 @@ static const char *real_bash_version(void) {
     return g_bash_ver[0] ? g_bash_ver : NULL;
 }
 
-char *bash_tool_description(bool has_eval) {
+/* #ptyAvailable: an interactive UI, unless PI_NO_PTY=1 */
+static bool pty_available(const tool_env_t *env) {
+    const char *np = getenv("PI_NO_PTY");
+    return env && (env->ui.form || env->ui.select) && !(np && !strcmp(np, "1"));
+}
+
+char *bash_tool_description(bool has_eval, bool pty_ok) {
     json_t *ctx = json_obj();
     json_set_bool(ctx, "hasEval", has_eval);
     json_set_bool(ctx, "asyncEnabled", settings_bool("async.enabled", true));
@@ -1233,6 +1357,7 @@ char *bash_tool_description(bool has_eval) {
     json_set_str(ctx, "autoBackgroundSeconds", secs);
     free(secs);
     json_set_bool(ctx, "hasLaunch", settings_bool("launch.enabled", true));
+    json_set_bool(ctx, "hasPty", pty_ok || settings_bool("launch.enabled", true));
     /* omp lists its embedded shell's in-process builtins (shellBuiltins); omc runs the system's real bash, which has
      * none, so the line is dropped rather than advertising them */
     json_set(ctx, "builtins", json_arr());
@@ -1252,17 +1377,27 @@ char *bash_tool_description(bool has_eval) {
     return r;
 }
 
-json_t *bash_tool_schema(void) {
+/* bashSchema*: pty only with an interactive UI or launch (a service keeps it), `notify` with async or launch, the
+ * service fields with launch */
+json_t *bash_tool_schema(bool pty_ok) {
     bool async_on = settings_bool("async.enabled", true), launch = settings_bool("launch.enabled", true);
     sb_t b = SB_INIT;
     sb_append(&b, "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},"
                   "\"timeout\":{\"type\":\"number\",\"description\":\"" BASH_TIMEOUT_DESC "\"},"
-                  "\"cwd\":{\"type\":\"string\"},\"pty\":{\"type\":\"boolean\"}");
+                  "\"cwd\":{\"type\":\"string\"}");
+    if (launch || pty_ok) sb_append(&b, ",\"pty\":{\"type\":\"boolean\"}");
     if (async_on) sb_append(&b, ",\"async\":{\"type\":\"boolean\"}");
+    if (async_on || launch) sb_append(&b, ",\"notify\":{\"type\":\"string\"}");
     if (launch)
-        sb_append(&b, ",\"name\":{\"type\":\"string\",\"maxLength\":48},\"ready\":{\"type\":\"object\",\"properties\":{"
-                      "\"log\":{\"type\":\"string\"},\"port\":{\"type\":\"number\"},\"host\":{\"type\":\"string\"},"
-                      "\"timeout\":{\"type\":\"number\"}},\"additionalProperties\":false}");
+        sb_append(&b, ",\"name\":{\"type\":\"string\",\"pattern\":\"^(?:\\\\s*|[A-Za-z0-9][A-Za-z0-9._-]{0,47})$\","
+                      "\"description\":\"starts a long-lived supervised service under this name; omit for finite commands, async "
+                      "jobs included. 1-48 of [A-Za-z0-9._-]\"},"
+                      "\"ready\":{\"type\":\"object\",\"properties\":{"
+                      "\"log\":{\"type\":\"string\",\"description\":\"regex an output line matches once the service is ready\"},"
+                      "\"port\":{\"type\":\"number\",\"description\":\"TCP port the service accepts connections on once ready\"},"
+                      "\"host\":{\"type\":\"string\",\"description\":\"host for the port probe; default localhost (127.0.0.1 and ::1)\"},"
+                      "\"timeout\":{\"type\":\"number\",\"description\":\"seconds to wait for readiness; default 30\"}},"
+                      "\"description\":\"service readiness; needs log or port\",\"additionalProperties\":false}");
     sb_append(&b, "},\"required\":[\"command\"],\"additionalProperties\":false}");
     json_t *s = json_parse_str(sb_cstr(&b));
     sb_free(&b);
@@ -1270,8 +1405,8 @@ json_t *bash_tool_schema(void) {
 }
 
 agent_tool_t *tool_bash_new(tool_env_t *env) {
-    char *desc = bash_tool_description(python_available());
-    agent_tool_t *t = agent_tool_new("bash", "Bash", desc, bash_tool_schema(), bash_execute);
+    char *desc = bash_tool_description(python_available(), pty_available(env));
+    agent_tool_t *t = agent_tool_new("bash", "Bash", desc, bash_tool_schema(pty_available(env)), bash_execute);
     t->exclusive = true;
     free(desc);
     t->ud = env;
@@ -1289,12 +1424,17 @@ char *jobs_render_results(const json_t *jobs) {
     return s;
 }
 
-/* Windows a blocking wait gives its first wake before it returns with nothing new; each back-to-back idle wait climbs one
- * rung, so the agent gets its turn back early while work warms up, and a wait loop backs off. */
-static const int64_t WAIT_LADDER_MS[] = {5000, 10000, 30000, 60000, 240000};
-#define WAIT_LADDER_RUNGS 5
+/* Windows a blocking wait gives its first wake before it returns with nothing new. The first idle wait hands the agent its
+ * turn back early while work warms up; a back-to-back idle wait means it has nothing else to do, so it takes the top
+ * window, and keeps taking it while the waits stay back-to-back. The top-level interactive session skips the floor on
+ * job waits: an early return there can only end its turn. A job or service wait's top window stays inside the shortest
+ * (5-minute) prompt-cache lifetime; a reply wait's stretches to the session's known cache lifetime (agentWaitTopMs). */
+static const int64_t WAIT_LADDER_MS[] = {5000, 240000};
+#define WAIT_LADDER_RUNGS 2
+#define WAIT_TOP_MS 240000
+#define WAIT_AGENT_CACHE_MARGIN_MS 60000    /* how long before its cache entry expires a reply wait's top window returns */
+#define WAIT_AGENT_TOP_MAX_MS (30 * 60000) /* longest top window of a reply wait, whatever the cache lifetime */
 #define WAIT_LADDER_RESET_MS 60000 /* a gap this long since the last idle wait means the agent worked in between */
-#define WAIT_NOTICE_RUNG 1         /* one idle wait is patience, a second back-to-back is a loop */
 #define WAIT_SETTLE_WINDOW_MS 1500 /* after one watched job settles, near-simultaneous completions share the result */
 #define WAIT_PROGRESS_INTERVAL_MS 500
 
@@ -1425,29 +1565,36 @@ static json_t *wait_job_rows(jobs_t *jobs, const json_t *done) {
  * snapshot reads as an empty result, and agents then start `sleep` jobs to block for longer). Every result and message
  * starts the next turn of the top-level interactive session (endTurn), so it is told to end its turn; any other caller,
  * to wait again right away with no other tool call, which takes the top rung. */
-static char *elapsed_report(const char *what, int rung, bool end_turn) {
-    char *span = usage_fmt_duration((double)WAIT_LADDER_MS[rung]);
+static char *elapsed_report(const char *what, int64_t span_ms, int64_t top_ms, bool end_turn) {
+    char *span = usage_fmt_duration((double)span_ms);
     char *r;
     if (end_turn) {
         r = xasprintf("%s within %s. Nothing else left? End your turn: results and messages start your next one.", what, span);
     } else {
-        char *top = usage_fmt_duration((double)WAIT_LADDER_MS[WAIT_LADDER_RUNGS - 1]);
-        r = xasprintf("%s within %s. Nothing else left? Call `wait` right away with no other tool call: it then blocks up to %s.",
-                      what, span, top);
+        char *top = usage_fmt_duration((double)top_ms);
+        r = xasprintf("%s within %s. Nothing else left? Call `wait` again right away: it then blocks up to %s.", what, span, top);
         free(top);
     }
     free(span);
     return r;
 }
 
-/* #elapsed: a window ran out with nothing new. Extend the idle streak and, from WAIT_NOTICE_RUNG on, append the reminder. */
-static void wait_elapsed(tool_env_t *env, tool_result_t *out, int rung, int64_t streak_ms) {
-    int64_t waited = streak_ms + WAIT_LADDER_MS[rung];
+/* agentWaitTopMs: a reply wait's top window: the cache lifetime of the caller's latest request less a margin, between
+ * the job top window and WAIT_AGENT_TOP_MAX_MS; the job top window without a known entry */
+static int64_t agent_wait_top_ms(tool_env_t *env) {
+    int64_t ttl = env->prompt_cache_ttl_ms ? env->prompt_cache_ttl_ms(env) : -1;
+    if (ttl <= 0) return WAIT_TOP_MS;
+    return MIN(MAX(ttl - WAIT_AGENT_CACHE_MARGIN_MS, (int64_t)WAIT_TOP_MS), (int64_t)WAIT_AGENT_TOP_MAX_MS);
+}
+
+/* #elapsed: a window ran out with nothing new. Extend the idle streak and, once the streak holds a second wait, append
+ * the reminder (one idle wait is patience; a second back-to-back is a loop). */
+static void wait_elapsed(tool_env_t *env, tool_result_t *out, int64_t window_ms, bool streak, int64_t streak_ms) {
+    int64_t waited = streak_ms + window_ms;
     env->wait_idle = true;
-    env->wait_idle_rung = rung;
     env->wait_idle_ended = mono_ms();
     env->wait_idle_waited_ms = waited;
-    if (rung < WAIT_NOTICE_RUNG) return;
+    if (!streak) return;
     char *span = usage_fmt_duration((double)waited);
     json_t *c = json_obj();
     json_set_str(c, "waited", span);
@@ -1471,7 +1618,7 @@ static void wait_emit_progress(tool_ctx_t *ctx, jobs_t *jobs) {
 
 typedef enum { WAKE_TIMEOUT, WAKE_JOB, WAKE_MESSAGE, WAKE_ABORT, WAKE_STEER, WAKE_UNANSWERABLE, WAKE_SERVICE } wait_wake_t;
 
-static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle, int idle_rung,
+static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle,
                     int64_t idle_ended, int64_t idle_waited, const strvec_t *settled_at_entry, int64_t call_started);
 
 static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
@@ -1481,18 +1628,17 @@ static int wait_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_set_str(out->details, "op", "wait");
     /* any wait ends the idle streak unless its window elapses too */
     bool idle = env->wait_idle;
-    int idle_rung = env->wait_idle_rung;
     int64_t idle_ended = env->wait_idle_ended, idle_waited = env->wait_idle_waited_ms;
     env->wait_idle = false;
     /* stamped once at entry, before any wait: a job already settled here was not handed over by this call */
     int64_t call_started = now_ms();
     strvec_t settled_at_entry = jobs_settled_ids(env->jobs);
-    int rc = wait_run(self, ctx, env, out, idle, idle_rung, idle_ended, idle_waited, &settled_at_entry, call_started);
+    int rc = wait_run(self, ctx, env, out, idle, idle_ended, idle_waited, &settled_at_entry, call_started);
     strvec_free(&settled_at_entry);
     return rc;
 }
 
-static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle, int idle_rung,
+static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_result_t *out, bool idle,
                     int64_t idle_ended, int64_t idle_waited, const strvec_t *settled_at_entry, int64_t call_started) {
     UNUSED(self);
     if (agents_wait_hand_off(env)) {
@@ -1525,13 +1671,12 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         return 0;
     }
     bool streak = idle && mono_ms() - idle_ended < WAIT_LADDER_RESET_MS;
-    /* a back-to-back wait that is the only call of its turn takes the top rung at once: the agent has nothing else to
-     * do, so an early return would only cost it a request */
-    int rung = !streak ? 0
-               : agent_tool_call_alone(ctx ? ctx->agent : NULL, ctx ? ctx->tool_call_id : NULL) ? WAIT_LADDER_RUNGS - 1
-                                                                                                 : MIN(idle_rung + 1, WAIT_LADDER_RUNGS - 1);
     int64_t streak_ms = streak ? idle_waited : 0;
     bool reply_wait = !running && !service_running;
+    /* the top window for a back-to-back wait, and for the interactive session's job waits */
+    bool top = streak || (out_tui_transcript(env) && running > 0);
+    int64_t top_ms = reply_wait ? agent_wait_top_ms(env) : WAIT_TOP_MS;
+    int64_t span_ms = top ? top_ms : WAIT_LADDER_MS[0];
     /* a wait only these subagents' results can end blocks the caller on them; a bash job or service is another way out */
     strvec_t watched = {0};
     if (running && !service_running) {
@@ -1552,7 +1697,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
     strvec_free(&watched);
     agents_replies_free(&replies);
     agents_replies_t no_reply = {0};
-    int64_t t0 = mono_ms(), deadline = t0 + WAIT_LADDER_MS[rung], next_progress = t0;
+    int64_t t0 = mono_ms(), deadline = t0 + span_ms, next_progress = t0;
     wait_wake_t wake;
     volatile sig_atomic_t *cancel = ctx ? ctx->cancel : NULL;
     bool handed = false;
@@ -1571,6 +1716,10 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         }
         if (jobs && jobs_undelivered(jobs)) {
             wake = WAKE_JOB;
+            break;
+        }
+        if (jobs && jobs_has_notices(jobs)) { /* hasBackgroundCompletions: a queued notice injects right after */
+            wake = WAKE_STEER;
             break;
         }
         if (service_running && !running && jobs_running_all(jobs) == jobs_running(jobs)) {
@@ -1620,7 +1769,7 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         json_t *done = jobs_take_finished(jobs);
         char *txt = job_result_text(jobs, done, settled_at_entry, call_started);
         if (wake == WAKE_TIMEOUT) { /* the timeout line joins the report's text block */
-            char *rep = elapsed_report("No job finished", rung, out_tui_transcript(env));
+            char *rep = elapsed_report("No job finished", span_ms, top_ms, out_tui_transcript(env));
             char *joined = xasprintf("%s\n\n%s", *txt ? txt : "No background jobs.", rep);
             free(rep);
             free(txt);
@@ -1631,16 +1780,16 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         json_set(out->details, "jobs", wait_job_rows(jobs, done));
         /* a wait where everything is still running carries no new information once a later wait exists */
         out->useless = !json_len(done) && wake != WAKE_SERVICE;
-        if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, rung, streak_ms);
+        if (wake == WAKE_TIMEOUT) wait_elapsed(env, out, span_ms, streak, streak_ms);
         json_free(done);
     } else if (wake == WAKE_TIMEOUT) {
-        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", rung, out_tui_transcript(env));
+        char *rep = elapsed_report(reply_wait ? "No reply" : "No service finished", span_ms, top_ms, out_tui_transcript(env));
         if (reply_wait) tool_result_text(out, rep);
         else tool_result_textf(out, "%s Read proc:// for status.", rep);
         free(rep);
         out->useless = true; /* a wait that ran out with nothing to report is an idle poll */
         json_set(out->details, "jobs", json_arr());
-        wait_elapsed(env, out, rung, streak_ms);
+        wait_elapsed(env, out, span_ms, streak, streak_ms);
     } else {
         if (wake == WAKE_UNANSWERABLE) {
             char *why = no_reply_text(&no_reply);
@@ -1658,7 +1807,8 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
 agent_tool_t *tool_wait_new(tool_env_t *env) {
     json_t *dctx = json_obj();
     json_set_bool(dctx, "endTurn", out_tui_transcript(env)); /* the top-level interactive session ends its turn instead */
-    json_set(dctx, "longest", json_str_own(usage_fmt_duration((double)WAIT_LADDER_MS[WAIT_LADDER_RUNGS - 1])));
+    json_set_bool(dctx, "subagent", env->subagent_depth > 0);
+    json_set(dctx, "longest", json_str_own(usage_fmt_duration((double)WAIT_TOP_MS)));
     char *desc = tool_prompt("wait", dctx);
     json_free(dctx);
     json_t *s = json_parse_str("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");

@@ -84,12 +84,20 @@ static json_t *resolve_phase(json_t *phases, const char *name, strvec_t *errs) {
     return p;
 }
 
+/* namedTaskContents: the tasks `done`/`drop`/`rm` name: `task`, else `items` (the list models pass alongside) */
+static void named_task_contents(json_t *phases, const json_t *args, strvec_t *out) {
+    todo_task_targets(phases, json_get(args, "task"), out);
+    if (out->n) return;
+    json_t *it;
+    json_arr_foreach(json_get_arr(args, "items"), i, it) if (json_is_str(it)) strvec_push(out, json_sv(it));
+}
+
 /* getTaskTargets: borrowed task objects */
 typedef VEC(json_t *) jvec_t;
 
-static void task_targets(json_t *phases, const json_t *task_arg, const char *phase, strvec_t *errs, jvec_t *out) {
+static void task_targets(json_t *phases, const json_t *args, const char *op, const char *phase, strvec_t *errs, jvec_t *out) {
     strvec_t contents = {0};
-    todo_task_targets(phases, task_arg, &contents);
+    named_task_contents(phases, args, &contents);
     if (contents.n) {
         for (size_t i = 0; i < contents.n; i++) {
             json_t *t = resolve_task(phases, contents.v[i], errs, NULL);
@@ -104,7 +112,8 @@ static void task_targets(json_t *phases, const json_t *task_arg, const char *pha
         if (p) json_arr_foreach(json_get(p, "tasks"), k, t) vec_push(out, t);
         return;
     }
-    json_arr_foreach(phases, i, p) json_arr_foreach(json_get(p, "tasks"), k, t) vec_push(out, t);
+    UNUSED(t);
+    strvec_push_own(errs, xasprintf("%s needs a task, items or a phase", op));
 }
 
 /* normalizeInProgressTask: one in_progress task, else the first pending one */
@@ -239,7 +248,7 @@ static void remove_tasks(json_t *phases, const json_t *args, strvec_t *errs) {
     const char *phase = json_get_str(args, "phase");
     json_t *p;
     strvec_t contents = {0};
-    todo_task_targets(phases, json_get(args, "task"), &contents);
+    named_task_contents(phases, args, &contents);
     if (contents.n) {
         for (size_t c = 0; c < contents.n; c++) {
             json_t *owner = NULL;
@@ -260,7 +269,7 @@ static void remove_tasks(json_t *phases, const json_t *args, strvec_t *errs) {
         if (p) json_set(p, "tasks", json_arr());
         return;
     }
-    json_arr_foreach(phases, i, p) json_set(p, "tasks", json_arr());
+    strvec_push(errs, "rm needs a task, items or a phase");
 }
 
 /* applyEntry; returns the (possibly replaced) phases */
@@ -286,7 +295,7 @@ static json_t *apply_entry(json_t *phases, const char *op, const json_t *args, s
             json_set_str(t, "status", "in_progress");
         }
     } else if (!strcmp(op, "done") || !strcmp(op, "drop")) {
-        task_targets(phases, task_arg, phase, errs, &targets);
+        task_targets(phases, args, op, phase, errs, &targets);
         for (size_t i = 0; i < targets.n; i++) json_set_str(targets.v[i], "status", op[1] == 'o' ? "completed" : "abandoned");
     } else if (!strcmp(op, "rm")) {
         remove_tasks(phases, args, errs);
@@ -450,10 +459,16 @@ static char *format_summary(json_t *phases, strvec_t *errors, bool readonly) {
             }
         }
     }
+    /* the active phase holds the in-progress task (`start` can pick one in any phase); without one, the earliest
+     * phase with open work */
     size_t nph = json_len(phases), cur = SIZE_MAX;
     json_arr_foreach(phases, i, p) {
         if (cur != SIZE_MAX) break;
-        json_arr_foreach(json_get(p, "tasks"), k, t) if (is_open(json_get_str(t, "status"))) cur = i;
+        json_arr_foreach(json_get(p, "tasks"), k, t) if (str_eq(json_get_str(t, "status"), "in_progress")) cur = i;
+    }
+    json_arr_foreach(phases, i, p) {
+        if (cur != SIZE_MAX) break;
+        json_arr_foreach(json_get(p, "tasks"), k, t) if (str_eq(json_get_str(t, "status"), "pending")) cur = i;
     }
     if (cur == SIZE_MAX) cur = nph - 1;
     json_t *cp = json_at(phases, cur);
@@ -465,7 +480,7 @@ static char *format_summary(json_t *phases, strvec_t *errors, bool readonly) {
     sb_appendf(&b, "Overall: %zu/%zu done, %zu open.\n", closed, total, open);
     sb_appendf(&b, "Active phase %zu/%zu \"%s\" (%zu/%zu)%s\n", cur + 1, nph, json_get_str(cp, "name"), cdone,
                json_len(json_get(cp, "tasks")),
-               ahead ? " — earliest phase with open tasks; the in-progress pointer auto-advances to the earliest open task "
+               ahead ? " — the in-progress pointer auto-advances to the earliest open task "
                        "on each completion, so it can sit behind out-of-order work (nothing was un-completed)."
                      : ".");
     json_arr_foreach(phases, i, p) {
@@ -916,15 +931,107 @@ static int ask_cancelled(tool_ctx_t *ctx, tool_result_t *out) {
     return 0;
 }
 
+#define ASK_TIMED_OUT_UNANSWERED "The ask timed out before the user answered its required fields; no answer was given."
+#define INVALID_ASK_ERROR "Error: ask takes one `html` string holding a <form>."
+
+/* Bun.escapeHTML */
+static void esc_html(sb_t *b, const char *s) {
+    for (; *s; s++) {
+        switch (*s) {
+        case '&': sb_append(b, "&amp;"); break;
+        case '<': sb_append(b, "&lt;"); break;
+        case '>': sb_append(b, "&gt;"); break;
+        case '"': sb_append(b, "&quot;"); break;
+        case '\'': sb_append(b, "&#x27;"); break;
+        default: sb_putc(b, *s);
+        }
+    }
+}
+
+/* legacyQuestionsHtml: the pre-HTML `questions` list ({id, question, options: [{label, description?}], multi?,
+ * recommended?}) rebuilt as a form; NULL when an entry is malformed */
+static char *legacy_questions_html(const json_t *questions) {
+    sb_t b = SB_INIT;
+    sb_append(&b, "<form>");
+    const json_t *item;
+    json_arr_foreach(questions, i, item) {
+        const char *question = json_get_str(item, "question");
+        if (!json_is_obj(item) || !question) {
+            sb_free(&b);
+            return NULL;
+        }
+        const char *id = json_get_str(item, "id");
+        char *name = id && *id ? xstrdup(id) : xasprintf("q%zu", i + 1);
+        const char *kind = json_get_bool(item, "multi", false) && json_is_bool(json_get(item, "multi")) ? "checkbox" : "radio";
+        const json_t *rec = json_get(item, "recommended");
+        sb_t inputs = SB_INIT;
+        const json_t *opt;
+        json_arr_foreach(json_get_arr(item, "options"), k, opt) {
+            const char *label = json_is_obj(opt) ? json_get_str(opt, "label") : json_sv(opt);
+            if (!label) {
+                sb_free(&inputs);
+                free(name);
+                sb_free(&b);
+                return NULL;
+            }
+            const char *desc = json_is_obj(opt) ? json_get_str(opt, "description") : NULL;
+            bool checked = json_is_num(rec) && json_get_num(item, "recommended", -1) == (double)k;
+            sb_appendf(&inputs, "<label><input type=\"%s\" name=\"", kind);
+            esc_html(&inputs, name);
+            sb_append(&inputs, "\" value=\"");
+            esc_html(&inputs, label);
+            sb_appendf(&inputs, "\"%s> ", checked ? " checked" : "");
+            esc_html(&inputs, label);
+            if (desc) {
+                sb_append(&inputs, " \xe2\x80\x94 ");
+                esc_html(&inputs, desc);
+            }
+            sb_append(&inputs, "</label>");
+        }
+        sb_append(&b, "<fieldset><legend>");
+        esc_html(&b, question);
+        sb_append(&b, "</legend>");
+        if (inputs.len) sb_append(&b, sb_cstr(&inputs));
+        else {
+            sb_append(&b, "<textarea name=\"");
+            esc_html(&b, name);
+            sb_append(&b, "\"></textarea>");
+        }
+        sb_append(&b, "</fieldset>");
+        sb_free(&inputs);
+        free(name);
+    }
+    sb_append(&b, "</form>");
+    return sb_detach(&b);
+}
+
+/* recoverAskHtml: the form an `ask` call asks: its `html`, a bare string, or the legacy `questions` list (owned; NULL
+ * when none) */
+static char *ask_recover_html(const json_t *args) {
+    if (json_is_str(args)) return xstrdup(json_sv(args));
+    if (!json_is_obj(args)) return NULL;
+    const char *html = json_get_str(args, "html");
+    if (html) return xstrdup(html);
+    const json_t *q = json_get_arr(args, "questions");
+    return json_len(q) ? legacy_questions_html(q) : NULL;
+}
+
 static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     if (!env->ui.form && !(env->ui.select && env->ui.input && env->ui.editor)) {
         tool_result_error(out, "Ask tool requires interactive mode");
         return 0;
     }
-    const char *html = json_get_str(args, "html");
-    hf_form_t *form = hf_parse(html ? html : "");
+    char *html = ask_recover_html(args);
+    if (!html) {
+        tool_result_error(out, INVALID_ASK_ERROR);
+        out->details = json_obj();
+        json_set(out->details, "answers", json_arr());
+        return 0;
+    }
+    hf_form_t *form = hf_parse(html);
     if (!hf_named_count(form)) {
+        free(html);
         hf_form_free(form);
         tool_result_text(out, NO_NAMED_CONTROLS_ERROR);
         out->details = json_obj();
@@ -939,7 +1046,7 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
     char *err = NULL;
     json_t *data, *notes = NULL;
     agents_user_wait(env, true);
-    if (env->ui.form) data = env->ui.form(env->ui.ud, html ? html : "", timeout, &timed_out, &notes, cancel, &err);
+    if (env->ui.form) data = env->ui.form(env->ui.ud, html, timeout, &timed_out, &notes, cancel, &err);
     else {
         fb_ui_t fb = {env, timeout, cancel, NULL};
         data = ask_field_by_field(&fb, form, &timed_out);
@@ -951,6 +1058,7 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
     }
     agents_user_wait(env, false);
     if (err || !data) json_free(notes);
+    free(html);
     if (err) {
         tool_result_error(out, "%s", err);
         free(err);
@@ -960,6 +1068,27 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
     if (!data) {
         hf_form_free(form);
         return ask_cancelled(ctx, out);
+    }
+    /* a timeout submits what the form holds; with a required field still empty that is no answer, not data */
+    if (timed_out) {
+        bool unanswered = false;
+        for (size_t i = 0; i < form->fields.n && !unanswered; i++) {
+            const hf_field_t *f = form->fields.v[i];
+            if (!*f->name) continue;
+            char *fe = hf_field_error(f, json_get(data, f->name));
+            unanswered = fe != NULL;
+            free(fe);
+        }
+        if (unanswered) {
+            json_free(notes);
+            json_free(data);
+            hf_form_free(form);
+            tool_result_text(out, ASK_TIMED_OUT_UNANSWERED);
+            out->details = json_obj();
+            json_set(out->details, "answers", json_arr());
+            json_set_bool(out->details, "timedOut", true);
+            return 0;
+        }
     }
     if (notes && !json_len(notes)) {
         json_free(notes);
@@ -1003,6 +1132,7 @@ agent_tool_t *tool_ask_new(tool_env_t *env) {
     json_set_bool(s, "additionalProperties", false);
     agent_tool_t *t = agent_tool_new("ask", "Ask", desc, s, ask_execute);
     t->exclusive = true; /* the form example lives in the description (omp f2c2894ffa), no `examples` */
+    t->lenient_args = true; /* raw args reach execute() on schema failure: a bare string or legacy `questions` still asks */
     free(desc);
     t->ud = env;
     return t;

@@ -1301,16 +1301,15 @@ static const char *read_path(const json_t *result, const json_t *call) {
     return json_get_str(json_get(call, "arguments"), "path");
 }
 
-/* isProtectedToolResult with skill / skill:// read (and artifact:// recovery read) matchers */
+/* isProtectedToolResult with skill / skill:// read (and local://N.log spill recovery read) matchers */
 static bool protected_result(const json_t *result, const json_t *call, bool artifact_reads) {
     if (str_eq(json_get_str(result, "toolName"), "skill")) return true;
     const char *p = read_path(result, call);
     if (p && str_starts(p, "skill://")) return true;
     if (!artifact_reads) return false;
-    if (p && str_starts(p, "artifact://")) return true;
+    if (p && artifacts_parse_spill_url(p) >= 0) return true;
     const json_t *src = json_get_obj(json_get_obj(json_get_obj(result, "details"), "meta"), "source");
-    return str_eq(json_get_str(src, "type"), "internal") && json_get_str(src, "value") &&
-           str_starts(json_get_str(src, "value"), "artifact://");
+    return str_eq(json_get_str(src, "type"), "internal") && artifacts_parse_spill_url(json_get_str(src, "value")) >= 0;
 }
 
 static bool opening_xml(const char *line, size_t len, char *tag, size_t tagcap) {
@@ -1526,7 +1525,7 @@ static void collect_regions(json_t **ents, size_t n, const shake_cfg_t *cfg, reg
 
 static char *placeholder(const region_t *r, size_t index, const char *artifact) {
     if (artifact)
-        return xasprintf("[shaken ~%lld tokens \xe2\x80\x94 recover: artifact://%s (region %zu)]", (long long)r->tokens, artifact, index + 1);
+        return xasprintf("[shaken ~%lld tokens \xe2\x80\x94 recover: local://%s.log (region %zu)]", (long long)r->tokens, artifact, index + 1);
     return xasprintf("[shaken ~%lld tokens]", (long long)r->tokens);
 }
 

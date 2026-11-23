@@ -3,6 +3,7 @@
  * the text returned to the model is byte-identical to omp's for every action. */
 #define _GNU_SOURCE
 #include "lsp.h"
+#include "tui/theme.h"
 
 #include "config/settings.h"
 #include "core/embed.h"
@@ -97,6 +98,9 @@ typedef struct lsp_client {
 struct lsp_manager {
     char *cwd;
     json_t *servers; /* name -> config: configured, root markers present, binary resolved (lsp/config.ts loadConfig) */
+    /* servers whose root markers are not in the cwd itself (a monorepo package): each joins `servers` the first time a
+     * file is looked up below a directory holding one of its markers; and servers whose binary does not resolve */
+    json_t *nested, *unresolved;
     VEC(lsp_client_t *) clients;
     json_t *init_failures; /* name -> message */
     json_t *ledger;        /* path -> [identities] (diagnostics-ledger.ts) */
@@ -115,6 +119,12 @@ typedef VEC(json_t *) jptrs_t;
 typedef VEC(size_t) sizes_t;
 
 static const char *sym(const char *key, const char *fallback) {
+    /* statusSymbol (omp 290d787845): the theme is only there once the TUI loads it, so headless runs use plain glyphs */
+    if (!tui_theme_loaded()) {
+        if (!strcmp(key, "status.success")) return "\xe2\x9c\x93";
+        if (!strcmp(key, "status.warning")) return "\xe2\x9a\xa0";
+        if (!strcmp(key, "status.error")) return "\xe2\x9c\x97";
+    }
     const char *s = tui_sym(key);
     return s && *s ? s : fallback;
 }
@@ -430,7 +440,7 @@ static bool typescript_speaks_lsp(const char *tsc, const char *cwd) {
     return speaks;
 }
 
-static json_t *load_config(const char *cwd) {
+static json_t *load_config(const char *cwd, json_t **nested_out, json_t **unresolved_out) {
     size_t n;
     const char *d = embed_get("assets/lsp-servers.json", &n);
     json_t *defaults = d ? json_parse(d, n, NULL) : NULL;
@@ -459,14 +469,20 @@ static json_t *load_config(const char *cwd) {
     strvec_free(&dirs);
     json_t *s2 = settings_get("lsp.servers");
     if (json_is_obj(s2)) merge_servers(merged, s2);
-    json_t *servers = json_obj();
+    json_t *servers = json_obj(), *nested = json_obj(), *unresolved = json_obj();
     const char *k;
     json_t *v;
     json_obj_foreach(merged, i, k, v) {
         if (json_get_bool(v, "disabled", false)) continue;
-        if (!has_root_markers(cwd, json_get_arr(v, "rootMarkers"))) continue;
+        if (!has_root_markers(cwd, json_get_arr(v, "rootMarkers"))) {
+            if (json_len(json_get_arr(v, "rootMarkers"))) json_set(nested, k, json_clone(v));
+            continue;
+        }
         char *res = resolve_command(json_get_str(v, "command"), cwd);
-        if (!res) continue;
+        if (!res) {
+            json_set(unresolved, k, json_clone(v));
+            continue;
+        }
         json_t *c = json_clone(v);
         json_set_str(c, "resolvedCommand", res);
         free(res);
@@ -480,6 +496,10 @@ static json_t *load_config(const char *cwd) {
         bool speaks = tsc && typescript_speaks_lsp(tsc, cwd);
         json_del(servers, speaks ? "typescript-language-server" : "typescript-native");
     }
+    if (nested_out) *nested_out = nested;
+    else json_free(nested);
+    if (unresolved_out) *unresolved_out = unresolved;
+    else json_free(unresolved);
     return servers;
 }
 
@@ -502,6 +522,103 @@ static bool server_handles(const json_t *cfg, const char *path) {
 }
 
 typedef VEC(const char *) names_t;
+
+/* the nearest directory from `path` up to (not including) `cwd` that holds one of `markers`, owned or NULL */
+static char *nested_marker_dir(const char *path, const char *cwd, const json_t *markers) {
+    size_t rl = strlen(cwd);
+    char *dir = path_dirname(path);
+    while (strcmp(dir, cwd) && !strncmp(dir, cwd, rl) && dir[rl] == '/') {
+        if (has_root_markers(dir, markers)) return dir;
+        char *up = path_dirname(dir);
+        free(dir);
+        dir = up;
+    }
+    free(dir);
+    return NULL;
+}
+
+/* activateNestedServers (omp 290d787845): enable the nested servers that claim `path` and have a root marker between it
+ * and the session cwd, resolving their binary from that project first. Caller holds no lock on servers. */
+static void activate_nested(lsp_manager_t *m, const char *path) {
+    if (!m->nested || !json_len(m->nested)) return;
+    json_t *activated = json_obj();
+    char *project = NULL;
+    strvec_t done = {0};
+    const char *k;
+    json_t *v;
+    json_obj_foreach(m->nested, i, k, v) {
+        if (!server_handles(v, path)) continue;
+        char *dir = nested_marker_dir(path, m->cwd, json_get_arr(v, "rootMarkers"));
+        if (!dir) continue;
+        strvec_push(&done, k);
+        char *res = resolve_command(json_get_str(v, "command"), dir);
+        if (res && !strchr(json_get_str(v, "command"), '/') && !str_starts(res, dir)) {
+            /* the project's own bins first, then the session's (localRoots [markerDir, cwd]) */
+            char *local = resolve_command(json_get_str(v, "command"), m->cwd);
+            if (local && str_starts(local, m->cwd)) {
+                free(res);
+                res = local;
+            } else {
+                free(local);
+            }
+        }
+        if (!res) {
+            if (!m->unresolved) m->unresolved = json_obj();
+            json_set(m->unresolved, k, json_clone(v));
+            free(dir);
+            continue;
+        }
+        json_t *c = json_clone(v);
+        json_set_str(c, "resolvedCommand", res);
+        free(res);
+        json_set(activated, k, c);
+        if (!project) project = dir;
+        else free(dir);
+    }
+    for (size_t i = 0; i < done.n; i++) json_del(m->nested, done.v[i]);
+    strvec_free(&done);
+    if (project) {
+        json_t *native = json_get(activated, "typescript-native");
+        if (native) {
+            const char *tsc = json_get_str(native, "resolvedCommand");
+            bool speaks = tsc && typescript_speaks_lsp(tsc, project);
+            json_del(activated, speaks ? "typescript-language-server" : "typescript-native");
+        }
+        json_obj_foreach(activated, i, k, v) json_set(m->servers, k, json_clone(v));
+    }
+    free(project);
+    json_free(activated);
+}
+
+/* describeMissingServers: why no server handles `path` (owned) */
+static char *describe_missing(lsp_manager_t *m, const char *path) {
+    const char *ext = *path_ext(path) ? path_ext(path) : path_basename(path);
+    strvec_t reasons = {0};
+    const char *k;
+    json_t *v;
+    json_obj_foreach(m->unresolved, i, k, v) if (server_handles(v, path))
+        strvec_push_own(&reasons, xasprintf("%s: `%s` not found on PATH", k, json_get_str(v, "command")));
+    json_obj_foreach(m->nested, i, k, v) if (server_handles(v, path)) {
+        strvec_t mk = {0};
+        json_t *x;
+        json_arr_foreach(json_get_arr(v, "rootMarkers"), q, x) if (json_is_str(x)) strvec_push(&mk, json_sv(x));
+        char *ms = strvec_join(&mk, ", ");
+        strvec_push_own(&reasons, xasprintf("%s: no %s in the file's directory or its parents", k, ms));
+        free(ms);
+        strvec_free(&mk);
+    }
+    char *r;
+    if (!reasons.n) {
+        r = xasprintf("No language server handles %s files", ext);
+    } else {
+        sb_t b = SB_INIT;
+        sb_appendf(&b, "No language server for %s:", ext);
+        for (size_t i = 0; i < reasons.n; i++) sb_appendf(&b, "\n  %s", reasons.v[i]);
+        r = sb_detach(&b);
+    }
+    strvec_free(&reasons);
+    return r;
+}
 
 /* getServersForFile: primary servers first, then linters (stable) */
 static void servers_for_file(const json_t *servers, const char *path, names_t *out, bool lsp_only) {
@@ -1146,7 +1263,7 @@ static lsp_client_t *client_start(const char *name, const json_t *cfg, const cha
 lsp_manager_t *lsp_manager_new(const char *cwd) {
     lsp_manager_t *m = xcalloc(1, sizeof(*m));
     m->cwd = xstrdup(cwd);
-    m->servers = load_config(cwd);
+    m->servers = load_config(cwd, &m->nested, &m->unresolved);
     m->init_failures = json_obj();
     m->ledger = json_obj();
     pthread_mutex_init(&m->mu, NULL);
@@ -1167,6 +1284,8 @@ void lsp_manager_free(lsp_manager_t *m) {
     for (size_t i = 0; i < m->clients.n; i++) client_stop(m->clients.v[i], true);
     vec_free(&m->clients);
     json_free(m->servers);
+    json_free(m->nested);
+    json_free(m->unresolved);
     json_free(m->init_failures);
     json_free(m->ledger);
     free(m->cwd);
@@ -1510,6 +1629,18 @@ static int64_t open_version(lsp_client_t *c, const char *path) {
     int64_t v = o ? o->version : -1;
     free(uri);
     return v;
+}
+
+/* supportsMethod: the capability is advertised statically or `method` was registered dynamically */
+static bool supports_method(lsp_client_t *c, const char *cap, const char *method) {
+    if (json_truthy(json_get(c->caps, cap))) return true;
+    bool r = false;
+    pthread_mutex_lock(&c->mu);
+    const char *k;
+    json_t *v;
+    json_obj_foreach(c->registrations, i, k, v) if (str_eq(json_sv(v), method)) r = true;
+    pthread_mutex_unlock(&c->mu);
+    return r;
 }
 
 static bool supports_pull(lsp_client_t *c) {
@@ -2778,6 +2909,36 @@ static void notify_watched(lsp_manager_t *m, const strvec_t *uris, const int *ty
 
 /* ---------- status / after-write ---------- */
 
+/* probeRustupProxy (omp 290d787845): a rustup proxy ($CARGO_HOME/bin/<tool>) resolves on PATH even when the active
+ * toolchain lacks the component, then exits at startup. Its error (first two lines joined), or NULL. */
+static char *probe_rustup_proxy(const char *command) {
+    const char *ch = getenv("CARGO_HOME");
+    char *cargo_bin = ch && *ch ? path_join(ch, "bin") : path_join3(home_dir(), ".cargo", "bin");
+    char *dir = path_dirname(command);
+    bool proxy = !strcmp(dir, cargo_bin);
+    free(dir);
+    free(cargo_bin);
+    if (!proxy) return NULL;
+    const char *argv[] = {command, "--version", NULL};
+    proc_opts_t o = {.timeout_ms = 5000, .merge_stderr = false};
+    proc_result_t r;
+    if (proc_run(argv, &o, &r) != 0) return NULL;
+    char *res = NULL;
+    if (!r.timed_out && !(r.exit_code == 0 && !r.term_signal)) {
+        const char *src = r.err && *r.err ? r.err : r.out ? r.out : "";
+        char *t = str_trim(src);
+        strvec_t ls = str_split(t, "\n");
+        sb_t b = SB_INIT;
+        for (size_t i = 0; i < ls.n && i < 2; i++) sb_appendf(&b, "%s%s", i ? " " : "", ls.v[i]);
+        res = b.len ? sb_detach(&b) : xasprintf("exit code %d", r.exit_code);
+        sb_free(&b);
+        strvec_free(&ls);
+        free(t);
+    }
+    proc_result_free(&r);
+    return res;
+}
+
 char *lsp_status(lsp_manager_t *m) {
     sb_t b = SB_INIT;
     pthread_mutex_lock(&m->mu);
@@ -2785,7 +2946,15 @@ char *lsp_status(lsp_manager_t *m) {
     json_t *v;
     json_obj_foreach(m->servers, i, k, v) {
         lsp_client_t *c = find_client(m, k);
-        sb_appendf(&b, "%s%s (%s)", b.len ? ", " : "", k, c ? (c->alive ? c->status : "error") : "configured, not started");
+        if (c) {
+            sb_appendf(&b, "%s%s (%s)", b.len ? ", " : "", k, c->alive ? c->status : "error");
+            continue;
+        }
+        const char *cmd = json_get_str(v, "resolvedCommand") ? json_get_str(v, "resolvedCommand") : json_get_str(v, "command");
+        char *proxy_err = cmd ? probe_rustup_proxy(cmd) : NULL;
+        if (proxy_err) sb_appendf(&b, "%s%s (unusable: %s)", b.len ? ", " : "", k, proxy_err);
+        else sb_appendf(&b, "%s%s (configured, not started)", b.len ? ", " : "", k);
+        free(proxy_err);
     }
     pthread_mutex_unlock(&m->mu);
     if (!b.len) sb_append(&b, "No language servers configured for this project");
@@ -2836,7 +3005,7 @@ static void ledger_reduce(lsp_manager_t *m, const char *abs, strvec_t *msgs, cha
 char *lsp_after_write(lsp_manager_t *m, const char *abs, int64_t wait_ms) {
     if (!m) return NULL;
     names_t names = {0};
-    servers_for_file(m->servers, abs, &names, true);
+    activate_nested(m, abs), servers_for_file(m->servers, abs, &names, true);
     if (!names.n) {
         vec_free(&names);
         return NULL;
@@ -3169,9 +3338,11 @@ static void do_diagnostics(call_t *k) {
         if (deadline_hit(k, NULL)) goto done;
         char *resolved = resolve_to_cwd(targets.v[t], cwd);
         names_t servers = {0};
-        servers_for_file(m->servers, resolved, &servers, false);
+        activate_nested(m, resolved), servers_for_file(m->servers, resolved, &servers, false);
         if (!servers.n) {
-            strvec_push_own(&results, xasprintf("%s %s: No language server found", sym("status.error", "x"), targets.v[t]));
+            char *why = describe_missing(m, resolved);
+            strvec_push_own(&results, xasprintf("%s %s: %s", sym("status.error", "x"), targets.v[t], why));
+            free(why);
             free(resolved);
             vec_free(&servers);
             continue;
@@ -3179,7 +3350,7 @@ static void do_diagnostics(call_t *k) {
         char *uri = path_to_uri(resolved);
         char *rel = rel_to_cwd(resolved, cwd);
         json_t *all = json_arr();
-        strvec_t failed = {0}, unreported = {0};
+        strvec_t failed = {0}, unreported = {0}, reported = {0};
         int succeeded = 0;
         bool stop = false;
         for (size_t s = 0; s < servers.n; s++) {
@@ -3250,6 +3421,7 @@ static void do_diagnostics(call_t *k) {
             json_arr_foreach(items, q, d) json_push(all, json_clone(d));
             json_free(items);
             succeeded++;
+            strvec_push(&reported, sn);
         }
         if (stop) {
             free(uri);
@@ -3257,6 +3429,7 @@ static void do_diagnostics(call_t *k) {
             json_free(all);
             strvec_free(&failed);
             strvec_free(&unreported);
+            strvec_free(&reported);
             vec_free(&servers);
             free(resolved);
             goto done;
@@ -3287,6 +3460,12 @@ static void do_diagnostics(call_t *k) {
             for (size_t q = 0; q < uniq.n; q++) strvec_push_own(&msgs, format_diagnostic(uniq.v[q], rel));
             strvec_push_own(&lines, format_grouped_diagnostics(&msgs));
             strvec_free(&msgs);
+        } else if (succeeded > 0 && unreported.n) {
+            /* clean so far, but not verified until the pending servers report (omp 290d787845) */
+            char *names_s = strvec_join(&reported, ", ");
+            strvec_push_own(&lines, detailed ? xasprintf("%s %s: no issues from %s", sym("status.warning", "!"), rel, names_s)
+                                             : xasprintf("no issues from %s", names_s));
+            free(names_s);
         } else if (succeeded > 0) {
             strvec_push_own(&lines, detailed ? xasprintf("%s %s: no issues", sym("status.success", "ok"), rel) : xstrdup("OK"));
         }
@@ -3306,6 +3485,7 @@ static void do_diagnostics(call_t *k) {
         json_free(all);
         strvec_free(&failed);
         strvec_free(&unreported);
+        strvec_free(&reported);
         free(uri);
         free(rel);
         free(resolved);
@@ -3382,7 +3562,18 @@ static void do_rename_file(call_t *k) {
               false, k->args);
         return;
     }
-    char *source = resolve_to_cwd(file, cwd), *dest = resolve_to_cwd(new_name, cwd);
+    char *source = resolve_to_cwd(file, cwd);
+    /* a bare name renames in place: it stays next to the source (omp 290d787845) */
+    char *dest;
+    if (strpbrk(new_name, "/\\")) {
+        dest = resolve_to_cwd(new_name, cwd);
+    } else {
+        char *dir = path_dirname(source);
+        dest = path_join(dir, new_name);
+        free(dir);
+    }
+    /* relevant servers that do not implement workspace/willRenameFiles: they rewrite no imports */
+    strvec_t non_renaming = {0};
     strvec_t pairs_old = {0}, pairs_new = {0}, notes = {0}, hard = {0}, responding = {0}, lines = {0};
     json_t *per_server = json_obj(); /* server -> edit */
     char *text = NULL;
@@ -3474,6 +3665,8 @@ static void do_rename_file(call_t *k) {
             continue;
         }
         if (project_aware(sn, c->cfg)) wait_project_loaded(c, &k->bg);
+        /* edits are computed against the server's documents: sync any changed on disk first */
+        reconcile_open_files(c, NULL, false, NULL);
         json_t *p = json_obj();
         json_set(p, "files", json_clone(files));
         int code = 0;
@@ -3490,7 +3683,9 @@ static void do_rename_file(call_t *k) {
             bool mnf = strstr(low, "method not found") || strstr(low, "unhandled method") || strstr(low, "not supported") ||
                        strstr(low, "-32601");
             free(low);
-            if (!mnf) {
+            if (mnf) {
+                strvec_push(&non_renaming, sn);
+            } else {
                 strvec_push_own(&notes, xasprintf("  %s: %s", sn, err));
                 strvec_push(&hard, sn);
             }
@@ -3505,8 +3700,22 @@ static void do_rename_file(call_t *k) {
     char *src_label = rel_to_cwd(source, cwd), *dst_label = rel_to_cwd(dest, cwd);
     char *count_label = is_dir ? xasprintf("%zu file%s under %s", pairs_old.n, pairs_old.n != 1 ? "s" : "", src_label) : xstrdup(src_label);
     char *resp_s = strvec_join(&responding, ", ");
+    /* nothing will update imports when no relevant server implements willRenameFiles */
+    char *imports_note = NULL;
+    if (!responding.n) {
+        if (non_renaming.n) {
+            char *nr = strvec_join(&non_renaming, ", ");
+            imports_note = xasprintf("; imports NOT rewritten: %s %s not implement workspace/willRenameFiles", nr,
+                                     non_renaming.n == 1 ? "does" : "do");
+            free(nr);
+        } else {
+            imports_note = xstrdup("; imports NOT rewritten: no language server handles these files");
+        }
+    }
+    char *dst_shown = xasprintf("%s%s", dst_label, imports_note ? imports_note : "");
+    free(imports_note);
     if (json_get(k->args, "apply") && !json_get_bool(k->args, "apply", true)) {
-        strvec_push_own(&lines, xasprintf("Rename preview: %s \xe2\x86\x92 %s", count_label, dst_label));
+        strvec_push_own(&lines, xasprintf("Rename preview: %s \xe2\x86\x92 %s", count_label, dst_shown));
         if (!json_len(per_server)) strvec_push(&lines, "  No LSP edits would be applied");
         else {
             const char *sk;
@@ -3687,7 +3896,7 @@ static void do_rename_file(call_t *k) {
                     for (size_t q = 0; q < notes.n; q++) strvec_push(&summary, notes.v[q]);
                 }
                 char *body = strvec_join(&summary, "\n");
-                text = xasprintf("Renamed %s \xe2\x86\x92 %s\n%s", count_label, dst_label, body);
+                text = xasprintf("Renamed %s \xe2\x86\x92 %s\n%s", count_label, dst_shown, body);
                 free(body);
                 reply(k->out, text, k->action, resp_s, true, k->args);
             }
@@ -3702,6 +3911,7 @@ static void do_rename_file(call_t *k) {
     free(count_label);
     free(src_label);
     free(dst_label);
+    free(dst_shown);
 out:
     free(text);
     free(source);
@@ -3713,6 +3923,7 @@ out:
     strvec_free(&hard);
     strvec_free(&responding);
     strvec_free(&lines);
+    strvec_free(&non_renaming);
 }
 
 static void do_capabilities(call_t *k) {
@@ -3721,7 +3932,7 @@ static void do_capabilities(call_t *k) {
     names_t list = {0};
     if (file && *file && strcmp(file, "*") != 0) {
         char *resolved = resolve_to_cwd(file, k->lt->env->cwd);
-        servers_for_file(m->servers, resolved, &list, true);
+        activate_nested(m, resolved), servers_for_file(m->servers, resolved, &list, true);
         free(resolved);
         if (!list.n) {
             reply(k->out, "No language server found for this file", k->action, NULL, false, k->args);
@@ -3788,7 +3999,7 @@ static void do_request(call_t *k) {
     if (file && *file && strcmp(file, "*") != 0) {
         resolved = resolve_to_cwd(file, cwd);
         names_t l = {0};
-        servers_for_file(m->servers, resolved, &l, true);
+        activate_nested(m, resolved), servers_for_file(m->servers, resolved, &l, true);
         chosen = l.n ? l.v[0] : NULL;
         vec_free(&l);
         if (!chosen) {
@@ -4052,7 +4263,8 @@ static char *reload_server(lsp_manager_t *m, lsp_client_t *c, const char *server
 static void do_reload_all(call_t *k) {
     lsp_manager_t *m = k->lt->m;
     pthread_mutex_lock(&m->mu);
-    json_t *fresh = load_config(m->cwd);
+    json_t *fresh_nested = NULL, *fresh_unresolved = NULL;
+    json_t *fresh = load_config(m->cwd, &fresh_nested, &fresh_unresolved);
     strvec_t stopped = {0};
     for (size_t i = 0; i < m->clients.n;) {
         lsp_client_t *c = m->clients.v[i];
@@ -4071,6 +4283,10 @@ static void do_reload_all(call_t *k) {
     }
     json_free(m->servers);
     m->servers = fresh;
+    json_free(m->nested);
+    m->nested = fresh_nested;
+    json_free(m->unresolved);
+    m->unresolved = fresh_unresolved;
     pthread_mutex_unlock(&m->mu);
     names_t servers = {0};
     const char *sk;
@@ -4188,31 +4404,115 @@ static bool has_rust_workspace_ancestor(const char *file) {
 
 /* file-scoped actions: definition, type_definition, implementation, references, hover, code_actions, symbols, rename,
  * reload <file> */
+/* the server capability and request method each single-server action needs (omp 290d787845 ACTION_PROVIDERS) */
+static const struct {
+    const char *action, *cap, *method;
+} ACTION_PROVIDERS[] = {
+    {"definition", "definitionProvider", "textDocument/definition"},
+    {"type_definition", "typeDefinitionProvider", "textDocument/typeDefinition"},
+    {"implementation", "implementationProvider", "textDocument/implementation"},
+    {"references", "referencesProvider", "textDocument/references"},
+    {"hover", "hoverProvider", "textDocument/hover"},
+    {"code_actions", "codeActionProvider", "textDocument/codeAction"},
+    {"symbols", "documentSymbolProvider", "textDocument/documentSymbol"},
+    {"rename", "renameProvider", "textDocument/rename"},
+};
+
+static bool method_not_found(const char *err, int code) {
+    if (code == -32601) return true;
+    char *low = xstrdup(err ? err : "");
+    for (char *q = low; *q; q++) *q = (char)tolower((unsigned char)*q);
+    bool mnf = strstr(low, "method not found") || strstr(low, "unhandled method") || strstr(low, "not supported") ||
+               strstr(low, "-32601") || strstr(low, "unknown request");
+    free(low);
+    return mnf;
+}
+
+/* "No configured language server for .ext supports <action>:" with each (unique) note indented */
+static char *unsupported_text(const char *resolved, const char *action, const strvec_t *notes) {
+    const char *ext = *path_ext(resolved) ? path_ext(resolved) : path_basename(resolved);
+    sb_t b = SB_INIT;
+    sb_appendf(&b, "No configured language server for %s supports %s:", ext, action);
+    for (size_t i = 0; i < notes->n; i++) {
+        bool dup = false;
+        for (size_t j = 0; j < i && !dup; j++) dup = !strcmp(notes->v[i], notes->v[j]);
+        if (!dup) sb_appendf(&b, "\n  %s", notes->v[i]);
+    }
+    return sb_detach(&b);
+}
+
 static void do_file_action(call_t *k, const char *resolved) {
     lsp_manager_t *m = k->lt->m;
     const char *cwd = k->lt->env->cwd;
     const char *action = k->action;
     names_t l = {0};
-    servers_for_file(m->servers, resolved, &l, true);
+    activate_nested(m, resolved), servers_for_file(m->servers, resolved, &l, true);
     if (!l.n) {
-        reply(k->out, "No language server found for this action", action, NULL, false, NULL);
+        char *why = describe_missing(m, resolved);
+        reply(k->out, why, action, NULL, false, NULL);
+        free(why);
         vec_free(&l);
         return;
     }
     const char *server = l.v[0];
-    vec_free(&l);
     if (!strcmp(action, "reload")) json_del(m->init_failures, server);
+    const char *pcap = NULL, *pmethod = NULL;
+    for (size_t i = 0; i < ARRAY_LEN(ACTION_PROVIDERS); i++)
+        if (!strcmp(action, ACTION_PROVIDERS[i].action)) {
+            pcap = ACTION_PROVIDERS[i].cap;
+            pmethod = ACTION_PROVIDERS[i].method;
+        }
+    /* an applied code action also sends resolve/executeCommand, whose method-not-found is not the action's */
+    const char *mnf_method = !strcmp(action, "code_actions") && json_get_bool(k->args, "apply", false) ? NULL : pmethod;
     char *err = NULL;
-    lsp_client_t *c = get_client(m, server, &k->bg, &err);
     char *output = NULL;
     bool useless = false;
     char *uri = NULL;
+    /* selectClientForAction: the first server for the file that advertises the action, starting each candidate in
+     * rank order; when none does, the first that started still gets the request */
+    strvec_t skipped = {0};
+    lsp_client_t *c = NULL, *fallback = NULL;
+    const char *fallback_name = NULL;
+    for (size_t i = 0; i < l.n && !c; i++) {
+        char *e = NULL;
+        lsp_client_t *ci = get_client(m, l.v[i], &k->bg, &e);
+        if (!ci) {
+            if (l.n == 1 || deadline_hit(k, l.v[i])) {
+                if (!deadline_hit(k, l.v[i])) {
+                    output = xasprintf("LSP error: %s", e ? e : "unknown error");
+                    reply(k->out, output, action, l.v[i], false, k->args);
+                }
+                free(e);
+                vec_free(&l);
+                server = NULL;
+                goto done;
+            }
+            strvec_push_own(&skipped, xasprintf("%s: failed to start (%s)", l.v[i], e ? e : "unknown error"));
+            free(e);
+            continue;
+        }
+        if (!pcap || !ci->caps || supports_method(ci, pcap, pmethod)) {
+            c = ci;
+            server = l.v[i];
+            break;
+        }
+        if (!fallback) {
+            fallback = ci;
+            fallback_name = l.v[i];
+        }
+        strvec_push_own(&skipped, xasprintf("%s: does not implement %s", l.v[i], pmethod));
+    }
+    if (!c && fallback) {
+        c = fallback;
+        server = fallback_name;
+    }
     if (!c) {
-        if (deadline_hit(k, server)) goto done;
-        output = xasprintf("LSP error: %s", err ? err : "unknown error");
-        reply(k->out, output, action, server, false, k->args);
+        output = unsupported_text(resolved, action, &skipped);
+        reply(k->out, output, action, NULL, false, k->args);
+        vec_free(&l);
         goto done;
     }
+    vec_free(&l);
     const json_t *args = k->args;
     bool has_line = json_get(args, "line") != NULL;
     int64_t line = has_line ? json_d2i(json_get_num(args, "line", 1)) : 1;
@@ -4263,7 +4563,13 @@ static void do_file_action(call_t *k, const char *resolved) {
         json_t *r_ = request(c, method, params, &k->bg, &err, &code);                      \
         if (!r_) {                                                                         \
             if (!deadline_hit(k, server)) {                                                \
-                char *o_ = xasprintf("LSP error: %s", err ? err : "unknown error");        \
+                char *o_;                                                                  \
+                if (mnf_method && !strcmp(method, mnf_method) && method_not_found(err, code)) { \
+                    strvec_push_own(&skipped, xasprintf("%s: does not implement %s", server, mnf_method)); \
+                    o_ = unsupported_text(resolved, action, &skipped);                     \
+                } else {                                                                   \
+                    o_ = xasprintf("LSP error: %s", err ? err : "unknown error");          \
+                }                                                                          \
                 reply(k->out, o_, action, server, false, k->args);                         \
                 free(o_);                                                                  \
             }                                                                              \
@@ -4637,6 +4943,7 @@ done:
     free(output);
     free(err);
     free(uri);
+    strvec_free(&skipped);
 }
 
 /* tool-timeouts.ts resolveLspTimeouts */

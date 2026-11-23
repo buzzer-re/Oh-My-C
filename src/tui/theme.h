@@ -92,6 +92,8 @@ void tui_theme_free(tui_theme_t *t);
 /* Process-wide current theme (lazily the detected built-in). */
 const tui_theme_t *tui_theme(void);
 void tui_theme_set(tui_theme_t *t); /* takes ownership */
+/* a theme was installed (the TUI loaded one); headless and print runs never install one */
+bool tui_theme_loaded(void);
 
 /* Styling helpers. `th` may be NULL for the current theme. */
 void tui_fg(sb_t *b, const tui_theme_t *th, tui_tc_t slot, const char *text);

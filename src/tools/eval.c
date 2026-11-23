@@ -9,7 +9,8 @@
  * A host reader thread owns the read side; every bridge call runs on its own worker thread so concurrent helper calls
  * (asyncio.gather over judge(), background threads) never block each other. Interrupts (timeout, abort) send SIGINT
  * and cancel the cell's in-flight calls; a kernel that does not answer within 5 s is killed. Waits on helpers
- * (wait(), judge(), drain(), tool.task/wait) pause the cell deadline, which restarts when the call returns. */
+ * (wait(), judge(), drain(), and every session tool but an MCP one) pause the cell deadline, which restarts when the call
+ * returns. */
 #define _GNU_SOURCE
 #include "tools.h"
 #include "artifacts.h"
@@ -81,7 +82,9 @@ struct eval_state {
     agent_tool_t *self;
     pthread_mutex_t mu; /* one cell at a time */
     kernel_t *k;
-    bool had_kernel;
+    /* session keys a kernel served a cell for: a later cell of one without a live kernel reports the loss, also after the
+     * session was released and switched back to; only an explicit reset forgets it (omp 3967d6bcc6) */
+    strvec_t served;
     char *python;
     /* session context for bridged tool calls (set per cell, read by workers) */
     pthread_mutex_t cmu;
@@ -164,9 +167,30 @@ static int chan_send(chan_t *c, const json_t *j) {
 
 /* ---------- bridge calls ---------- */
 
-static bool call_pauses(const char *name, const json_t *args) {
-    if (str_eq(name, "__wait__") || str_eq(name, "__judge__") || str_eq(name, "task") || str_eq(name, "wait")) return true;
-    return str_eq(name, "__judge_batch__") && str_eq(json_get_str(args, "op"), "drain");
+/* the session tool a bridged name resolves to: the registered name, else edit's wire alias (`apply_patch`) */
+static agent_tool_t *bridge_tool(eval_state_t *st, agent_t *ag, const char *name) {
+    agent_tool_t *t = ag ? agent_find_tool(ag, name) : NULL;
+    if (!t && ag && str_eq(name, "apply_patch") && str_eq(st->env->edit_mode, "apply_patch")) t = agent_find_tool(ag, "edit");
+    return t;
+}
+
+/* isEvalBridgeToolCallable: checkpoint/rewind need direct toolResult events to commit session changes; yield needs
+ * direct loop events to finalize the delegated task */
+static bool bridge_callable(const char *name) {
+    return !str_eq(name, "checkpoint") && !str_eq(name, "rewind") && !str_eq(name, "yield");
+}
+
+static bool call_pauses(eval_state_t *st, const char *name, const json_t *args) {
+    if (str_eq(name, "__wait__") || str_eq(name, "__judge__")) return true;
+    if (str_eq(name, "__judge_batch__")) return str_eq(json_get_str(args, "op"), "drain");
+    if (str_starts(name, "__") && str_ends(name, "__")) return false;
+    /* an omc session tool bounds its own work (bash/task/wait carry timeouts), so it pauses the cell watchdog; an
+     * external MCP server may never answer, so its calls stay charged to the cell (omp 3967d6bcc6) */
+    pthread_mutex_lock(&st->cmu);
+    agent_t *ag = st->agent;
+    pthread_mutex_unlock(&st->cmu);
+    agent_tool_t *t = bridge_tool(st, ag, name);
+    return t && !t->mcp_server;
 }
 
 /* run one session tool for the kernel: {text, images?} or *err (tool error text) */
@@ -176,13 +200,28 @@ static json_t *run_tool(bcall_t *c, char **err) {
     agent_t *ag = st->agent;
     void *app = st->app;
     pthread_mutex_unlock(&st->cmu);
-    agent_tool_t *t = ag ? agent_find_tool(ag, c->name) : NULL;
+    agent_tool_t *t = bridge_tool(st, ag, c->name);
     if (!t || t == st->self) {
         *err = xstrdup(t ? "eval cannot call itself" : "unknown tool");
         return NULL;
     }
-    json_t *targs = json_is_obj(c->args) ? json_clone(c->args) : json_obj();
-    tool_ctx_t sub = {.agent = ag, .tool_call_id = c->tool_call_id, .tool_name = c->name, .cancel = &c->cancel, .app = app};
+    if (!bridge_callable(t->name)) {
+        *err = xasprintf("`%s` cannot run through the eval bridge; call the direct `%s` tool.", t->name, t->name);
+        return NULL;
+    }
+    /* FREEFORM tools (edit in a grammar mode) take their raw text as `{input}`, as providers deliver it */
+    json_t *targs;
+    const char *mode = st->env->edit_mode;
+    if (json_is_str(c->args) && str_eq(t->name, "edit") &&
+        (str_eq(mode, "hashline") || str_eq(mode, "apply_patch") || str_eq(mode, "sloppy") || str_eq(mode, "magic"))) {
+        targs = json_obj();
+        json_set_str(targs, "input", json_sv(c->args));
+    } else {
+        targs = json_is_obj(c->args) ? json_clone(c->args) : json_obj();
+    }
+    /* the script parses the result, so it gets the whole result, not the model's display of it */
+    tool_ctx_t sub = {.agent = ag, .tool_call_id = c->tool_call_id, .tool_name = t->name, .cancel = &c->cancel, .app = app,
+                      .programmatic = true};
     tool_result_t tr = {0};
     t->execute(t, &sub, targs, &tr);
     json_free(targs);
@@ -344,7 +383,7 @@ static void spawn_call(kernel_t *k, json_t *m) {
     c->args = json_take(m, "args");
     if (!c->args) c->args = json_obj();
     c->st = st;
-    c->pauses = call_pauses(c->name, c->args);
+    c->pauses = call_pauses(st, c->name, c->args);
     c->ch = chan_ref(k->ch);
     pthread_mutex_lock(&st->cmu);
     c->tool_call_id = st->tool_call_id ? xstrdup(st->tool_call_id) : NULL;
@@ -493,13 +532,38 @@ static void kernel_stop(eval_state_t *st) {
     free(k);
 }
 
+/* the runner is UTF-8 source and the prelude uses asyncio.to_thread: Python 3.9+ (omp 3967d6bcc6 probe) */
+static bool python_ok(const char *path) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static char *ok_path; /* the last interpreter that passed */
+    pthread_mutex_lock(&mu);
+    bool cached = ok_path && !strcmp(ok_path, path);
+    pthread_mutex_unlock(&mu);
+    if (cached) return true;
+    const char *argv[] = {path, "-c", "import sys;v=sys.version_info;sys.exit(0 if v>=(3,9) else 200+min(v[0],3)*10+min(v[1],9))", NULL};
+    proc_opts_t o = {.timeout_ms = 10000};
+    proc_result_t r;
+    bool ok = proc_run(argv, &o, &r) == 0 && !r.timed_out && r.exit_code == 0 && !r.term_signal;
+    if (ok) {
+        pthread_mutex_lock(&mu);
+        free(ok_path);
+        ok_path = xstrdup(path);
+        pthread_mutex_unlock(&mu);
+    } else if (r.exit_code >= 220 && r.exit_code <= 239) {
+        LOGW("eval: %s: Python %d.%d is too old; 3.9+ required", path, (r.exit_code - 200) / 10, (r.exit_code - 200) % 10);
+    }
+    proc_result_free(&r);
+    return ok;
+}
+
 static char *find_python(void) {
     const char *cfg = settings_str("python.interpreter", NULL);
-    if (cfg && fs_is_exec(cfg)) return xstrdup(cfg);
-    const char *names[] = {"python3", "python"};
+    if (cfg && fs_is_exec(cfg) && python_ok(cfg)) return xstrdup(cfg);
+    const char *names[] = {"python3", "python"}; /* python3 first */
     for (size_t i = 0; i < ARRAY_LEN(names); i++) {
         char *p = which(names[i]);
-        if (p) return p;
+        if (p && python_ok(p)) return p;
+        free(p);
     }
     return NULL;
 }
@@ -522,7 +586,7 @@ static int kernel_start(eval_state_t *st, char **err) {
     char *local = env->local_dir ? xasprintf("OMC_EVAL_LOCAL_ROOT=%s", env->local_dir)
                                  : xasprintf("OMC_EVAL_LOCAL_ROOT=%s/.omc-local", env->cwd);
     const char *argv[] = {st->python, "-u", "-c", code, NULL};
-    const char *env_extra[] = {"PYTHONUNBUFFERED=1", "MPLBACKEND=Agg", "PYTHONIOENCODING=utf-8", local, NULL};
+    const char *env_extra[] = {"PYTHONUNBUFFERED=1", "MPLBACKEND=Agg", "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1", local, NULL};
     kernel_t *k = xcalloc(1, sizeof(*k));
     k->st = st;
     k->child.in_fd = k->child.out_fd = k->child.err_fd = -1;
@@ -580,7 +644,6 @@ static int kernel_start(eval_state_t *st, char **err) {
         kernel_stop(st);
         return -1;
     }
-    st->had_kernel = true;
     return 0;
 }
 
@@ -622,9 +685,15 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (tsec > 3600) tsec = 3600;
     int64_t tms = tsec > 0 ? (int64_t)(tsec * 1000) : 0;
     pthread_mutex_lock(&st->mu);
+    const char *sid = ctx && ctx->agent && ctx->agent->session_id ? ctx->agent->session_id : "";
     if (json_get_bool(args, "reset", false)) { /* an intentional reset is no surprise restart */
         kernel_stop(st);
-        st->had_kernel = false;
+        for (size_t i = 0; i < st->served.n; i++)
+            if (str_eq(st->served.v[i], sid)) {
+                free(st->served.v[i]);
+                st->served.v[i] = st->served.v[--st->served.n];
+                break;
+            }
     }
     if (st->k) { /* a kernel that died between cells (crash, kill, out-of-memory) is replaced on this call */
         pthread_mutex_lock(&st->k->ch->mu);
@@ -632,7 +701,7 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         pthread_mutex_unlock(&st->k->ch->mu);
         if (dead) kernel_stop(st);
     }
-    bool restarted = !st->k && st->had_kernel;
+    bool restarted = !st->k && strvec_contains(&st->served, sid);
     char *err = NULL;
     if (kernel_start(st, &err) != 0) {
         tool_result_error(out, "%s", err);
@@ -640,6 +709,7 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         pthread_mutex_unlock(&st->mu);
         return 0;
     }
+    if (!strvec_contains(&st->served, sid)) strvec_push(&st->served, sid);
     kernel_t *k = st->k;
     pthread_mutex_lock(&st->cmu);
     st->agent = ctx->agent;
@@ -715,12 +785,9 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     out_sink_opts_t so;
     out_sink_opts_from_settings(&so);
     out_sink_t *cellsink = out_sink_new(&so);
-    char *art_id = NULL, *art_path = artifacts_alloc(st->env->artifacts, "eval", &art_id);
-    so.artifact_path = art_path;
-    so.artifact_id = art_id;
+    so.artifact_alloc = st->env->artifacts ? artifacts_alloc_lazy : NULL; /* claimed on the first overflow */
+    so.artifact_alloc_ud = st->env->artifacts;
     out_sink_t *rawsink = out_sink_new(&so);
-    free(art_path);
-    free(art_id);
     sb_t stream = SB_INIT;
     const char *so_out = json_get_str(result, "stdout");
     if (so_out && *so_out) sb_append(&stream, so_out);
@@ -821,6 +888,7 @@ static void eval_destroy(agent_tool_t *t) {
     eval_state_t *st = t->ud;
     pthread_mutex_lock(&st->mu);
     kernel_stop(st);
+    strvec_free(&st->served);
     pthread_mutex_unlock(&st->mu);
     /* bridge workers reference the session: wait for the (cancelled) calls to return */
     pthread_mutex_lock(&st->cmu);
@@ -867,7 +935,7 @@ static json_t *template_ctx(const json_t *tool_names) {
     return ctx;
 }
 
-/* xd://eval/<topic> docs: judge (incl. completion) and helpers */
+/* help://eval/<topic> docs: judge (incl. completion) and helpers */
 static json_t *topics_for(const json_t *tool_names) {
     json_t *ctx = template_ctx(tool_names);
     json_t *t = json_obj();
@@ -877,6 +945,8 @@ static json_t *topics_for(const json_t *tool_names) {
     return t;
 }
 
+json_t *eval_default_doc_topics(void) { return topics_for(NULL); }
+
 static json_t *eval_doc_topics(agent_tool_t *self) {
     eval_state_t *st = self->ud;
     return topics_for(st->tool_names);
@@ -885,7 +955,7 @@ static json_t *eval_doc_topics(agent_tool_t *self) {
 static char *eval_description(const json_t *tool_names) {
     json_t *ctx = template_ctx(tool_names);
     if (json_len(tool_names)) json_set(ctx, "toolNames", json_clone(tool_names));
-    /* a session without `read` cannot open xd://eval/<topic>: inline every topic */
+    /* a session without `read` cannot open help://eval/<topic>: inline every topic */
     if (tool_names && !names_have(tool_names, "read")) {
         json_t *topics = topics_for(tool_names);
         sb_t b = SB_INIT;
@@ -919,7 +989,6 @@ void eval_release_session(agent_tool_t *t) {
     eval_state_t *st = t->ud;
     pthread_mutex_lock(&st->mu);
     kernel_stop(st);
-    st->had_kernel = false;
     pthread_mutex_unlock(&st->mu);
     pthread_mutex_lock(&st->shmu);
     shell_free(st->sh);

@@ -123,8 +123,8 @@ typedef struct tool_env {
     todo_state_t todo;
     tool_ui_t ui;
     json_t *settings;          /* borrowed effective settings */
-    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" | "none" (no edit tool, no anchors) */
-    struct artifact_store *artifacts; /* session artifacts (artifact://<id>; shared with subagents; NULL: none) */
+    char *edit_mode;           /* "hashline" | "replace" | "patch" | "apply_patch" | "sloppy" | "magic" | "none" (no edit tool, no anchors) */
+    struct artifact_store *artifacts; /* session spills (local://<N>.log; shared with subagents; NULL: none) */
     int subagent_depth;
     bool can_prompt_user;      /* a UI can answer `ask` (interactive mode) */
     bool ask_ui;               /* the protocol client answers `ask`: `--mode rpc-ui`, or an ACP client with form elicitation */
@@ -133,6 +133,8 @@ typedef struct tool_env {
     const char *delegation_bias; /* model delegation bias ("eager"/"balanced"/"restrained"/"gated"; static) */
     void *session;             /* app session (for task tool) */
     bool (*plan_mode_active)(struct tool_env *env); /* plan mode is on (the ask timeout is off); NULL: never */
+    /* lifetime (ms) of the prompt-cache entry the latest request wrote; -1 unknown (NULL: never known) */
+    int64_t (*prompt_cache_ttl_ms)(struct tool_env *env);
     struct shell *shell;       /* persistent bash session (lazy) */
     const discovery_t *disc;   /* skills/rules for skill:// and rule:// (borrowed) */
     /* a skill:// name no loaded skill owns: rediscover the session's skills (rate-limited); true when the list
@@ -148,12 +150,15 @@ typedef struct tool_env {
      * answers keyed by id or NULL with *err (owned); usage accumulates [input, output, cost] (set by app) */
     json_t *(*judge)(struct tool_env *env, const char *lead_model, const json_t *state, const json_t *questions,
                      volatile sig_atomic_t *cancel, double usage[3], char **err);
-    /* write to xd://propose (plan approval) with the trimmed plan title; returns owned result text, sets
+    /* `propose` (plan approval) with the trimmed plan title; returns owned result text, sets
      * *is_error and *details (owned PlanApprovalDetails {planFilePath, title, planExists} or NULL) */
     char *(*propose_plan)(struct tool_env *env, const char *title, bool *is_error, json_t **details);
     /* spawn a subagent: returns owned final text; used by task tool (set by app) */
     char *(*run_subagent)(struct tool_env *env, const char *agent_name, const char *assignment, const char *context,
                           json_t **out_details, volatile sig_atomic_t *cancel);
+    /* an off-transcript side request a tool made billed `msg` (journaled as a model_usage entry of `purpose`, e.g.
+     * "magic-edit"); any thread (set by app, NULL: not journaled) */
+    void (*side_usage)(struct tool_env *env, const char *purpose, const json_t *msg);
     /* the session's active model and session id (owned, may be NULL) for web_search's `web/hosted` (set by app) */
     const struct ai_model *(*active_model)(struct tool_env *env, char **session_id);
     struct jobs *jobs;         /* async background jobs (owned; NULL disables async) */
@@ -165,7 +170,6 @@ typedef struct tool_env {
     hmap_t read_repeats;       /* read repeat tracker: selector -> identical-output count (read.c) */
     /* wait's IdleStreak: back-to-back waits that each elapsed with nothing new (write_bash.c) */
     bool wait_idle;
-    int wait_idle_rung;
     int64_t wait_idle_ended, wait_idle_waited_ms;
     bool task_lifecycle_shown; /* a spawn result already carried the job-lifecycle reference (task.c) */
     pthread_mutex_t mu;
@@ -174,7 +178,7 @@ typedef struct tool_env {
 tool_env_t *tool_env_new(const char *cwd);
 void tool_env_free(tool_env_t *e);
 
-/* map internal URLs (skill://, rule://, artifact://) to a local path, keeping any :selector suffix.
+/* map internal URLs (skill://, rule://) to a local path, keeping any :selector suffix.
  * Returns owned path or NULL if not an internal URL; sets *err (owned) when the URL is unknown. */
 char *tool_resolve_internal_url(tool_env_t *env, const char *url, char **err);
 /* resolve a model-supplied path against env cwd (expands ~), owned */
@@ -190,7 +194,7 @@ char *tool_truncate_head(const char *s, size_t len, size_t max_bytes, size_t max
 /* builtin registration */
 void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled /* NULL => defaults */);
 const char *const *tools_default_names(void); /* canonical built-in order (NULL-terminated) */
-/* order tools canonically and mount discoverable ones under xd:// (call after all tools are added) */
+/* order tools canonically and mount discoverable ones as bash tool commands (call after all tools are added) */
 void tools_finalize(agent_t *a, const strvec_t *requested);
 bool tools_scout_available(void);                     /* `scout` not in task.disabledAgents */
 bool tools_eager_delegation(const tool_env_t *env);   /* model delegation bias is "eager" */
@@ -206,6 +210,8 @@ const char *tool_edit_mode_setting(void); /* edit.mode / PI_EDIT_VARIANT: an edi
 char *jobs_render_results(const json_t *jobs);
 agent_tool_t *tool_grep_new(tool_env_t *env);
 agent_tool_t *tool_glob_new(tool_env_t *env);
+/* globSearchPath: glob's `path` with a `pattern` argument scoped under it (owned, NULL without either) */
+char *glob_search_path(const json_t *args);
 agent_tool_t *tool_todo_new(tool_env_t *env);
 /* /todo helpers (tools/todo.ts): one todo op applied to a copy of `phases` (in-progress normalized; errors appended);
  * phasesToMarkdown; markdownToPhases (errors appended). All return owned values. */
@@ -228,13 +234,15 @@ agent_tool_t *tool_ast_edit_new(tool_env_t *env);
  * reasoning (think.ts supportsExternalThinking) */
 agent_tool_t *tool_think_new(void);
 bool think_supported(const ai_model_t *m);
-/* finalize a staged ast_edit proposal (xd://resolve / xd://reject) */
-char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error);
+/* finalize the staged ast_edit proposal (`resolve` / `reject`): owned result text with *details (ResolveDetails), or
+ * NULL when no preview is pending */
+char *astedit_resolve(tool_env_t *env, bool apply, const char *reason, bool *is_error, json_t **details);
 /* re-render the eval description with the session tool names its bridge can call */
 void eval_set_tool_names(agent_tool_t *t, const json_t *names);
-/* re-renders the write description for whether `read` (the xd://read/sources transport) is active */
+/* re-renders the write description for whether `read` (the help://read/sources transport) is active */
 void write_set_read_active(agent_tool_t *t, bool read_active);
 void eval_release_session(agent_tool_t *t); /* stop the kernel and `sh` shell of the previous session */
+json_t *eval_default_doc_topics(void);      /* help://eval/<topic> without an eval tool (owned) */
 
 /* agent definitions (bundled + ~/.omc/agent/agents + .omc/agents): owned object name -> {name, description, tools[], model?, body} */
 json_t *agent_defs_load(const char *cwd);

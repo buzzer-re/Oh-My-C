@@ -1,6 +1,6 @@
 /* read tool: files (line selectors, hashline anchors), directories, images, URLs, archives, SQLite, PDF, notebooks. */
 #include "tools.h"
-#include "xdev.h"
+#include "toolcmd.h"
 #include "vurl.h"
 #include "iurl.h"
 #include "mr.h"
@@ -22,6 +22,7 @@
 #include <errno.h>
 
 #include <ctype.h>
+#include <unistd.h>
 #include <sys/stat.h>
 
 #define READ_MAX_BYTES (50u * 1024)
@@ -36,13 +37,13 @@ typedef struct {
     int64_t req_end; /* the end the selector asked for, kept through normalization (0 = open): names the range in notices */
 } lrange_t;
 
-/* omp LocatedRead: a file-backed internal URL (skill://, artifact://, memory://, agent://, attachment://, local://)
+/* omp LocatedRead: a file-backed internal URL (skill://, memory://, agent://, attachment://, local://)
  * located to its backing file and read through the filesystem pipeline under the URL's identity (SchemeSpec flags) */
 typedef struct {
     char *url;           /* the URL as written, selector peeled: names the read in hints and details.meta.source */
     bool immutable;      /* no hashline anchors, no conflict scan; a large file carries the backing-file notice */
     bool unbounded;      /* skill://: the whole document through the in-memory builder, no summary or result limits */
-    bool artifact_store; /* artifact://: pages keep the full budget and never spill */
+    bool unspilled_pages; /* SchemeSpec.unspilledPages (local://): pages keep the full budget and never spill */
 } located_t;
 
 typedef struct {
@@ -84,7 +85,7 @@ static bool parse_range_chunk(const char *c, lrange_t *r) {
     if (end == c || a <= 0) return false;
     if (!*end) {
         r->start = a;
-        r->end = 0; /* resolved by caller: single N is open-ended unless raw-single */
+        r->end = a; /* `:N` is that one line; `:N-` runs on (omp 49018fe880) */
         return true;
     }
     if (*end == '-' || (end[0] == '.' && end[1] == '.')) {
@@ -149,10 +150,33 @@ static bool parse_sel_token(const char *tok, selector_t *sel, bool *single_bare)
     return ok;
 }
 
+/* per-range `:raw` lists (`1-1:raw,3:raw`) are one raw range list (omp 49018fe880); rewritten in place (never longer) */
+static void fold_raw_list(char *work) {
+    for (char *c = strchr(work, ':'); c; c = strchr(c + 1, ':')) {
+        if (c == work || !strchr("0123456789L-", c[1])) continue;
+        strvec_t parts = str_split(c + 1, ",");
+        bool all_raw = parts.n > 1;
+        sb_t joined = SB_INIT;
+        for (size_t i = 0; i < parts.n && all_raw; i++) {
+            size_t pl = strlen(parts.v[i]);
+            lrange_t r;
+            char *head = pl > 4 && !strcasecmp(parts.v[i] + pl - 4, ":raw") ? xstrndup(parts.v[i], pl - 4) : NULL;
+            all_raw = head && parse_range_chunk(head, &r);
+            if (all_raw) sb_appendf(&joined, "%s%s", i ? "," : "", head);
+            free(head);
+        }
+        if (all_raw) sprintf(c + 1, "%s:raw", joined.s);
+        sb_free(&joined);
+        strvec_free(&parts);
+        if (all_raw) break;
+    }
+}
+
 /* split "path:sel:sel" preferring literal existing files */
 /* strip trailing :selector tokens from work (in place) into sel */
 static void strip_sel(char *work, selector_t *sel) {
     bool single_bare = false;
+
     for (int guard = 0; guard < 3; guard++) {
         char *colon = strrchr(work, ':');
         if (!colon || colon == work) break;
@@ -191,6 +215,9 @@ static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
     char *abs = tool_resolve_path(env, in);
     if (fs_exists(abs)) return abs;
     free(abs);
+    char *folded = xstrdup(in);
+    fold_raw_list(folded);
+    in = folded;
     /* splitPathAndSel peels one selector (list colons folded: `a:20:40,85:100` reads as `a:20-40,85-100`); the
      * path before it stays whole (`a.ts:12:5` asks for the path `a.ts:12`) */
     char *sp = NULL, *ss = NULL;
@@ -216,6 +243,7 @@ static char *split_path_sel(tool_env_t *env, const char *in, selector_t *sel) {
     free(ss);
     char *r = tool_resolve_path(env, work);
     free(work);
+    free(folded);
     return r;
 }
 
@@ -360,7 +388,7 @@ static char *located_notice(const char *url, const char *backing, int64_t size, 
 }
 
 /* omp read page budget: max(50 KB, lines*512) capped by the spill threshold minus the row-prefix reserve */
-static __thread bool g_budget_uncapped; /* artifact:// pages: artifact storage never spills, so no spill cap */
+static __thread bool g_budget_uncapped; /* unspilledPages (local://) pages never spill, so no spill cap */
 static int64_t page_budget(int64_t first_line, int64_t line_count, bool numbered) {
     int64_t scaled = MAX((int64_t)READ_MAX_BYTES, line_count * 512);
     if (g_budget_uncapped) return scaled;
@@ -373,6 +401,21 @@ static int64_t page_budget(int64_t first_line, int64_t line_count, bool numbered
     int64_t reserve = MIN(line_count * pw, threshold / 2);
     return MIN(scaled, threshold - reserve);
 }
+
+/* buildInMemoryTextResult's byte budget (omp f441a32e1a): 50 KB capped by the spill threshold minus the row-prefix
+ * reserve, so a bounded page of an in-memory resource fits inline and keeps its continuation */
+static int64_t inmem_budget(int64_t first_line, int64_t line_count, bool numbered) {
+    int64_t threshold = (int64_t)tool_spill_threshold();
+    int64_t pw = 0;
+    if (numbered) {
+        char tmp[32];
+        pw = snprintf(tmp, sizeof tmp, "%lld", (long long)(first_line + line_count)) + 1;
+    }
+    return MIN((int64_t)READ_MAX_BYTES, threshold - MIN(line_count * pw, threshold / 2));
+}
+
+/* the page's first line did not fit the budget (firstLineExceedsLimit): such a page is never a paged source */
+static __thread bool g_first_cut;
 
 /* lineBudgetBytes: what a line costs against the page budget: the UTF-8 bytes of its column-capped display when a cap
  * applies (stray bytes show as 3-byte U+FFFD), so a cut line is charged what the reader sees, not its source size.
@@ -487,6 +530,7 @@ static void page_meta(json_t *details, int64_t start_line, int64_t total, int64_
  * every other page shows a byte-capped preview; both carry the "partial" truncation notice. */
 static void first_line_page(sb_t *b, json_t *details, const char *line, int64_t line_no, int64_t total, int64_t budget, bool hashline,
                             bool numbered) {
+    g_first_cut = true;
     int64_t lb = (int64_t)strlen(line), keep = MIN(lb, budget);
     while (keep > 0 && keep < lb && ((unsigned char)line[keep] & 0xC0) == 0x80) keep--;
     char *fb = out_format_bytes(lb), *mb = out_format_bytes(budget);
@@ -567,7 +611,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     text_lines_t t;
     split_text(data, len, &t);
     int64_t total = (int64_t)t.lines.n;
-    /* resolveFileDisplayMode({immutable}): an immutable source (skill://, artifact://, ...) mints no hashline anchors */
+    /* resolveFileDisplayMode({immutable}): an immutable source (skill://, agent://, ...) mints no hashline anchors */
     bool hashline = !sel->raw && !sel->immutable && !sel->no_anchor && !(sel->loc && sel->loc->immutable) &&
                     str_eq(env->edit_mode, "hashline");
     bool numbered = hashline || (!sel->raw && sel->no_anchor && str_eq(env->edit_mode, "hashline")) ||
@@ -575,6 +619,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
     const char *ent = sel->entity ? sel->entity : "file";
     sb_t b = SB_INIT;
     json_t *details = json_obj();
+    g_first_cut = false;
     g_col_max = sel->raw || sel->resource ? 0 : settings_int("tools.outputMaxColumns", 768); /* buildInMemoryTextResult keeps lines whole */
     g_col_first = g_col_last = g_col_first_bytes = 0;
     /* numbered pages charge a cut line its capped width, so the budget bounds what is shown */
@@ -586,7 +631,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
      * in-memory builder (sel->resource) keeps bare `:N` hints */
     const char *base = sel->loc && !sel->resource ? sel->loc->url : "";
     const char *label = sel->loc ? sel->loc->url : display; /* resolvedDisplayPath */
-    g_budget_uncapped = sel->loc && sel->loc->artifact_store;
+    g_budget_uncapped = sel->loc && sel->loc->unspilled_pages;
     int64_t seen_lo = -1, seen_hi = -1;
     bool whole = false, eof_only = false;
     int64_t dc_first = 0, dc_last = -1; /* in-memory builder: the source lines shown (details.displayContent) */
@@ -676,7 +721,7 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
         /* an in-memory resource has no default line limit: truncateHead's 50 KB / 3000-line budget pages it */
         int64_t limit = sel->resource ? MAX(total, 1) : DEFAULT_LIMIT;
         int64_t max_lines = sel->unlimited ? limit : MIN(limit, OUT_DEFAULT_MAX_LINES);
-        int64_t budget = sel->unlimited ? INT64_MAX / 4 : sel->resource ? (int64_t)READ_MAX_BYTES : page_budget(0, max_lines, numbered);
+        int64_t budget = sel->unlimited ? INT64_MAX / 4 : sel->resource ? inmem_budget(0, max_lines, numbered) : page_budget(0, max_lines, numbered);
         line_window_t w;
         collect_window(&t.lines, 0, max_lines, budget, limit, display_columns, &w);
         bool first_exceeds = w.n == 0 && w.stopped && can_first_exceed;
@@ -784,13 +829,14 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
             int64_t st = req - lead;
             int64_t max_lines = sel->unlimited ? eff + lead + trail : MIN(eff + lead + trail, OUT_DEFAULT_MAX_LINES);
             int64_t page_cols = sel->raw ? 0 : display_columns;
-            pg_budget = sel->unlimited ? INT64_MAX / 4 : page_budget(st, max_lines, numbered);
+            pg_budget = sel->unlimited ? INT64_MAX / 4 : sel->resource ? inmem_budget(st, max_lines, numbered) : page_budget(st, max_lines, numbered);
             collect_window(&t.lines, st, max_lines, pg_budget, eff + lead + trail, page_cols, &pw);
             /* Leading context is optional padding: a context line must not hide the page that was asked for. When the
              * context itself fit (a cut wide line can), keep it unless the retry shows the requested line: a requested
              * line too large alone keeps its "could not fit after preceding context" notice. */
             if (lead && pw.stopped && pw.n <= lead) {
-                int64_t retry_lines = MIN(eff + trail, OUT_DEFAULT_MAX_LINES), retry_budget = page_budget(req, retry_lines, numbered);
+                int64_t retry_lines = MIN(eff + trail, OUT_DEFAULT_MAX_LINES),
+                        retry_budget = sel->resource ? inmem_budget(req, retry_lines, numbered) : page_budget(req, retry_lines, numbered);
                 line_window_t rw;
                 collect_window(&t.lines, req, retry_lines, retry_budget, eff + trail, page_cols, &rw);
                 if (pw.n < lead || rw.n > 0) {
@@ -854,10 +900,9 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
                 last_shown = ln;
             }
         }
-        if (sel->raw && body.len && body.s[body.len - 1] == '\n') {
-            bool open_to_eof = rs.n == 1 && sel->ranges.v[0].end == 0 && last_shown == total && t.trailing_nl;
-            if (!open_to_eof) sb_truncate(&body, body.len - 1);
-        }
+        /* a raw range keeps its last line's terminator: every line has one but an unterminated final line (omp 49018fe880) */
+        if (sel->raw && body.len && body.s[body.len - 1] == '\n' && last_shown == total && !t.trailing_nl)
+            sb_truncate(&body, body.len - 1);
         if (hashline && rs.n) {
             const char *tag = NULL;
             for (size_t i = 0; i < rs.n; i++) {
@@ -878,14 +923,14 @@ static int read_text(tool_env_t *env, const char *abs, const char *display, cons
          * budget is still shown whole in its cut form */
         int64_t window_end = sel->raw && paged && sel->ranges.v[0].end ? MIN(total, sel->ranges.v[0].end) : total;
         if (paged && sel->resource && last_shown < total && !pw.stopped && sel->ranges.v[0].end != 0) {
-            sb_appendf(&b, "%s\n[%lld more lines in %s. Use :%lld to continue]", b.len && b.s[b.len - 1] == '\n' ? "" : "\n",
+            sb_appendf(&b, "%s\n[%lld more lines in %s. Use :%lld- to continue]", b.len && b.s[b.len - 1] == '\n' ? "" : "\n",
                        (long long)(total - last_shown), ent, (long long)(last_shown + 1));
         } else if (paged) {
             if (last_shown < window_end)
                 page_meta(details, rs.v[0].start, total, last_shown - rs.v[0].start + 1, pw.selected, pw.collected, pw.stopped, pg_budget,
                           omitted ? -1 : 0);
         } else if (cut || (rs.n == 1 && sel->ranges.v[0].end == 0 && last_shown < total && !sel->raw))
-            sb_appendf(&b, "\n[%lld more lines in %s. Use %s:%lld to continue]", (long long)(total - last_shown), ent, base,
+            sb_appendf(&b, "\n[%lld more lines in %s. Use %s:%lld- to continue]", (long long)(total - last_shown), ent, base,
                        (long long)(last_shown + 1));
         if (notes.len) {
             if (sel->raw) { /* appendReadNotice: a raw read keeps its notices out of the verbatim text */
@@ -908,7 +953,7 @@ rendered:
         json_t *m = meta ? json_clone(meta) : NULL;
         out_meta_column_truncated(&m, g_col_max, "chars", NULL, 0, g_col_first, g_col_last, base);
         /* a `:raw:N-N` read gets the budget of a one-line raw page; a cut line past it comes back byte-capped */
-        int64_t raw_line_budget = sel->loc && sel->loc->artifact_store ? (int64_t)READ_MAX_BYTES
+        int64_t raw_line_budget = sel->loc && sel->loc->unspilled_pages ? (int64_t)READ_MAX_BYTES
                                                                        : MIN((int64_t)READ_MAX_BYTES, (int64_t)tool_spill_threshold());
         if (g_col_first_bytes > raw_line_budget) out_meta_column_raw_cap(m, raw_line_budget);
         json_set(details, "meta", m);
@@ -924,7 +969,7 @@ rendered:
     }
     /* a bounded page re-readable with `:N` selectors is not spilled (omp pagedSource); a page of artifact storage
      * is re-readable with selectors, so it never spills */
-    if (b.len <= tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES || (sel->loc && sel->loc->artifact_store)) {
+    if (b.len <= tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES || (sel->loc && sel->loc->unspilled_pages)) {
         json_t *meta = json_get_obj(details, "meta");
         if (!meta) {
             meta = json_obj();
@@ -936,7 +981,10 @@ rendered:
         json_t *meta = json_get_obj(details, "meta");
         meta = meta ? json_clone(meta) : NULL;
         json_del(details, "meta");
-        if (meta) json_del(meta, "pagedSource"); /* the in-memory builders never mark a paged source */
+        /* the in-memory builder marks a page that fits inline as a paged source (omp f441a32e1a) unless it ignores result
+         * limits or its first line did not fit */
+        if (meta && (sel->unlimited || g_first_cut || b.len > tool_spill_threshold() + OUT_INLINE_CAP_SLACK_BYTES))
+            json_del(meta, "pagedSource");
         if (sel->raw) json_set_bool(details, "raw", true);
         json_set_int(details, "totalLines", total);
         if (!eof_only) { /* the beyond-EOF notice returns before these */
@@ -1054,7 +1102,8 @@ static void read_pdf_bytes(tool_env_t *env, const char *abs, const char *data, s
     strvec_free(&pages);
 }
 
-static void read_archive(tool_env_t *env, const char *path, const char *abs, const char *sub, tool_result_t *out) {
+static bool read_image(tool_ctx_t *ctx, const char *abs, const char *display, int64_t size, tool_result_t *out);
+static void read_archive(tool_env_t *env, tool_ctx_t *ctx, const char *path, const char *abs, const char *sub, tool_result_t *out) {
     char *err = NULL;
     rf_archive_t *a = rf_archive_open(abs, &err);
     if (!a) {
@@ -1115,22 +1164,28 @@ static void read_archive(tool_env_t *env, const char *path, const char *abs, con
         } else {
             /* selectors address entries with line semantics: ":50" starts at the 50th, ":-20" lists the last 20 */
             int64_t total = (int64_t)ents.n, off = 1, limit = 500;
+            bool explicit_limit = false;
             if (sel.ranges.n == 1) {
                 lrange_t r = sel.ranges.v[0];
                 if (r.start < 0) {
                     off = MAX(1, total + r.start + 1);
                     limit = MAX((int64_t)1, MIN(-r.start, total));
+                    explicit_limit = true;
                 } else {
                     off = r.start;
-                    if (r.end) limit = r.end - r.start + 1;
+                    if (r.end) {
+                        limit = r.end - r.start + 1;
+                        explicit_limit = true;
+                    }
                 }
             }
             int64_t avail = MAX((int64_t)0, total - (off - 1));
             int64_t shown = MIN(avail, limit);
             char *list = shown > 0 ? rf_format_dirents(ents.v + (off - 1), (size_t)shown) : xstrdup("(empty archive directory)");
-            if (limit > 0 && avail >= limit)
-                tool_result_textf(out, "%s\n\n[%lld results limit reached. Use limit=%lld for more]", list, (long long)limit,
-                                  (long long)limit * 2);
+            /* an open listing names where the rest continues (omp 49018fe880) */
+            if (!explicit_limit && avail > shown)
+                tool_result_textf(out, "%s\n\n[%lld more entries in listing. Use :%lld- to continue]", list,
+                                  (long long)(avail - shown), (long long)(off + shown));
             else
                 tool_result_text(out, list);
             free(list);
@@ -1150,6 +1205,29 @@ static void read_archive(tool_env_t *env, const char *path, const char *abs, con
             char *mp = xasprintf("%s:%s", abs, norm);
             read_pdf_bytes(env, mp, data, len, pdf_first, pdf_last, &sel, out);
             free(mp);
+        } else if (!sel.ranges.n && !sel.raw && img_sniff((const uint8_t *)data, len, &(img_meta_t){0})) {
+            /* an image member goes to the image loader, materialized under an owned name (omp 49018fe880) */
+            const char *tmpd = getenv("TMPDIR");
+            char *tmpl = xasprintf("%s/omc-read-archive-image-XXXXXX", tmpd && *tmpd ? tmpd : "/tmp");
+            int fd = mkstemp(tmpl);
+            bool shown = false;
+            if (fd >= 0) {
+                bool wrote = write(fd, data, len) == (ssize_t)len;
+                close(fd);
+                if (wrote) shown = read_image(ctx, tmpl, path, (int64_t)len, out);
+                unlink(tmpl);
+            }
+            free(tmpl);
+            if (shown) {
+                details = json_obj();
+                char *mp = xasprintf("%s:%s", abs, norm);
+                json_set_str(details, "resolvedPath", mp);
+                free(mp);
+            } else {
+                char *sz = rf_fmt_bytes((int64_t)len);
+                tool_result_textf(out, "[Cannot read binary archive entry '%s' (%s)]", norm, sz);
+                free(sz);
+            }
         } else if (!rf_is_text(data, len)) {
             char *sz = rf_fmt_bytes((int64_t)len);
             tool_result_textf(out, "[Cannot read binary archive entry '%s' (%s)]", norm, sz);
@@ -1170,7 +1248,7 @@ static void read_archive(tool_env_t *env, const char *path, const char *abs, con
 }
 
 /* archive members ("x.zip:dir/file:10-20") and SQLite selectors ("x.db:table?limit=5"); true when handled */
-static bool read_structured(tool_env_t *env, const char *path, tool_result_t *out) {
+static bool read_structured(tool_env_t *env, tool_ctx_t *ctx, const char *path, tool_result_t *out) {
     char *full = tool_resolve_path(env, path);
     bool literal = fs_exists(full);
     free(full);
@@ -1182,7 +1260,7 @@ static bool read_structured(tool_env_t *env, const char *path, tool_result_t *ou
         struct stat st;
         bool ok = stat(abs, &st) == 0 && !S_ISDIR(st.st_mode);
         if (ok) {
-            read_archive(env, path, abs, c.v[i].sub, out);
+            read_archive(env, ctx, path, abs, c.v[i].sub, out);
             if (!out->details) {
                 out->details = json_obj();
                 json_set_str(out->details, "resolvedPath", abs);
@@ -1218,6 +1296,31 @@ static bool read_structured(tool_env_t *env, const char *path, tool_result_t *ou
         }
     }
     rf_splits_free(&c);
+    /* a SQLite file without a database extension is recognized by its header alone (omp 49018fe880) */
+    if (!literal) {
+        rf_sqlite_boundary_candidates(path, &c);
+        for (size_t i = 0; i < c.n; i++) {
+            char *abs = tool_resolve_path(env, c.v[i].container);
+            struct stat st;
+            bool ok = stat(abs, &st) == 0 && S_ISREG(st.st_mode) && rf_sqlite_sniff(abs);
+            if (ok) {
+                bool is_err = false;
+                char *txt = rf_sqlite_read(abs, c.v[i].sub, c.v[i].query, &is_err);
+                if (is_err) tool_result_error(out, "%s", txt);
+                else tool_result_text(out, txt);
+                free(txt);
+                json_free(out->details);
+                out->details = json_obj();
+                json_set_str(out->details, "resolvedPath", abs);
+            }
+            free(abs);
+            if (ok) {
+                rf_splits_free(&c);
+                return true;
+            }
+        }
+        rf_splits_free(&c);
+    }
     return false;
 }
 
@@ -1261,6 +1364,7 @@ static bool read_pdf_pages(tool_env_t *env, const char *path, tool_result_t *out
 }
 
 static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out);
+static bool accepts_line_selector(const char *path);
 
 static int read_ssh(tool_env_t *env, const char *path, tool_result_t *out) {
     selector_t sel;
@@ -1337,20 +1441,94 @@ static void virtual_details(tool_result_t *out, const char *url, const char *sou
     for (size_t i = 0; i < ARRAY_LEN(order); i++) json_move_last(d, order[i]);
 }
 
-/* xd:// docs: a `lines` scheme (omp c51e68b454), so `xd://eval/judge:1-20` pages the doc instead of naming a topic
- * `judge:1-20` */
-static int read_xd(agent_t *agent, tool_env_t *env, const char *path, tool_result_t *out) {
+/* parseHelpUrl: `help://`, `help://<tool>`, `help://<tool>/<topic>` (trailing slash allowed); false otherwise */
+static bool parse_help_url(const char *url, char **tool, char **topic) {
+    *tool = *topic = NULL;
+    char *t = str_trim(url);
+    if (strncasecmp(t, "help://", 7) != 0) {
+        free(t);
+        return false;
+    }
+    const char *rest = t + 7;
+    size_t n = strlen(rest);
+    if (n && rest[n - 1] == '/') n--;
+    const char *sl = memchr(rest, '/', n);
+    size_t tl = sl ? (size_t)(sl - rest) : n;
+    bool ok = true;
+    for (size_t i = 0; i < n; i++)
+        if (rest[i] == '?' || rest[i] == '#' || isspace((unsigned char)rest[i])) ok = false;
+    if (ok && sl) ok = tl > 0 && (size_t)(sl - rest) + 1 < n && !memchr(sl + 1, '/', n - tl - 1);
+    if (ok && !n && rest[0] == '/') ok = false; /* `help:///` */
+    if (ok && tl) {
+        *tool = xstrndup(rest, tl);
+        if (sl) *topic = xstrndup(sl + 1, n - tl - 1);
+    }
+    free(t);
+    return ok;
+}
+
+/* a session tool's doc topics; a session without eval still serves the eval docs its assignments link */
+static json_t *help_topics(agent_t *agent, const char *name, char **err) {
+    agent_tool_t *t = agent ? agent_find_tool(agent, name) : NULL;
+    json_t *topics = t && t->doc_topics ? t->doc_topics(t) : NULL;
+    if (!topics && !t && str_eq(name, "eval")) topics = eval_default_doc_topics();
+    if (!topics) *err = t ? xasprintf("Tool '%s' has no doc topics.", name) : xasprintf("No tool '%s' in this session.", name);
+    return topics;
+}
+
+/* HelpProtocolHandler.resolve: the doc text of `url` or an error */
+static void help_resolve(agent_t *agent, const char *url, tool_result_t *out) {
+    char *tool = NULL, *topic = NULL, *err = NULL;
+    if (!parse_help_url(url, &tool, &topic)) {
+        tool_result_error(out, "Invalid help:// URL: %s. Use help://<tool>/<topic>.", url);
+        return;
+    }
+    if (!tool) {
+        tool_result_error(out, "help:// needs a tool and topic: use help://<tool>/<topic>.");
+        return;
+    }
+    json_t *topics = help_topics(agent, tool, &err);
+    if (!topics) {
+        tool_result_error(out, "%s", err);
+    } else if (!topic) {
+        sb_t b = SB_INIT;
+        const char *k;
+        json_t *v;
+        json_obj_foreach(topics, i, k, v) sb_appendf(&b, "%shelp://%s/%s", i ? "\n" : "", tool, k);
+        tool_result_text(out, sb_cstr(&b));
+        sb_free(&b);
+    } else {
+        const char *doc = json_get_str(topics, topic);
+        if (doc) {
+            tool_result_text(out, doc);
+        } else {
+            sb_t b = SB_INIT;
+            const char *k;
+            json_t *v;
+            json_obj_foreach(topics, i, k, v) sb_appendf(&b, "%s%s", i ? ", " : "", k);
+            tool_result_error(out, "Unknown topic '%s' for %s. Available: %s.", topic, tool, sb_cstr(&b));
+            sb_free(&b);
+        }
+    }
+    json_free(topics);
+    free(err);
+    free(tool);
+    free(topic);
+}
+
+/* help:// docs: a `lines` scheme, so `help://eval/judge:1-20` pages the doc instead of naming a topic `judge:1-20` */
+static int read_help(agent_t *agent, tool_env_t *env, const char *path, tool_result_t *out) {
     char *work = xstrdup(path);
     selector_t sel;
     memset(&sel, 0, sizeof sel);
-    strip_sel(work + 5, &sel);
+    strip_sel(work + 7, &sel);
     sel.entity = "resource";
     sel.resource = true;
     if (!sel.has_sel) {
-        xdev_read(agent, work, out);
+        help_resolve(agent, work, out);
     } else {
         tool_result_t doc = {0};
-        xdev_read(agent, work, &doc);
+        help_resolve(agent, work, &doc);
         if (doc.is_error) {
             *out = doc;
             memset(&doc, 0, sizeof doc);
@@ -1528,7 +1706,106 @@ done:
 }
 
 /* mcp://<resource-uri>: read a resource from the connected MCP server that advertises it */
-static int read_mcp(tool_env_t *env, const char *path, tool_result_t *out) {
+static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const located_t *loc, tool_result_t *out);
+
+/* decodeURIComponent: owned, or NULL on malformed percent-encoding */
+static char *pct_decode_dup(const char *s) {
+    sb_t b = SB_INIT;
+    for (const char *p = s; *p; p++) {
+        if (*p != '%') {
+            sb_putc(&b, *p);
+            continue;
+        }
+        if (!isxdigit((unsigned char)p[1]) || !isxdigit((unsigned char)p[2])) {
+            sb_free(&b);
+            return NULL;
+        }
+        char hx[3] = {p[1], p[2], 0};
+        sb_putc(&b, (char)strtol(hx, NULL, 16));
+        p += 2;
+    }
+    char *r = sb_detach(&b);
+    if (!utf8_valid(r, strlen(r))) {
+        free(r);
+        return NULL;
+    }
+    return r;
+}
+
+/* writeResourceBackingFile (omp 578b47d077): a byte resource as a stable file named after the URL's last segment, with the
+ * extension its MIME type implies when the name has none, so `read` handles it like any other file. Owned path or NULL. */
+static char *resource_backing_file(const char *url, const unsigned char *bytes, size_t n, const char *mime) {
+    static const char *const ext_by_mime[][2] = {
+        {"application/pdf", ".pdf"},
+        {"application/x-pdf", ".pdf"},
+        {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"},
+        {"application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"},
+        {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"},
+        {"application/epub+zip", ".epub"},
+        {"application/zip", ".zip"},
+        {"application/x-zip-compressed", ".zip"},
+        {"application/x-tar", ".tar"},
+        {"application/gzip", ".tar.gz"},
+        {"application/x-gzip", ".tar.gz"},
+        {"application/x-ipynb+json", ".ipynb"},
+    };
+    size_t ul = strcspn(url, "?#");
+    char *head = xstrndup(url, ul);
+    char *name = NULL;
+    for (char *p = head + ul; p > head;) { /* the last non-empty `/` segment of the whole string */
+        char *e = p;
+        while (p > head && p[-1] != '/') p--;
+        if (e > p) {
+            name = xstrndup(p, (size_t)(e - p));
+            break;
+        }
+        if (p > head) p--;
+    }
+    free(head);
+    if (name) {
+        char *dec = pct_decode_dup(name);
+        if (dec) {
+            free(name);
+            name = dec;
+        }
+        for (unsigned char *q = (unsigned char *)name; *q; q++)
+            if (strchr("\\/:*?\"<>|", *q) || *q < 0x20) *q = '_';
+    }
+    if (!name || !*name || !strcmp(name, ".") || !strcmp(name, "..")) {
+        free(name);
+        name = xstrdup("resource");
+    }
+    char *mt = str_lower(mime ? mime : "");
+    mt[strcspn(mt, ";")] = 0;
+    char *mtt = str_trim(mt);
+    free(mt);
+    if (!strrchr(name, '.') || strrchr(name, '.') == name)
+        for (size_t i = 0; i < ARRAY_LEN(ext_by_mime); i++)
+            if (!strcmp(mtt, ext_by_mime[i][0])) {
+                char *nn = xasprintf("%s%s", name, ext_by_mime[i][1]);
+                free(name);
+                name = nn;
+                break;
+            }
+    free(mtt);
+    const char *tmpd = getenv("TMPDIR");
+    char *root = realpath(tmpd && *tmpd ? tmpd : "/tmp", NULL);
+    if (!root) root = xstrdup(tmpd && *tmpd ? tmpd : "/tmp");
+    char *dir = xasprintf("%s/omc-resource/%llx", root, (unsigned long long)hash_fnv1a(url, strlen(url)));
+    fs_mkdir_p(dir, 0700);
+    char *file = path_join(dir, name);
+    bool ok = fs_write(file, bytes, n) == 0;
+    free(root);
+    free(dir);
+    free(name);
+    if (!ok) {
+        free(file);
+        return NULL;
+    }
+    return file;
+}
+
+static int read_mcp(tool_env_t *env, tool_ctx_t *ctx, const char *path, tool_result_t *out) {
     const char *rest = path + strlen("mcp://");
     char *uri = str_trim(rest);
     size_t ul = strlen(uri);
@@ -1538,9 +1815,34 @@ static int read_mcp(tool_env_t *env, const char *path, tool_result_t *out) {
         free(uri);
         return 0;
     }
-    char *text = NULL, *server = NULL, *err = NULL;
-    if (mcp_read_resource(mcp_default_manager(), uri, &text, &server, &err) != 0) {
+    char *text = NULL, *server = NULL, *err = NULL, *mime = NULL;
+    unsigned char *bytes = NULL;
+    size_t nbytes = 0;
+    if (mcp_read_resource_ex(mcp_default_manager(), uri, &text, &server, &bytes, &nbytes, &mime, &err) != 0) {
         tool_result_error(out, "%s", err ? err : "MCP resource read failed");
+    } else if (bytes) {
+        /* bytes take the file pipeline under the URL's identity: images and documents by their content and type,
+         * anything else as a binary file (`:raw` reads it verbatim) */
+        char *backing = resource_backing_file(path, bytes, nbytes, mime);
+        if (!backing) {
+            tool_result_error(out, "Cannot store the MCP resource bytes of %s", path);
+        } else {
+            located_t loc = {.url = (char *)path, .immutable = true};
+            read_path(env, ctx, backing, &loc, out);
+            if (!out->is_error) {
+                if (!out->details) out->details = json_obj();
+                json_t *meta = json_get_obj(out->details, "meta");
+                if (!meta) {
+                    meta = json_obj();
+                    json_set(out->details, "meta", meta);
+                }
+                json_t *src = json_obj();
+                json_set_str(src, "type", "internal");
+                json_set_str(src, "value", path);
+                json_set(meta, "source", src);
+            }
+            free(backing);
+        }
     } else {
         tool_result_text(out, text);
         out->details = json_obj();
@@ -1550,6 +1852,8 @@ static int read_mcp(tool_env_t *env, const char *path, tool_result_t *out) {
     free(text);
     free(server);
     free(err);
+    free(mime);
+    free(bytes);
     free(uri);
     return 0;
 }
@@ -1629,7 +1933,7 @@ static bool sel_has_raw(const char *sel) {
 
 /* omp read.ts: a routed URL located to its backing file (`backing`, the selector kept) reads through the filesystem
  * pipeline under the URL's identity: the scheme's spec decides hashlines (immutable), whole-document reads
- * (unbounded) and the page budget (artifactStore); the result names the URL in details.meta.source, Markdown
+ * (unbounded) and the page budget (unspilledPages); the result names the URL in details.meta.source, Markdown
  * backing files render as Markdown, and a skill file read carries its provenance line */
 static void read_located(tool_env_t *env, tool_ctx_t *ctx, const char *path, const char *backing, tool_result_t *out) {
     const char *rest = strstr(path, "://") + 3;
@@ -1639,7 +1943,7 @@ static void read_located(tool_env_t *env, tool_ctx_t *ctx, const char *path, con
     bool skill = str_starts(path, "skill://");
     loc.immutable = !str_starts(path, "local://");
     loc.unbounded = skill;
-    loc.artifact_store = str_starts(path, "artifact://");
+    loc.unspilled_pages = str_starts(path, "local://");
     read_path(env, ctx, backing, &loc, out);
     if (!out->is_error) {
         if (!out->details) out->details = json_obj();
@@ -1750,7 +2054,7 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
         }
         return web_read_url(env, path, ctx->cancel, out);
     }
-    if (!strncasecmp(path, "xd://", 5)) return read_xd(ctx ? ctx->agent : NULL, env, path, out);
+    if (!strncasecmp(path, "help://", 7)) return read_help(ctx ? ctx->agent : NULL, env, path, out);
     if (str_starts(path, "pr://") || str_starts(path, "issue://")) return read_github(env, path, out);
     if (str_starts(path, "mr://")) return read_mr(env, path, out);
     if (str_starts(path, "ssh://")) return read_ssh(env, path, out);
@@ -1767,11 +2071,33 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
             return 0;
         }
     }
+    /* eval's read() asks every delegated URL for `:raw`; a scheme that takes no selectors (mcp://) reads whole */
+    char *peeled = NULL;
+    if (ctx && ctx->programmatic && strlen(path) > 4 && !strcasecmp(path + strlen(path) - 4, ":raw") && strstr(path, "://")) {
+        char *bare = xstrndup(path, strlen(path) - 4);
+        if (!accepts_line_selector(bare)) {
+            peeled = bare;
+            path = peeled;
+        } else {
+            free(bare);
+        }
+    }
+    if (peeled) {
+        json_t *a2 = json_clone(args);
+        json_set_str(a2, "path", peeled);
+        int rc = read_execute_inner(self, &(tool_ctx_t){.agent = ctx->agent, .tool_call_id = ctx->tool_call_id,
+                                                        .tool_name = ctx->tool_name, .cancel = ctx->cancel, .app = ctx->app,
+                                                        .programmatic = false},
+                                    a2, out);
+        json_free(a2);
+        free(peeled);
+        return rc;
+    }
     if (vurl_is(path)) return vurl_read(env, path, out);
     if (!strncasecmp(path, "cfg:/", 5)) return read_cfg(env, path, out);
     if (iurl_read(env, path, out)) return 0;
     if (str_starts(path, "omc://")) return read_omc_docs(env, path, out);
-    if (str_starts(path, "mcp://")) return read_mcp(env, path, out);
+    if (str_starts(path, "mcp://")) return read_mcp(env, ctx, path, out);
     if (str_starts(path, "rule://")) return read_rule(env, path, out);
     char *uerr = NULL;
     char *internal = tool_resolve_internal_url(env, path, &uerr);
@@ -1791,7 +2117,7 @@ static int read_execute_inner(agent_tool_t *self, tool_ctx_t *ctx, const json_t 
 /* the filesystem read pipeline: directories, archives, sqlite, PDFs, images, notebooks and text. `loc` carries the
  * URL a routed read resolved to `path`; its hints name that URL. */
 static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const located_t *loc, tool_result_t *out) {
-    if (read_structured(env, path, out) || read_pdf_pages(env, path, out)) return 0;
+    if (read_structured(env, ctx, path, out) || read_pdf_pages(env, path, out)) return 0;
     selector_t sel;
     char *abs = split_path_sel(env, path, &sel);
     sel.loc = loc;
@@ -1803,6 +2129,28 @@ static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const l
         /* localReadPath: the path with its selector peeled */
         char *sp = NULL, *ss = NULL;
         if (sel.has_sel) read_split_path_sel(path, &sp, &ss);
+        /* a numeric pair can also be a literal filename plus a selector: diagnosed only after the lookup failed */
+        char *pp = NULL, *ps = NULL;
+        if (ss && *ss && !ss[strspn(ss, "0123456789")]) read_split_path_sel(sp, &pp, &ps);
+        if (ps && *ps && !ps[strspn(ps, "0123456789")]) {
+            char *pabs = tool_resolve_path(env, pp);
+            struct stat pst;
+            bool exists = stat(pabs, &pst) == 0;
+            free(pabs);
+            if (exists) {
+                /* `file:10:5` is usually a line and column; a reversed range would only fail again */
+                char *range = strtoll(ss, NULL, 10) > strtoll(ps, NULL, 10) ? xasprintf(" or :%s-%s for a range", ps, ss) : xstrdup("");
+                tool_result_error(out, "Invalid line selector ':%s:%s'. Use :%s for a single line%s.", ps, ss, ps, range);
+                free(range);
+                free(pp);
+                free(ps);
+                free(sp);
+                free(ss);
+                goto done;
+            }
+        }
+        free(pp);
+        free(ps);
         tool_result_error(out, "Path '%s' not found", ss ? sp : path);
         free(sp);
         free(ss);
@@ -1837,7 +2185,9 @@ static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const l
     }
     /* located files are often large session storage (spilled tool output): a bare `:raw` read inlines one only below
      * the budget; bigger ones page with ranges */
-    if (loc && !loc->unbounded && sel.raw && !sel.ranges.n && !sel.img && !sel.conflicts && st.st_size > READ_MAX_BYTES) {
+    bool programmatic = ctx && ctx->programmatic;
+    if (loc && !loc->unbounded && !programmatic && sel.raw && !sel.ranges.n && !sel.img && !sel.conflicts &&
+        st.st_size > READ_MAX_BYTES) {
         char *notice = located_notice(loc->url, abs, (int64_t)st.st_size, true);
         tool_result_text(out, notice);
         free(notice);
@@ -1872,8 +2222,20 @@ static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const l
         goto done;
     }
     if (!sel.raw && fs_is_binary(data, len)) {
+        /* a database without a `.db`/`.sqlite` name (`state.vscdb`, Chrome's `History`) lists its tables */
+        if (!sel.has_sel && rf_sqlite_sniff(abs)) {
+            bool is_err = false;
+            char *txt = rf_sqlite_read(abs, "", "", &is_err);
+            if (is_err) tool_result_error(out, "%s", txt);
+            else tool_result_text(out, txt);
+            free(txt);
+            out->details = json_obj();
+            json_set_str(out->details, "resolvedPath", abs);
+            free(data);
+            goto done;
+        }
         char *sz = fmt_bytes((int64_t)len);
-        tool_result_textf(out, "[Binary file %s (%s); use :raw to force a text read]", display, sz);
+        tool_result_textf(out, "[Cannot read binary file '%s' (%s); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]", display, sz);
         free(sz);
         free(data);
         goto done;
@@ -1905,9 +2267,9 @@ static int read_path(tool_env_t *env, tool_ctx_t *ctx, const char *path, const l
         out->details = json_obj();
         json_set_str(out->details, "resolvedPath", abs);
         json_set_int(out->details, "conflictCount", count);
-    } else if (loc && loc->unbounded) {
+    } else if ((loc && loc->unbounded) || (programmatic && sel.raw)) {
         /* unbounded schemes (instruction documents) read whole through the in-memory builder: no summary, no result
-         * limits, the BOM stripped */
+         * limits, the BOM stripped; so does a program's `:raw` read (a page or a cut line would corrupt what it parses) */
         size_t bom = len >= 3 && !memcmp(data, "\xEF\xBB\xBF", 3) ? 3 : 0;
         sel.resource = sel.immutable = sel.unlimited = sel.builder_details = true;
         sel.entity = "file";
@@ -1934,8 +2296,8 @@ static bool accepts_line_selector(const char *path) {
         if (!isalnum((unsigned char)*p) && !strchr("+-.", *p)) return true;
     size_t n = (size_t)(sep - path);
     static const char *const passthrough[] = {"file", "http", "https", NULL};
-    static const char *const lines[] = {"agent", "artifact", "cfg", "conflict", "history", "issue", "pr", "local", "memory", "mr", "omc", "omp",
-                                        "proc", "rule", "security", "skill", "ssh", "vault", "xd", NULL};
+    static const char *const lines[] = {"agent", "cfg", "conflict", "history", "issue", "pr", "local", "memory", "mr", "omc", "omp",
+                                        "proc", "rule", "security", "skill", "ssh", "vault", "help", NULL};
     for (const char *const *s = passthrough; *s; s++)
         if (strlen(*s) == n && !strncasecmp(path, *s, n)) return true;
     for (const char *const *s = lines; *s; s++)
@@ -2038,7 +2400,7 @@ static char *drop_executable_lines(char *text) {
     return sb_detach(&b);
 }
 
-/* ReadTool.docTopics: `xd://read/sources` (selectors for sources the description only names) and `xd://read/urls`
+/* ReadTool.docTopics: `help://read/sources` (selectors for sources the description only names) and `help://read/urls`
  * (the internal-URL grammar the system prompt's one-line entries leave out) */
 static json_t *read_doc_topics(agent_tool_t *self) {
     json_t *ctx = json_obj();

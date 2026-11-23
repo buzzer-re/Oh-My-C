@@ -262,7 +262,7 @@ static void sync_tools(ui_t *u) {
     xdnotice_sync(a, &xn);
     if (xn) { /* emitted while the refresh runs, ahead of the command's own result */
         if (!g_startup_phase || !settings_bool("startup.quietWarnings", false)) {
-            char *m = xasprintf("xdev: %s", xn);
+            char *m = xasprintf("toolCommands: %s", xn);
             add_notice(u, "info", m);
             free(m);
         }
@@ -432,9 +432,9 @@ static void connection_status(ui_t *u) {
 
 static bool g_install_done;
 
-/* the deferred (cached) MCP tools mounted under xd:// at startup: omp's deferred discovery mounts them through
- * refreshMCPTools after the "Connecting…" line (xdev: xd://: mounted …); omc registers them with the session, so
- * the notice line is shown here */
+/* the deferred (cached) MCP tools mounted as tool commands at startup: omp's deferred discovery mounts them through
+ * refreshMCPTools after the "Connecting…" line (toolCommands: Tool commands: added …); omc registers them with the
+ * session, so the notice line is shown here */
 static void deferred_mount_notice(ui_t *u) {
     app_t *a = u->app;
     if (!a->mcp || settings_bool("startup.quiet", false) || settings_bool("startup.quietWarnings", false) ||
@@ -454,7 +454,7 @@ static void deferred_mount_notice(ui_t *u) {
         if (mcp_server_state(a->mcp, servers.v[i]) != MCP_CONNECTED) strvec_push(&deferred, names.v[i]);
     if (deferred.n) {
         char *j = strvec_join(&deferred, ", ");
-        char *m = xasprintf("xdev: xd://: mounted %s", j);
+        char *m = xasprintf("toolCommands: Tool commands: added %s", j);
         add_notice(u, "info", m);
         free(m);
         free(j);

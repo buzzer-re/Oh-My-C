@@ -47,7 +47,7 @@ typedef struct {
 void approval_decision_free(approval_decision_t *d);
 void approval_resolved_free(approval_resolved_t *r);
 
-/* A tool call as approval sees it. `agent` resolves xd:// devices (may be NULL). */
+/* A tool call as approval sees it. `agent` resolves tool commands in a bash line (may be NULL). */
 typedef struct {
     tool_env_t *env;
     agent_t *agent;

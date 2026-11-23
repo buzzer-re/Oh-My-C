@@ -132,6 +132,34 @@ void rf_sqlite_candidates(const char *path, rf_splits_t *out) {
     split_candidates(path, SQLITE_EXTS, ARRAY_LEN(SQLITE_EXTS), ":?", true, out);
 }
 
+void rf_sqlite_boundary_candidates(const char *path, rf_splits_t *out) {
+    memset(out, 0, sizeof(*out));
+    char *norm = xstrdup(path);
+    for (char *p = norm; *p; p++)
+        if (*p == '\\') *p = '/';
+    const char *q0 = strchr(norm, '?');
+    size_t end = q0 ? (size_t)(q0 - norm) + 1 : strlen(norm);
+    rf_splits_t fwd = {0};
+    for (size_t i = 1; i < end; i++) {
+        char ch = norm[i];
+        if (ch != ':' && ch != '?') continue;
+        /* `C:/…` is a drive, `scheme://` a URL: neither ends a file path */
+        if (ch == ':' && (i == 1 || !strncmp(norm + i + 1, "//", 2))) continue;
+        rf_split_t s;
+        s.container = xstrndup(path, i);
+        const char *rem = norm + i;
+        const char *q = strchr(rem, '?');
+        size_t sublen = q ? (size_t)(q - rem) : strlen(rem);
+        while (sublen && *rem == ':') rem++, sublen--;
+        s.sub = xstrndup(rem, sublen);
+        s.query = xstrdup(q ? q + 1 : "");
+        vec_push(&fwd, s);
+    }
+    for (size_t i = fwd.n; i > 0; i--) vec_push(out, fwd.v[i - 1]);
+    vec_free(&fwd);
+    free(norm);
+}
+
 /* truncate plain text to `maxw` terminal columns, appending "…" when cut (upstream truncateToWidth) */
 static char *trunc_width(const char *s, int maxw) {
     size_t len = strlen(s);

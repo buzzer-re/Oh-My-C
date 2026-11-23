@@ -42,6 +42,8 @@ Subagent turns ("Complete assignment thoroughly:\n\n<assignment>") run <assignme
 Idle recap side turns ("<recap>…") answer a fixed one-line recap.
 Composer prediction side turns ("<composer-prediction>…") answer "PREDICTED-NEXT", or the `predict=<text>` token of the
   latest user message (`~` -> space, `|` -> newline, e.g. predict=NO_PREDICTION); SLOWPREDICT there answers after 3 s.
+Magic edit apply requests (system "You turn a described change into line operations") answer the change's
+  `OPS: <attempt> || <attempt>` (one per attempt, ` ;; ` between lines), or `CANNOT: nothing named` without OPS.
 /agents architect requests ("Custom agent request:…" containing AGENTSPEC) answer a docs-writer agent spec as JSON.
 Mid-stream connection drops (turn recovery), driven by the latest user message:
   - "drop:<mode>:<n>:<text>"   the first <n> requests stream <text> (may be empty) and then drop the connection;
@@ -158,6 +160,19 @@ def seq_next(msgs):
         done -= len(group)
     return None
 
+def magic_reply(req):
+    """magic edit apply request: the change's `OPS: a || b` names one reply per attempt (` ;; ` separates lines);
+    a request carrying a rejected <reply> gets the attempt after it; no OPS answers a refusal"""
+    change = req.split("Change to make:\n\n", 1)[-1].split("\n\nYour previous reply was rejected", 1)[0]
+    if "OPS:" not in change:
+        return "CANNOT: nothing named"
+    attempts = [a.strip().replace(" ;; ", "\n") for a in change.split("OPS:", 1)[1].strip().split(" || ")]
+    n = 0
+    if "<reply>\n" in req:
+        prev = req.split("<reply>\n", 1)[1].split("\n</reply>", 1)[0]
+        n = attempts.index(prev) + 1 if prev in attempts else len(attempts) - 1
+    return attempts[min(n, len(attempts) - 1)]
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass
@@ -262,6 +277,8 @@ class H(BaseHTTPRequestHandler):
             params = next(t["function"].get("parameters") or {} for t in body["tools"] if t["function"]["name"] == "respond")
             vals = {"string": lu_all, "number": 42, "integer": 42, "boolean": True}
             side = ("call", "respond", {k: vals.get(v.get("type"), lu_all) for k, v in (params.get("properties") or {}).items()})
+        elif last.get("role") == "user" and sysc.startswith("You turn a described change into line operations"):
+            side = ("say", magic_reply(lu_all))  # magic edit apply model (edit/magic-apply-system.md)
         elif last.get("role") == "user" and sysc.startswith("You explain one background shell command"):  # job caption request
             side = ("say", '- "Waits about 2 min, printing a tick every 3s."\nExtra')
         elif last.get("role") == "user" and sysc == "You are a helpful assistant.":

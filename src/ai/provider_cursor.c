@@ -244,19 +244,12 @@ static int64_t jfloor(const json_t *v) {
     return v->is_int ? v->u.num.i : (int64_t)floor(v->u.num.d);
 }
 
-/* isXdDevicePath: xd:// devices take no path selectors, so a forced `:raw` would become part of the device name */
-static bool is_xd_device_path(const char *p) {
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f') p++;
-    return strncasecmp(p, "xd://", 5) == 0;
-}
-
 static char *pi_read_path(const char *path, const json_t *offset, const json_t *limit) {
     if (!json_is_num(offset)) offset = NULL;
     if (!json_is_num(limit)) limit = NULL;
     if (limit && jfloor(limit) <= 0) return NULL;
     bool has_start = offset != NULL, has_count = limit != NULL;
     if (!has_start && !has_count) return xstrdup(path);
-    if (is_xd_device_path(path)) return xstrdup(path); /* a ranged device read reads the whole device doc */
     char *base = path_has_raw(path) ? xstrdup(path) : xasprintf("%s:raw", path);
     char *r;
     int64_t start = has_start ? MAX(1, jfloor(offset)) : 0;
@@ -269,7 +262,7 @@ static char *pi_read_path(const char *path, const json_t *offset, const json_t *
 }
 
 static char *cursor_raw_read_path(const char *path) {
-    if (is_xd_device_path(path) || path_has_raw(path)) return xstrdup(path);
+    if (path_has_raw(path)) return xstrdup(path);
     if (read_path_has_range(path)) {
         const char *last = strrchr(path, ':');
         const char *l = last ? last + 1 : path;
@@ -298,7 +291,6 @@ static char *cursor_exec_read_path(const char *path, const json_t *offset, const
 static char *pi_read_display_path(const char *path, const json_t *offset, const json_t *limit) {
     char *c = pi_read_path(path, offset, limit);
     if (c) return c;
-    if (is_xd_device_path(path)) return xstrdup(path);
     int64_t start = json_is_num(offset) ? MAX(1, jfloor(offset)) : 1;
     return xasprintf("%s:raw:%lld+0", path, (long long)start);
 }
@@ -1195,17 +1187,19 @@ static bool native_tool(const char *n) {
 static json_t *build_mcp_tool_defs(const json_t *tools) {
     json_t *out = json_arr();
     if (!json_len(tools)) return out;
-    json_t *adv = json_arr(), *t, *write_tool = NULL;
+    json_t *adv = json_arr(), *t, *bash_tool = NULL;
     json_arr_foreach(tools, i, t) {
         const char *n = jstr(t, "name");
-        if (strcmp(n, "write") == 0) write_tool = t;
+        if (strcmp(n, "bash") == 0) bash_tool = t;
         if (!native_tool(n)) json_push(adv, json_clone(t));
     }
     if (!json_len(adv)) {
         json_free(adv);
         return out;
     }
-    if (write_tool) json_push(adv, json_clone(write_tool));
+    /* staged previews are finalized only by `resolve` / `reject`, commands run through `bash` while it is on:
+     * re-include the built-in bash (dropped as native) whenever pi-agent tools are advertised */
+    if (bash_tool) json_push(adv, json_clone(bash_tool));
     json_arr_foreach(adv, i, t) {
         json_t *def = json_obj();
         json_set_str(def, "name", jstr(t, "name"));
