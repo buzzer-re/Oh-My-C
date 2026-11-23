@@ -220,6 +220,18 @@ check("ask number + hidden", te and not te["isError"] and '"k": 3' in te["result
 # a host timeout submits the form's defaults
 te, _ = ask_with("a9", FORM1, {"cancelled": True, "timedOut": True})
 check("ask timed out", te and te["result"]["details"].get("timedOut") is True and '"q1": "b"' in te["result"]["content"][0]["text"], te)
+# a message the user steers in while the form waits closes it without cancelling the turn (ask.ts userSteering): the
+# host gets a `cancel` for the request and the model "Ask interrupted by message"
+n0 = len(r.frames)
+r.send({"id": "a10", "type": "prompt", "message": "call:ask:" + json.dumps({"html": FORM2})})
+fr = r.wait(lambda f: f.get("method") == "form" and r.frames.index(f) >= n0)
+if fr:
+    r.send({"id": "st1", "type": "steer", "message": "skip it"})
+te = r.wait(lambda f: f.get("type") == "tool_execution_end" and f.get("toolName") == "ask" and r.frames.index(f) >= n0)
+cancel = r.wait(lambda f: f.get("method") == "cancel" and fr and f.get("targetId") == fr.get("id"), 5)
+check("ask steered", fr and te and te["isError"] and te["result"]["content"][0]["text"] == "Ask interrupted by message" and cancel,
+      (te, cancel))
+r.wait(lambda f: f.get("type") == "agent_end" and r.frames.index(f) >= n0, 30)
 
 # resume (the `.`/`c` continue) and abort_and_deliver_queue (empty Enter) for remote clients (omp 82e8e939a7)
 x = r.call({"id": "adq", "type": "abort_and_deliver_queue"})
