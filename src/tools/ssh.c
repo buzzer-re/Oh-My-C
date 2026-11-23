@@ -765,11 +765,15 @@ static char *list_dir(const target_t *t, const char *path, const char *shell, ch
                            "elif [ -p \"$p\" ]; then t=fifo; elif [ -S \"$p\" ]; then t=socket; elif [ -c \"$p\" ]; then t=char; "
                            "elif [ -b \"$p\" ]; then t=block; else continue; fi; printf '%s\\000%s\\000' \"$t\" \"${p#./}\"; done";
     char *qp = ssh_quote(path), *qc = ssh_quote(classify);
-    char *cmd = xasprintf("cd %s && LC_ALL=C find . ! -name . -prune -exec %s -c %s %s {} +", qp, shell, qc, shell);
+    char *cmd = xasprintf("cd %s && LC_ALL=C find . ! -name . -prune -exec %s -c %s %s {} +\n", qp, shell, qc, shell);
     free(qp);
     free(qc);
     proc_result_t r = {0};
-    int rc = run_posix(t, cmd, NULL, 0, &r, err);
+    /* the script goes over stdin: as a `-c` argument its nested quoting passes through the login shell first, which
+     * fish and csh parse differently from POSIX shells (omp 34bcf8dde8) */
+    char *remote = xasprintf("%s -s", shell);
+    int rc = run_ssh(t, remote, cmd, strlen(cmd), &r, err);
+    free(remote);
     free(cmd);
     if (rc != 0) {
         proc_result_free(&r);

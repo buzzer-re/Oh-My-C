@@ -576,6 +576,9 @@ mkdir -p "$T/sshhome/.ssh/conf.d" && printf 'Host cfgalias box *.corp !neg\n  Ho
 printf 'Host included\n' > "$T/sshhome/.ssh/conf.d/a.conf"
 check "ssh config hosts" $'- [box](ssh://box/) — `me@localhost` (test box)\n- [cfgalias](ssh://cfgalias/)\n- [included](ssh://included/)'  env HOME="$T/sshhome" PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://"
 check "ssh read sel"   "2:remote two"       env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://box$T/remote.txt:2"
+# a directory listing's script goes to the remote shell over stdin (fish/csh login shells, omp 34bcf8dde8)
+mkdir -p "$T/sshlsd/inner"
+check "ssh listing"    "inner/"  env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "read:ssh://box$T/sshlsd/"
 check "ssh write"      "Successfully wrote 7 bytes to ssh://box"    env PATH="$ROOT/tests/e2e/bin:$PATH" "$B" --model mock/mock-1 -p "call:write:{\"path\":\"ssh://box$T/sub/w.txt\",\"content\":\"via ssh\"}"
 check "ssh write file" "via ssh"            cat "$T/sub/w.txt"
 # a read projection written to a new remote file has no source to discard; over a longer one it is refused
