@@ -16,7 +16,8 @@ if pid == 0:
     env = dict(os.environ, TERM="xterm-256color", OMC_SKIP_SETUP="1", PI_NO_DESKTOP_NOTIFY="1", COLUMNS="120", LINES="40")
     for k in ("TMUX", "STY", "ZELLIJ", "TERM_PROGRAM"):
         env.pop(k, None)
-    os.execvpe(omc, [omc, "--model", "mock/mock-1", task], env)
+    nopred = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
+    os.execvpe(omc, [omc, "--config", nopred, "--model", "mock/mock-1", task], env)
 
 import fcntl, struct, termios
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))

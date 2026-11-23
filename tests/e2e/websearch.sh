@@ -60,7 +60,7 @@ out=$(ws_search web/keenable 'site:a.com' KEENABLE_API_KEY=keen-fake)
 # Sofya (omp aff70c46f9): bearer key, phrases and exclusions kept, site:/-site: as domain lists, a closed freshness range
 out=$(ws_search web/sofya 'site:github.com/x -site:spam.com "exact phrase" foo after:2024-01-01 before:2025-02-01 -bar' SOFYA_API_KEY=sofya-fake)
 sofya_req=$(tail -1 "$T/websearch.jsonl" | python3 -c "import json,sys; r=json.load(sys.stdin); print(r['path'], json.dumps(r['body'], sort_keys=True), r['headers'].get('authorization'))")
-[[ "$out" == *"Sofya Source"* && "$out" == *"https://example.com/s2"* && "$sofya_req" == '/sofya/v1/search {"exclude_domains": ["spam.com"], "freshness": "2024-01-01:2025-01-31", "include_domains": ["github.com"], "max_results": 10, "query": "\"exact phrase\" foo -bar", "search_depth": "snippets"} Bearer sofya-fake' ]] \
+[[ "$out" == *"Sofya Source"* && "$out" == *"page body"* && "$sofya_req" == '/sofya/v1/search {"exclude_domains": ["spam.com"], "freshness": "2024-01-01:2025-01-31", "include_domains": ["github.com"], "max_results": 10, "query": "\"exact phrase\" foo -bar", "search_depth": "snippets"} Bearer sofya-fake' ]] \
     && echo "   ok  web search: sofya" || { echo "   FAIL web search sofya: $out / $sofya_req"; fail=1; }
 out=$(ws_search web/sofya 'plain' )
 [[ "$out" == *"Sofya web search is unavailable. Configure its credentials"* ]] \
