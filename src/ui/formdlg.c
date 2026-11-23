@@ -23,6 +23,7 @@
 #include "ui/tools/tc.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -80,6 +81,7 @@ typedef struct fd {
     char **errors;           /* per field index */
     size_t nerrors;
     int focus, page;
+    bool sole; /* the keys reach one field only: Enter on it submits (omp 05c0e53513) */
     bool follow;
     hf_pages_t pages;
     VEC(size_t) stop_atoms;
@@ -605,7 +607,10 @@ static void reset_countdown(fd_t *v) {
     v->remaining = (int)((v->o.timeout_ms + 999) / 1000);
 }
 
+static const fd_t *g_closed; /* the dialog a key just closed (compared, never dereferenced) */
+
 static void finish(fd_t *v, json_t *data, json_t *notes, bool timed_out) {
+    g_closed = v;
     if (v->closed) {
         json_free(data);
         json_free(notes);
@@ -778,14 +783,37 @@ static void move_stop(fd_t *v, int delta) { set_focus(v, v->focus + delta); }
 
 static const void *field_of(const stop_t *s) { return s->kind == STOP_SUBMIT ? (const void *)s : (const void *)s->field; }
 
-/* jump to the first stop of the next (or previous) field; Submit counts as a field */
+
+/* #answerStop: the stop where `f`'s answer is: its checked option, its chosen Other, else its first stop; Submit's
+ * stop when `f` has none (omp 6b213b6d3b) */
+static int answer_stop(fd_t *v, const hf_field_t *f) {
+    int first = -1;
+    for (size_t at = 0; at < v->stops.n; at++) {
+        const stop_t *st = &v->stops.v[at];
+        if (st->kind == STOP_SUBMIT || st->field != f) continue;
+        if (first < 0) first = (int)at;
+        if ((st->kind == STOP_OPTION && f->kind == HF_CHOICE && v->checked[fidx(f)][st->option]) ||
+            (st->kind == STOP_OTHER && other_chosen(v, f)))
+            return (int)at;
+    }
+    return first >= 0 ? first : (int)v->stops.n - 1;
+}
+
+/* jump to the next (or previous) field, at its answer; Submit counts as a field */
 static void move_field(fd_t *v, int delta) {
     const void *cur = field_of(&v->stops.v[v->focus]);
     int i = v->focus;
     while (i + delta >= 0 && i + delta < (int)v->stops.n && field_of(&v->stops.v[i]) == cur) i += delta;
-    const void *target = field_of(&v->stops.v[i]);
-    while (delta < 0 && i > 0 && field_of(&v->stops.v[i - 1]) == target) i--;
-    set_focus(v, i);
+    const stop_t *t = &v->stops.v[i];
+    set_focus(v, t->kind != STOP_SUBMIT ? answer_stop(v, t->field) : i);
+}
+
+static void submit(fd_t *v);
+
+/* #advance: Enter on a field moves to the next one, or submits when the form asks only this one */
+static void advance(fd_t *v) {
+    if (v->sole) submit(v);
+    else move_field(v, 1);
 }
 
 static int page_of_atom(const fd_t *v, size_t atom) {
@@ -856,7 +884,7 @@ static void text_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
             return;
         }
         if (tui_kb(k, "tui.input.submit") || (k->kind == TUI_KEY_CHAR && k->codepoint == '\n' && !k->mods)) {
-            move_field(v, 1);
+            advance(v);
             return;
         }
         char *before = xstrdup(ui_input_value(&v->inputs[i]));
@@ -871,7 +899,7 @@ static void text_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
         return;
     }
     if (tui_kb(k, "tui.input.submit")) {
-        move_field(v, 1);
+        advance(v);
         return;
     }
     char *before = tui_editor_get_text(ed);
@@ -894,7 +922,7 @@ static void other_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
         char *t = str_trim(ui_input_value(in));
         if (!f->multi && *t) memset(v->checked[fidx(f)], 0, f->opts.n * sizeof(bool));
         free(t);
-        move_field(v, 1);
+        advance(v);
         return;
     }
     char *before = xstrdup(ui_input_value(in));
@@ -925,7 +953,7 @@ static void select_key(fd_t *v, hf_field_t *f, const tui_key_t *k) {
         return;
     }
     if (is_confirm(k)) {
-        move_field(v, 1);
+        advance(v);
         return;
     }
     const char *typed = printable(k);
@@ -976,6 +1004,7 @@ static void set_hidden(fd_t *v, bool hidden) {
 static bool fd_key(tui_component_t *c, const tui_key_t *k) {
     fd_t *v = (fd_t *)c;
     if (v->closed) return true;
+    g_closed = NULL;
     reset_countdown(v);
     if (tui_kb(k, "app.ask.hide")) {
         set_hidden(v, !v->hidden);
@@ -1040,8 +1069,16 @@ static bool fd_key(tui_component_t *c, const tui_key_t *k) {
     } else if (matches_note_key(k, false)) start_note(v, -1);
     else if (tui_key_matches(k, "space")) toggle(v, s->field, s->option);
     else if (is_confirm(k)) {
-        if (!s->field->multi) toggle(v, s->field, s->option);
-        move_field(v, 1);
+        /* Enter picks a radio; on a checkbox group with nothing checked it checks the focused box */
+        bool none = true;
+        for (size_t q = 0; q < s->field->opts.n; q++)
+            if (v->checked[fidx(s->field)][q]) none = false;
+        if (!s->field->multi || none) toggle(v, s->field, s->option);
+        advance(v);
+    }
+    if (g_closed == v) { /* a sole field's Enter submitted: v is gone */
+        g_closed = NULL;
+        return true;
     }
     request(v);
     return true;
@@ -1382,60 +1419,117 @@ static void field_atoms(fd_t *v, hf_field_t *f, int width, int focused_stop, int
 }
 
 /* renderTableRow over fitted columns */
+/* table.ts shrinkEvenly: the widest columns shrink first, level by level, down to their minimums */
+static int shrink_evenly(int *w, const int *mins, size_t n, int overflow) {
+    while (overflow > 0) {
+        int top = -1;
+        for (size_t c = 0; c < n; c++)
+            if (w[c] > mins[c] && w[c] > top) top = w[c];
+        if (top < 0) break;
+        int level = INT_MIN;
+        size_t nwide = 0;
+        for (size_t c = 0; c < n; c++) {
+            if (w[c] <= mins[c]) continue;
+            if (w[c] < top) level = MAX(level, w[c]);
+            else {
+                nwide++;
+                level = MAX(level, mins[c]);
+            }
+        }
+        int step = MIN(top - level, (int)((overflow + (int)nwide - 1) / (int)nwide));
+        for (size_t c = n; c-- > 0 && overflow > 0;) { /* widest.reverse() */
+            if (w[c] <= mins[c] || w[c] != top) continue;
+            int cut = MIN(step, overflow);
+            w[c] -= cut;
+            overflow -= cut;
+        }
+    }
+    return overflow;
+}
+
+/* table rows over as many lines as their tallest cell: cells word-wrap within their fitted width and keep <br>
+ * breaks; a row's continuation lines refuse a page break before them (omp e701ef8cbe) */
 static void table_atoms(const hf_block_t *blk, int width, hf_atoms_t *atoms) {
     size_t count = 0;
     for (size_t r = 0; r < blk->rows.n; r++) count = MAX(count, blk->rows.v[r].n);
     VEC(char **) cells = {0};
-    int *w = xcalloc(count + 1, sizeof *w);
+    int *w = xcalloc(count + 1, sizeof *w), *mins = xcalloc(count + 1, sizeof *mins);
     for (size_t c = 0; c < count; c++) w[c] = 1;
     for (size_t r = 0; r < blk->rows.n; r++) {
         char **row = xcalloc(count + 1, sizeof *row);
         for (size_t c = 0; c < count; c++) {
             if (c < blk->rows.v[r].n) {
                 char *t = hf_spans_text(&blk->rows.v[r].v[c]);
-                row[c] = sanitize_line(t);
+                row[c] = sanitize(t);
                 free(t);
             } else row[c] = xstrdup("");
-            w[c] = MAX(w[c], tui_visible_width(row[c]));
+            strvec_t ls = str_split(row[c], "\n");
+            for (size_t k = 0; k < ls.n; k++) w[c] = MAX(w[c], tui_visible_width(ls.v[k]));
+            strvec_free(&ls);
         }
         vec_push(&cells, row);
     }
-    /* fitWidths: shrink from the last truncating column down to minWidth 4 */
+    /* fitWidths: every column wraps, minWidth 4 */
     int gap = 2, total = 0;
-    for (size_t c = 0; c < count; c++) total += w[c];
-    int overflow = total + (count ? (int)(count - 1) * gap : 0) - width;
-    for (size_t c = count; c-- > 0 && overflow > 0;) {
-        int minimum = MIN(w[c], 4), shrink = MIN(overflow, w[c] - minimum);
-        w[c] -= shrink;
-        overflow -= shrink;
+    for (size_t c = 0; c < count; c++) {
+        total += w[c];
+        mins[c] = MIN(w[c], 4);
     }
+    shrink_evenly(w, mins, count, total + (count ? (int)(count - 1) * gap : 0) - width);
+    sb_t rule = SB_INIT;
+    sb_repeat(&rule, "\xe2\x94\x80", width);
     for (size_t r = 0; r < cells.n; r++) {
-        bool head = r < blk->header_rows;
-        sb_t line = SB_INIT;
-        for (size_t c = 0; c < count; c++) {
-            char *t = cells.v[r][c];
-            char *fit = tui_visible_width(t) > w[c] ? trunc_to(t, w[c]) : xstrdup(t);
-            char *padded = xasprintf("%s%*s", fit, MAX(0, w[c] - tui_visible_width(fit)), "");
-            char *styled = head ? fg_bold(TUI_TC_TEXT, padded) : fg(TUI_TC_MUTED, padded);
-            if (c) sb_append(&line, "  ");
-            sb_append(&line, styled);
-            free(styled);
-            free(padded);
-            free(fit);
+        if (r > 0 && r == blk->header_rows) {
+            strvec_t lines = {0};
+            strvec_push_own(&lines, fg(TUI_TC_DIM, sb_cstr(&rule)));
+            push_atom(atoms, lines, 0, HF_BREAK_NEVER);
         }
-        strvec_t lines = {0};
-        strvec_push_own(&lines, sb_detach(&line));
-        push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
+        bool head = r < blk->header_rows;
+        strvec_t *stacks = xcalloc(count + 1, sizeof *stacks);
+        size_t height = 1;
+        for (size_t c = 0; c < count; c++) {
+            strvec_t hard = str_split(cells.v[r][c], "\n");
+            for (size_t k = 0; k < hard.n; k++) {
+                strvec_t wrapped = {0};
+                tui_wrap_text_with_ansi(hard.v[k], MAX(1, w[c]), &wrapped);
+                if (!wrapped.n) strvec_push(&stacks[c], "");
+                for (size_t q = 0; q < wrapped.n; q++) strvec_push(&stacks[c], wrapped.v[q]);
+                strvec_free(&wrapped);
+            }
+            if (!hard.n) strvec_push(&stacks[c], "");
+            strvec_free(&hard);
+            height = MAX(height, stacks[c].n);
+        }
+        for (size_t l = 0; l < height; l++) {
+            sb_t line = SB_INIT;
+            for (size_t c = 0; c < count; c++) {
+                const char *t = l < stacks[c].n ? stacks[c].v[l] : "";
+                char *fit = tui_visible_width(t) > w[c] ? trunc_to(t, w[c]) : xstrdup(t);
+                char *padded = xasprintf("%s%*s", fit, MAX(0, w[c] - tui_visible_width(fit)), "");
+                char *styled = head ? fg_bold(TUI_TC_TEXT, padded) : fg(TUI_TC_MUTED, padded);
+                if (c) sb_append(&line, "  ");
+                sb_append(&line, styled);
+                free(styled);
+                free(padded);
+                free(fit);
+            }
+            strvec_t lines = {0};
+            strvec_push_own(&lines, sb_detach(&line));
+            push_atom(atoms, lines, 0, l == 0 ? HF_BREAK_INSIDE : HF_BREAK_NEVER);
+        }
+        for (size_t c = 0; c < count; c++) strvec_free(&stacks[c]);
+        free(stacks);
         for (size_t c = 0; c < count; c++) free(cells.v[r][c]);
         free(cells.v[r]);
     }
+    sb_free(&rule);
     free(cells.v);
     free(w);
+    free(mins);
 }
 
 /* atoms of a non-field block: one per wrapped line, list item or table row */
 static void context_atoms(fd_t *v, const hf_block_t *blk, int width, hf_atoms_t *atoms) {
-    size_t first = atoms->n;
     switch (blk->kind) {
     case HF_B_TEXT: {
         strvec_t lines = {0};
@@ -1489,26 +1583,9 @@ static void context_atoms(fd_t *v, const hf_block_t *blk, int width, hf_atoms_t 
         push_atom(atoms, lines, 0, HF_BREAK_INSIDE);
         break;
     }
-    case HF_B_TABLE: {
+    case HF_B_TABLE:
         table_atoms(blk, width, atoms);
-        size_t made = atoms->n - first;
-        if (blk->header_rows > 0 && blk->header_rows < made) {
-            sb_t r = SB_INIT;
-            sb_repeat(&r, "\xe2\x94\x80", width);
-            char *rule = fg(TUI_TC_DIM, sb_cstr(&r));
-            sb_free(&r);
-            strvec_t lines = {0};
-            strvec_push_own(&lines, rule);
-            hf_atom_t sep = {.lines = lines, .gap = 0, .break_rank = HF_BREAK_NEVER};
-            vec_push(atoms, sep);
-            /* move it into place after the header rows */
-            size_t at = first + blk->header_rows;
-            hf_atom_t tmp = atoms->v[atoms->n - 1];
-            memmove(&atoms->v[at + 1], &atoms->v[at], (atoms->n - 1 - at) * sizeof *atoms->v);
-            atoms->v[at] = tmp;
-        }
         break;
-    }
     case HF_B_FIELD:
         break;
     }
@@ -1786,13 +1863,14 @@ static char *footer_text(fd_t *v) {
     }
     char *space = ui_key_hint("space"), *left = ui_key_hint("left"), *right = ui_key_hint("right"), *tab = ui_key_hint("tab");
     char *action;
+    const char *next = v->sole ? "submit" : "next";
     if (s->kind == STOP_SUBMIT) action = xasprintf("%s submit", enter);
-    else if (s->kind == STOP_TEXT) action = xasprintf("%s next", enter);
-    else if (s->kind == STOP_OTHER) action = xasprintf("type your own \xc2\xb7 %s next", enter);
+    else if (s->kind == STOP_TEXT) action = xasprintf("%s %s", enter, next);
+    else if (s->kind == STOP_OTHER) action = xasprintf("type your own \xc2\xb7 %s %s", enter, next);
     else if (s->kind == STOP_SELECT)
-        action = xasprintf("%s open \xc2\xb7 %s/%s change \xc2\xb7 %s next", space, left, right, enter);
-    else if (s->field->multi) action = xasprintf("%s toggle \xc2\xb7 %s next", space, enter);
-    else action = xasprintf("%s choose", enter);
+        action = xasprintf("%s open \xc2\xb7 %s/%s change \xc2\xb7 %s %s", space, left, right, enter, next);
+    else if (s->field->multi) action = xasprintf("%s toggle \xc2\xb7 %s %s", space, enter, next);
+    else action = xasprintf("%s %s", enter, v->sole ? "submit" : "choose");
     if (s->kind == STOP_OPTION || s->kind == STOP_SELECT) {
         char *a2 = xasprintf("%s%s", action, note);
         free(action);
@@ -2020,6 +2098,20 @@ tui_component_t *ui_form_dialog_new(const char *html, const ui_form_opts_t *o) {
     }
     stop_t sub = {STOP_SUBMIT, NULL, 0};
     vec_push(&v->stops, sub);
+    {
+        const hf_field_t *only = NULL;
+        size_t distinct = 0;
+        for (size_t i = 0; i + 1 < v->stops.n; i++)
+            if (v->stops.v[i].field != only) {
+                bool seen = false;
+                for (size_t k = 0; k < i && !seen; k++) seen = v->stops.v[k].field == v->stops.v[i].field;
+                if (!seen) distinct++;
+                only = v->stops.v[i].field;
+            }
+        v->sole = distinct == 1;
+    }
+    /* open where the answer is, so Enter accepts a preselected choice instead of overwriting it */
+    if (v->stops.n > 1) v->focus = answer_stop(v, v->stops.v[0].field);
     if (o->draft && !tui_editor_is_empty(o->draft)) v->guard = true;
     if (o->timeout_ms > 0) {
         v->deadline = mono_ms() + o->timeout_ms;

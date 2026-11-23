@@ -200,6 +200,8 @@ const char *app_wire_thinking(app_t *a);
 void app_model_state_changed(app_t *a, const struct ai_model *prev_model, const char *prev_thinking);
 /* select an exact catalog model like an explicit /model pick (session entry, thinking re-clamp, events) */
 void app_use_model(app_t *a, const struct ai_model *m);
+/* setModel(model, role): app_use_model whose model_change records `role` */
+void app_use_model_role(app_t *a, const struct ai_model *m, const char *role);
 void app_apply_model(app_t *a, const struct ai_model *m, bool has_effort, ai_effort_t effort);
 /* queue_update when the displayable steering / follow-up queue differs from the last one sent */
 void app_queue_changed(app_t *a);
@@ -361,7 +363,15 @@ typedef struct {
     /* onUsage: journal the billed request (errors included) as an off-transcript model_usage entry of this purpose
      * and charge it to the cost gate (NULL: not recorded) */
     const char *usage_purpose;
+    /* output cap (0 = none); a capped budget-thinking model turns reasoning off (a hard resource boundary) */
+    int64_t max_tokens;
+    /* minimizeEffort: the lowest effort where a per-message control carries it. omc has no mid-conversation effort
+     * controls, so the session's reasoning is kept (the cache-preserving case upstream) */
+    bool minimize_effort;
 } app_ephemeral_t;
+/* AgentSession.ephemeralMaxTokensPreservesRequest: an app_ephemeral_t max_tokens cap on the current model is honored
+ * without otherwise changing the request (a capped budget-thinking model would turn thinking off) */
+bool app_ephemeral_max_tokens_preserves_request(app_t *a);
 /* Returns the final assistant message (toolCall blocks dropped, owned) and *reply (owned: trimmed, deduped when
  * asked), or NULL with *err (owned; "Request was aborted" after a cancel). */
 json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, char **err);

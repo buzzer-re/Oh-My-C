@@ -561,7 +561,9 @@ void ui_signals_user_message(const json_t *msg) {
 }
 
 static bool silent_abort(const json_t *m) { return str_eq(json_get_str(m, "errorMessage"), "__omp.silent_abort__"); }
-static bool user_interrupt(const json_t *m) { return str_eq(json_get_str(m, "errorMessage"), "Interrupted by user"); }
+static bool user_interrupt(const json_t *m) { /* isInterruptReason */
+    return str_eq(json_get_str(m, "errorMessage"), "Interrupted by user") || str_eq(json_get_str(m, "errorMessage"), "Stopped by parent agent");
+}
 
 /* lastAssistantStop */
 static void warp_stop(const json_t *msgs) {
@@ -684,14 +686,18 @@ void ui_signals_settle_startup(void) {
     ui_signals_run_status(RUN_IDLE, NULL, NULL);
 }
 
-void ui_signals_settle(void) {
-    if (!S.ended) return;
+bool ui_signals_settle(void) {
+    if (!S.ended) return false;
     json_t *m = S.ended;
     S.ended = NULL;
+    const json_t *last = sig_last_assistant(m);
+    const char *stop = last ? json_get_str(last, "stopReason") : NULL;
+    bool done = last && !str_eq(stop, "error") && !str_eq(stop, "aborted");
     ui_signals_run_settled(m, false);
     warp_stop(m);
     ui_recap_settled(m);
     json_free(m);
+    return done;
 }
 
 void ui_signals_ask_waiting(void) {

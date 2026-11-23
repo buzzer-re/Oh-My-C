@@ -167,6 +167,7 @@ static void ui_apply_event(void *ud) {
         break;
     }
     case AGENT_EV_AGENT_END:
+        ui_retry_restore_hidden(u);
         ui_signals_agent_end(e->msg); /* settled when the worker ends (worker_done) */
         ui_working_stop(u);
         toolcard_run_end();
@@ -186,6 +187,7 @@ static void ui_apply_event(void *ud) {
         }
         break;
     case AGENT_EV_AGENT_START:
+        pred_cancel(u);
         async_wait_end(u); /* a background result woke the run: the row follows this run again */
         u->synthetic_cards.n = 0;
         toolcard_break_group(u);
@@ -248,6 +250,10 @@ static void ui_listener(void *ud, const agent_event_t *ev) {
     if (ev->tool_call_id) e->id = xstrdup(ev->tool_call_id);
     if (ev->tool_name) e->name = xstrdup(ev->tool_name);
     if (ev->args) e->args = json_clone(ev->args);
+    /* the card renders the call as the model wrote it: the intent the loop stripped before execution comes back as
+     * `i` (omp's renderers read args[INTENT_FIELD], e.g. the bash card's intent header) */
+    if (ev->type == AGENT_EV_TOOL_START && ev->intent && json_is_obj(e->args) && !json_get(e->args, "i"))
+        json_set_str(e->args, "i", ev->intent);
     if (ev->result) {
         e->out = result_display(ev->tool_name ? ev->tool_name : "", ev->result);
         e->result = json_obj();
@@ -360,6 +366,7 @@ static void post_notice(void *x) {
                       : !strcmp(e->name, "auto_compaction_start") ? "auto_compaction_start" /* compaction.c events */
                       : !strcmp(e->name, "auto_compaction_end")   ? "auto_compaction_end"
                                                           : "info";
+    if (!strcmp(e->name, "auto_compaction_start")) pred_cancel(e->u);
     /* a generated session title only shows in the status band / working row, as in omp */
     if (strcmp(e->name, "title")) add_notice(e->u, lvl, e->out);
     else ui_signals_session_title();
@@ -504,7 +511,7 @@ static void worker_done(void *ud) {
     pthread_join(u->worker, NULL);
     u->worker_running = false;
     u->wake_suppressed = false; /* a turn ended on its own since the interrupt */
-    ui_signals_settle();
+    bool settled_done = ui_signals_settle();
     ui_signals_settle_startup(); /* a startup prompt whose run reported nothing goes back to idle */
     if (g_fork_pending) {
         g_fork_pending = false;
@@ -514,13 +521,16 @@ static void worker_done(void *ud) {
     plan_exec_resume(u);
     /* deferred `!cmd` results, a pending /compact, queued input left behind by an interrupted run */
     /* the input waiter re-arms: loop mode re-submits its prompt, else a goal continuation may follow */
-    if (!iq_run_end(u) && !lp_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
-    else if (!u->worker_running && !u->goal_cont) async_wait_begin(u);
+    /* #isAutoSubmitBlocked: a run paused on background subagents / jobs is still open (isRunActive); its wake run's
+     * end re-arms loop iterations and goal continuations (omp ad0db62554) */
+    if (!iq_run_end(u) && !u->async_hold && !lp_run_end(u) && u->goal_cont) tui_add_timer(u->tui, 800, false, goal_continue_cb, u);
+    else if (!u->worker_running && (!u->goal_cont || u->async_hold)) async_wait_begin(u);
     if (u->async_hold && !u->async_wait && !u->worker_running && !u->goal_cont) {
         ui_chrome_turn(u, false);
         u->async_hold = false;
     }
     ui_sync_retry_hint(u); /* #finishAgentEnd: a turn that died on a tool call offers F5 */
+    if (settled_done) pred_request(u); /* skipped when the queue, a loop or a goal started the next run */
     tui_request_render(u->tui);
 }
 
@@ -1278,9 +1288,32 @@ static void pr_cb_ann_state(void *ud, const json_t *st) {
     else json_del(g_plan_ann, g_pr.ann_key);
 }
 
+/* #planKeepContextChoice: the keep-context meter (`~378k / 1m`) against `m`'s window (the session model's without one),
+ * disabled past PLAN_KEEP_DISABLE_PERCENT (owned; NULL without a window) */
+static char *plan_keep_meta(app_t *a, const ai_model_t *m, bool *disabled) {
+    *disabled = false;
+    int64_t window = m && m->context_window > 0 ? m->context_window : a->model ? a->model->context_window : 0;
+    if (window <= 0) return NULL;
+    int64_t used = a->last_context_tokens;
+    char *t = ui_format_number((double)MAX(0, used)), *w = ui_format_number((double)window);
+    for (char *q = t; *q; q++) *q = (char)tolower((unsigned char)*q);
+    for (char *q = w; *q; q++) *q = (char)tolower((unsigned char)*q);
+    char *meta = xasprintf("~%s / %s", t, w);
+    free(t);
+    free(w);
+    *disabled = 100.0 * (double)used / (double)window > PLAN_KEEP_DISABLE_PERCENT;
+    return meta;
+}
+
 static void pr_cb_slider(void *ud, int index) {
     (void)ud;
     g_pr.sel_tier = index;
+    if (index >= 0 && (size_t)index < g_pr.ncycle && g_pr.ov) { /* the keep-context meter re-measured for the tier */
+        bool dis = false;
+        char *meta = plan_keep_meta(g_pr.u->app, g_pr.cycle[index].model, &dis);
+        ui_plan_review_set_choice(g_pr.ov, PLAN_KEEP_CONTEXT_INDEX, meta, dis);
+        free(meta);
+    }
 }
 
 /* ----- approve ----- */
@@ -1668,25 +1701,7 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     app_set_plan_file(a, path);
     g_pr.ann_key = app_plan_path(a, path);
 
-    /* "Approve and keep context (~tokens / window)", disabled above 95% */
-    int64_t window = a->model ? a->model->context_window : 0;
-    int64_t used = a->last_context_tokens;
-    bool keep_disabled = false;
-    char *keep_meta = NULL;
-    if (window > 0) {
-        char *t = ui_format_number((double)MAX(0, used)), *w = ui_format_number((double)window);
-        for (char *q = t; *q; q++) *q = (char)tolower((unsigned char)*q);
-        for (char *q = w; *q; q++) *q = (char)tolower((unsigned char)*q);
-        keep_meta = xasprintf("~%s / %s", t, w);
-        free(t);
-        free(w);
-        keep_disabled = 100.0 * (double)used / (double)window > PLAN_KEEP_DISABLE_PERCENT;
-    }
     g_pr.keep_label = xstrdup("Approve and keep context");
-    /* the approval choices; Refine shows only while the plan has feedback, Save writes a copy and keeps the review */
-    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label};
-    const char *metas[] = {NULL, NULL, keep_meta};
-    int disabled[] = {PLAN_KEEP_CONTEXT_INDEX};
 
     /* model-tier slider over the role models, starting on `default`; hidden with fewer than two */
     int current = 0;
@@ -1697,6 +1712,15 @@ static void ui_plan_approval(ui_t *u, const char *plan_path, const char *title) 
     g_pr.start_tier = def >= 0 ? def : current;
     g_pr.sel_tier = g_pr.start_tier;
     g_pr.slider = g_pr.ncycle > 1;
+    /* keep-context availability follows the model that executes: the selected tier while the slider shows, else the
+     * pre-plan model plan mode restores (omp 0e72a9e9a4) */
+    bool keep_disabled = false;
+    char *keep_meta = plan_keep_meta(a, g_pr.slider ? g_pr.cycle[g_pr.start_tier].model : (a->plan_prev_model ? a->plan_prev_model : a->model),
+                                     &keep_disabled);
+    /* the approval choices; Refine shows only while the plan has feedback, Save writes a copy and keeps the review */
+    const char *options[] = {"Approve and execute", "Approve and compact context", g_pr.keep_label};
+    const char *metas[] = {NULL, NULL, keep_meta};
+    int disabled[] = {PLAN_KEEP_CONTEXT_INDEX};
     const char **labels = xcalloc(MAX(1, g_pr.ncycle), sizeof *labels), **details = xcalloc(MAX(1, g_pr.ncycle), sizeof *details);
     for (size_t i = 0; i < g_pr.ncycle; i++) {
         labels[i] = g_pr.cycle[i].role;
@@ -3082,6 +3106,15 @@ static void on_submit(tui_editor_t *ed, const char *text, void *ud) {
     json_t *attachments = ui_attach_take(u, t, &compacted);
     free(t);
     t = compacted;
+    /* `? <question>` is the /btw shortcut: it runs as the slash command it stands for (a bare `?` stays a prompt) */
+    if (t[0] == '?') {
+        char *q = str_trim(t + 1);
+        if (*q) {
+            free(t);
+            t = xasprintf("/btw %s", q);
+        }
+        free(q);
+    }
     iq_submit(u, t, attachments);
     free(t);
     tui_request_render(u->tui);
@@ -3637,6 +3670,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_container_add(root, ui_editor_gap_new(&u));
     tui_editor_set_on_submit(u.editor, on_submit, &u);
     ui_chrome_setup(&u);
+    pred_attach(&u);
     history_load(u.editor);
     tui_ac_default_t *ac = tui_ac_default_new(a->cwd);
     ui_slash_register(&u, ac);
@@ -3733,6 +3767,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
         pthread_join(u.worker, NULL);
     }
     ui_btw_free(&u);
+    pred_shutdown(&u);
     xc_recording_shutdown(&u); /* save a running /record */
     tc_shutdown(&u);
     cc_shutdown(&u);

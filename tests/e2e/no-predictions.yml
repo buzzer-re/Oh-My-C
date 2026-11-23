@@ -1,0 +1,3 @@
+# composer predictions off for drivers that count or inspect model requests (omp 19 sends one after each completed turn)
+composer:
+  predictions: false

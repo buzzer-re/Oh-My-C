@@ -153,6 +153,23 @@ static void test_edit_flow(const char *plan) {
     tui_component_destroy(ui_plan_review_component(p));
 }
 
+/* setChoices: the keep-context meter re-measured for the selected tier, disabled past the threshold (omp 0e72a9e9a4) */
+static void test_set_choice(const char *plan) {
+    ui_plan_review_t *p = make(plan);
+    ui_plan_review_set_choice(p, 2, "~90k / 100k", true);
+    strvec_t out = {0};
+    render(p, &out);
+    bool found = false;
+    for (size_t i = 0; i < out.n; i++)
+        if (strstr(out.v[i], "~90k / 100k")) found = true;
+    CHECK(found, "meta replaced");
+    strvec_free(&out);
+    CHECK(!ui_plan_review_select(p, OPTS[2]), "disabled keep refused");
+    ui_plan_review_set_choice(p, 2, "~90k / 1m", false);
+    CHECK(ui_plan_review_select(p, OPTS[2]), "re-enabled keep picked");
+    tui_component_destroy(ui_plan_review_component(p));
+}
+
 int main(void) {
     char *dir = fs_mktempdir("omc-planreview");
     setenv("OMC_CODING_AGENT_DIR", dir, 1);
@@ -166,6 +183,7 @@ int main(void) {
     if (plan) {
         test_capture(plan);
         test_edit_flow(plan);
+        test_set_choice(plan);
     }
     free(plan);
     free(last_feedback);

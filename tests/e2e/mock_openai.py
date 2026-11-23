@@ -10,6 +10,8 @@ Display commands (used by tests/tui/compare.sh to exercise transcript views):
   - "fail:<status>:<msg>"    reply with an HTTP error (non-retryable for 400/401/403/404); a <msg> containing ZEROALLOW
                              adds `x-ratelimit-limit-req-minute: 0`
   - "streamfail:<text>"      stream <text>, then an in-stream error chunk
+  - "failfor:<secs>:<status>:<msg>|<prompt>" requests for this prompt within <secs> of the first reply like "fail:"
+                             (the transport's immediate retries included), later ones answer <prompt> like a prompt
   - "chunks:<JSON list>"     one content delta per string as is (a ["r", <text>] item is a reasoning_content delta)
   - "seq:[[tool, args], ...]" one tool call per turn, in order, then the usual "Tool said:" answer; a later step written
     as a list of [tool, args] pairs is several calls in one assistant message
@@ -38,6 +40,8 @@ Memory pipeline side requests (memory.backend=local startup):
   - stage-2 consolidation (system "memory-stage-two consolidator") -> {memory_md, memory_summary, skills:[mock-skill]}
 Subagent turns ("Complete assignment thoroughly:\n\n<assignment>") run <assignment> as the script (e.g. slow:3:done).
 Idle recap side turns ("<recap>…") answer a fixed one-line recap.
+Composer prediction side turns ("<composer-prediction>…") answer "PREDICTED-NEXT", or the `predict=<text>` token of the
+  latest user message (`~` -> space, `|` -> newline, e.g. predict=NO_PREDICTION); SLOWPREDICT there answers after 3 s.
 /agents architect requests ("Custom agent request:…" containing AGENTSPEC) answer a docs-writer agent spec as JSON.
 Mid-stream connection drops (turn recovery), driven by the latest user message:
   - "drop:<mode>:<n>:<text>"   the first <n> requests stream <text> (may be empty) and then drop the connection;
@@ -61,6 +65,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
 DELAY = float(os.environ.get("MOCK_DELAY") or 0)
+FAILED_SINCE = {}  # "failfor:" prompt -> when it first failed
 FAIL_RETRY_AFTER = os.environ.get("MOCK_FAIL_RETRY_AFTER_MS", "0")
 STALL_SECS = float(os.environ.get("MOCK_STALL_SECS") or 60)
 SLOT_SECS = float(os.environ.get("MOCK_SLOT_SECS") or 0)
@@ -195,6 +200,16 @@ class H(BaseHTTPRequestHandler):
             lu = "fail:" + os.environ["MOCK_PROBE_STATUS"] + ":probe failure"
         if body.get("model") == "mock-prefill":  # a local server's memory guard worded as an overflow, on a tiny prompt
             lu = "fail:400:rejected this prompt: prefill context length exceeded by the memory guard"
+        if lu.startswith("failfor:"):  # fail every attempt for a while, then answer the next one
+            secs, _, rest = lu[8:].partition(":")
+            spec, _, after = rest.partition("|")
+            first = FAILED_SINCE.setdefault(lu, time.time())
+            if time.time() - first < float(secs or 1):
+                lu = "fail:" + spec
+            else:
+                last = dict(last, content=after)
+                msgs = msgs[:-1] + [last]
+                lu = after
         if lu.startswith("fail:"):
             st, _, m = lu[5:].partition(":")
             b = json.dumps({"error": {"message": m or "mock failure", "type": "invalid_request_error", "code": int(st or 400)}}).encode()
@@ -307,6 +322,12 @@ class H(BaseHTTPRequestHandler):
             elif u.startswith("Custom agent request:") and "AGENTSPEC" in u:  # /agents architect (agent-creation-user.md)
                 kind, rest = "say", json.dumps({"identifier": "docs-writer", "whenToUse": "Use this agent when docs need writing.",
                                                 "systemPrompt": "You write docs.\nKeep them short."})
+            elif u.startswith("<composer-prediction>"):  # composer prediction side turn (composer-prediction-user.md)
+                prev = [text_of(m) for m in msgs if m.get("role") == "user" and not text_of(m).startswith("<composer-prediction>")
+                        and text_of(m).strip()]
+                pm = re.search(r"predict=(\S*)", prev[-1] if prev else "")
+                kind, rest = "say", (pm.group(1).replace("~", " ").replace("|", "\n") if pm else "PREDICTED-NEXT")
+                if "SLOWPREDICT" in (prev[-1] if prev else ""): time.sleep(3)
             elif u.startswith("<recap>"):  # idle recap side turn (recap-user.md)
                 kind, rest = "say", "Recap: goal is fixing the flaky park tests; next, rerun the suite."
             elif "You name coding-agent sessions" in sysc:  # title model fallback

@@ -183,6 +183,22 @@ static void test_columns(const char *dir) {
         CHECK_STR(c, "Watch the build");
         free(c);
         CHECK(job_clean_intent("  \n") == NULL);
+        /* toolIntentLabel (omp 4d08e232b3): the label before the first colon-space; URLs, file:line and bare labels stay */
+        static const char *const IL[][2] = {{"[Checking retry]: Find where", "[Checking retry]"},
+                                           {"Reading https://x.example/a", "Reading https://x.example/a"},
+                                           {"Fixing src/a.c:12 bug", "Fixing src/a.c:12 bug"},
+                                           {"Label:", "Label"},
+                                           {": detail", ": detail"},
+                                           {"  : detail", "  : detail"},
+                                           {"Plain", "Plain"}};
+        for (size_t i = 0; i < sizeof IL / sizeof IL[0]; i++) {
+            c = tool_intent_label(IL[i][0]);
+            CHECK_STR(c, IL[i][1]);
+            free(c);
+        }
+        c = job_display_label(NULL, "lbl");
+        CHECK_STR(c, "lbl");
+        free(c);
         char *lng = xmalloc(301);
         memset(lng, 'x', 300);
         lng[300] = 0;

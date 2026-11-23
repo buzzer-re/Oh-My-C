@@ -12,6 +12,8 @@
 #include "tui/render.h"
 #include "tui/term.h"
 #include "tui/theme.h"
+#include "tui/agentcolor.h"
+#include "tui/color.h"
 #include "tui/symbols.h"
 
 #include <fcntl.h>
@@ -282,6 +284,10 @@ static void test_ansi(void) {
     CHECK(str_starts(t, "\x1b[1m"));
     free(plain);
     free(t);
+    /* a tinted row keeps its background under the ellipsis (omp 559afe1a70) */
+    t = tui_truncate_to_width("\x1b[48;2;1;2;3mtinted row text\x1b[49m", 6, NULL);
+    CHECK(str_ends(t, "\x1b[0m\x1b[48;2;1;2;3m\xe2\x80\xa6\x1b[49m"));
+    free(t);
     /* wide chars never split */
     t = tui_truncate_to_width("\xe6\x97\xa5\xe6\x97\xa5\xe6\x97\xa5", 5, "");
     CHECK(tui_visible_width(t) == 4);
@@ -490,6 +496,24 @@ static void test_markdown(void) {
     char *s = tui_md_inline("snake_case_name and a * b * c", NULL);
     char *sp = tui_strip_ansi(s);
     CHECK_STR(sp, "snake_case_name and a * b * c");
+    free(sp);
+    free(s);
+    /* markers and brackets inside code spans, autolinks, html and link destinations neither open nor close
+     * (omp f1bb4dbeed) */
+    s = tui_md_inline("*use `*` as the marker*", NULL);
+    sp = tui_strip_ansi(s);
+    CHECK_STR(sp, "use * as the marker");
+    CHECK(strstr(s, "\x1b[3m") != NULL);
+    free(sp);
+    free(s);
+    s = tui_md_inline("**a <x b=\"**\"> c** and *d [e](f*g) h*", NULL);
+    sp = tui_strip_ansi(s);
+    CHECK_STR(sp, "a <x b=\"**\"> c and d e (f*g) h");
+    free(sp);
+    free(s);
+    s = tui_md_inline("[a `]` b](https://u.example) ***x `***` y***", NULL);
+    sp = tui_strip_ansi(s);
+    CHECK(strstr(sp, "a ] b") != NULL && strstr(sp, "](") == NULL && strstr(sp, "x *** y") != NULL);
     free(sp);
     free(s);
 }
@@ -1745,6 +1769,11 @@ static void test_kill_ring_jump(void) {
     CHECK(ed->cl == 0 && ed->cc == 9);
     feed(ed, "\x1d\x1d" "q"); /* the jump key again cancels; q is typed */
     check_text(ed, "alpha betqa\ngamma");
+    /* backwards at column 0 skips the cursor's own character (omp dbca46b6f8) */
+    tui_editor_set_text(ed, "ab\nab");
+    feed(ed, "\x01"); /* line 1, col 0 */
+    feed(ed, "\x1b\x1d" "a");
+    CHECK(ed->cl == 0 && ed->cc == 0);
     /* alt+enter is upstream's hard-coded newline fallback */
     tui_editor_set_text(ed, "x");
     feed(ed, "\x1b\r");
@@ -1948,7 +1977,38 @@ static void test_pending_bullet(void) {
     }
 }
 
+/* agent identity colours (omp agent-identity.ts); the titanium palette is the one omp 19.1.0 drew for
+ * tests/tui/specs/task.json side by side */
+static void test_agent_colors(void) {
+    tui_theme_t *ti = tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR);
+    CHECK(ti != NULL);
+    if (!ti) return;
+    uint32_t main_rgb, sub[6];
+    size_t n = tui_agent_palette(ti, &main_rgb, sub);
+    static const uint32_t WANT[6] = {0x00ff88, 0xf0c040, 0xd06fed, 0x13d1cd, 0xe69dfc, 0x75efea};
+    CHECK(n == 6 && main_rgb == tui_theme_rgb(ti, TUI_TC_ACCENT));
+    for (size_t i = 0; i < n && i < 6; i++) CHECK(sub[i] == WANT[i]);
+    /* a declared subagentN keeps slot N; generated colours fill the rest in order */
+    ti->rgb[TUI_TC_SUBAGENT3] = 0x123456;
+    n = tui_agent_palette(ti, &main_rgb, sub);
+    CHECK(n == 6 && sub[2] == 0x123456 && sub[0] == WANT[0] && sub[1] == WANT[1]);
+    ti->rgb[TUI_TC_SUBAGENT3] = -1;
+    /* arrival order by creation time, Main is the accent, the seventh subagent reuses the first */
+    tui_agent_note_arrival("late", 20);
+    tui_agent_note_arrival("early", 10);
+    CHECK(tui_agent_color(ti, "early") == WANT[0] && tui_agent_color(ti, "late") == WANT[1]);
+    CHECK(tui_agent_color(ti, "Main") == main_rgb);
+    for (int i = 0; i < 4; i++) {
+        char id[8];
+        snprintf(id, sizeof id, "x%d", i);
+        tui_agent_color(ti, id);
+    }
+    CHECK(tui_agent_color(ti, "x4") == WANT[0]);
+    tui_theme_free(ti);
+}
+
 int main(void) {
+    test_agent_colors();
     test_cooked_enter();
     test_pending_bullet();
     test_colorful_markdown();

@@ -36,6 +36,7 @@
     X(THINKING_LOW, "thinkingLow") X(THINKING_MEDIUM, "thinkingMedium")                            \
     X(THINKING_HIGH, "thinkingHigh") X(THINKING_XHIGH, "thinkingXhigh")                            \
     X(THINKING_MAX, "thinkingMax") X(BASH_MODE, "bashMode") X(PYTHON_MODE, "pythonMode")           \
+    X(BTW_MODE, "btwMode")                                                                          \
     X(STATUS_LINE_BG, "statusLineBg") X(STATUS_LINE_SEP, "statusLineSep")                          \
     X(STATUS_LINE_MODEL, "statusLineModel") X(STATUS_LINE_PATH, "statusLinePath")                  \
     X(STATUS_LINE_GIT_CLEAN, "statusLineGitClean") X(STATUS_LINE_GIT_DIRTY, "statusLineGitDirty")  \
@@ -43,7 +44,8 @@
     X(STATUS_LINE_STAGED, "statusLineStaged") X(STATUS_LINE_DIRTY, "statusLineDirty")              \
     X(STATUS_LINE_UNTRACKED, "statusLineUntracked") X(STATUS_LINE_OUTPUT, "statusLineOutput")      \
     X(STATUS_LINE_COST, "statusLineCost") X(STATUS_LINE_SUBAGENTS, "statusLineSubagents")          \
-    X(LINK, "link")
+    X(LINK, "link") X(SUBAGENT1, "subagent1") X(SUBAGENT2, "subagent2") X(SUBAGENT3, "subagent3")  \
+    X(SUBAGENT4, "subagent4") X(SUBAGENT5, "subagent5") X(SUBAGENT6, "subagent6")
 
 typedef enum {
 #define TUI_TC_ENUM(id, name) TUI_TC_##id,
@@ -66,6 +68,8 @@ typedef struct {
     int nspinner;
     bool spinner_custom; /* symbols.spinnerFrames override: wins over the preset's frames (omp getSpinnerFrames) */
     char ansi_fg[16][24]; /* foreground SGR per terminal.ansi slot; omitted slots use the terminal's palette */
+    int64_t ansi_rgb[16]; /* getAnsiHex: 0xRRGGBB per terminal.ansi slot the theme declares, -1 where it leaves it */
+    int64_t surface_rgb;  /* surfaceHex: terminal.background, else -1 (statusLineBg) */
 } tui_theme_t;
 
 /* Theme.ansiFg palette slots (ANSI_COLOR_INDEX) */

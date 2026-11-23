@@ -543,8 +543,10 @@ static void write_transmits(tui_term_t *tm) {
 
 static void paint_begin(tui_t *t) {
     tui_term_t *tm = t->term;
-    if (!tm->cursor_hidden) tui_term_cursor_show(tm, false);
+    /* the hide goes inside the synchronized update: kitty snapshots cursor visibility at ?2026h, so a hide written
+     * before it flashes a visible cursor on every animation tick (omp 4e8887a0ce) */
     tui_term_sync_begin(tm);
+    if (!tm->cursor_hidden) tui_term_cursor_show(tm, false);
     write_transmits(tm);
     tui_term_puts(tm, "\x1b[?7l");
 }
@@ -701,7 +703,7 @@ static void write_from_top(tui_t *t, const strvec_t *lines, int c, int r0, int w
  * the replay's ED2 erases it */
 static char *rebuild_notice(const tui_term_t *tm, int width, int height) {
     char *label = tui_truncate_to_width("\u21bb Rebuilding\u2026", width, "");
-    char *s = xasprintf("\x1b[?25l%s\x1b[?7l\x1b" "7\x1b[%d;1H\x1b[0m\x1b[2K%s" LINE_TERMINATOR "\x1b" "8\x1b[?7h%s",
+    char *s = xasprintf("%s\x1b[?25l\x1b[?7l\x1b" "7\x1b[%d;1H\x1b[0m\x1b[2K%s" LINE_TERMINATOR "\x1b" "8\x1b[?7h%s",
                         tm->sync_output ? "\x1b[?2026h" : "", height, label, tm->sync_output ? "\x1b[?2026l" : "");
     free(label);
     return s;
@@ -713,11 +715,6 @@ static char *rebuild_notice(const tui_term_t *tm, int width, int height) {
 static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int width, int height, bool clear) {
     tui_term_t *tm = t->term;
     size_t mark = tm->out.len;
-    /* a destructive reset purges every Kitty image (text erases leave placements painted); the live ones
-     * are transmitted again after the clear */
-    char *purge = clear ? tui_image_reset_display() : NULL;
-    if (purge) tui_term_puts(tm, purge);
-    free(purge);
     paint_begin(t);
     int r0;
     bool fused_exit = false;
@@ -735,6 +732,12 @@ static void full_render(tui_t *t, strvec_t *lines, const cursor_pos_t *cp, int w
         }
         tui_term_puts(tm, LINE_TERMINATOR);
         tui_term_clear_screen(tm, true);
+        /* a destructive reset purges every Kitty image (text erases leave placements painted), after the erases: d=A
+         * removes only on-screen placements, and a terminal that keeps a scrollback-anchored one moves it to the
+         * top-left when ED3 erases its row (omp 9eaf37275e); the live ones are transmitted again */
+        char *purge = tui_image_reset_display();
+        if (purge) tui_term_puts(tm, purge);
+        free(purge);
         write_transmits(tm);
         t->full_count++;
         r0 = 0;

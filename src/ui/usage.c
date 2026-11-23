@@ -1209,7 +1209,11 @@ static void card_lines(const card_t *c, int width, strvec_t *labels, const cardl
         if (lay->stacked)
             for (int l = 0; l < lay->heights[i]; l++) strvec_push_own(out, xasprintf("  %s", l < (int)labels[i].n ? labels[i].v[l] : ""));
         if (!w->has_f) {
-            char *d = S(TUI_TC_DIM, w->used_text ? w->used_text : "no data"), *x = xasprintf("%s%s", prefix, d);
+            /* barlessAmountText / pressureTone: a spent quota without an amount reads `exhausted`, and the row takes
+             * its reported status's tone (omp ac6918f301, 98129705b7) */
+            bool ex = str_eq(w->status, "exhausted"), warn = str_eq(w->status, "warning");
+            const char *amount = w->used_text ? w->used_text : ex ? "exhausted" : "no data";
+            char *d = S(ex ? TUI_TC_ERROR : warn ? TUI_TC_WARNING : TUI_TC_DIM, amount), *x = xasprintf("%s%s", prefix, d);
             wrap_push(out, x, content, "  ");
             free(d), free(x), free(prefix);
             continue;

@@ -5,6 +5,7 @@ mock model receives (tests/e2e/run.sh).
 usage: editor_io.py <omc> <req.jsonl> <fake_editor.sh> <scratch dir>
 Prints "editor io ok" or the first failing step."""
 import json, os, pty, select, sys, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, reqlog, fake_editor, scratch = sys.argv[1:5]
 edlog = os.path.join(scratch, "editor.log")
@@ -23,7 +24,7 @@ for k in ("VISUAL", "WAYLAND_DISPLAY", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"
     env.pop(k, None)
 pid, fd = pty.fork()
 if pid == 0:
-    os.execve(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
+    os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session"], env)
 out = bytearray()
 
 

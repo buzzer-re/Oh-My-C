@@ -476,11 +476,38 @@ static void test_thinking_capability(void) {
     json_free(row);
 }
 
+/* omp 0aa5f2359f: `provider/model` lists the prefixed providers' models first (exact provider ahead of a prefix),
+ * matched on the model part alone; whole-text matches follow so openrouter's `vendor/model` ids stay reachable */
+static void test_scoped_model_search(void) {
+    static ai_model_t ms[4];
+    const char *pv[] = {"openrouter", "openai", "openai-codex", "anthropic"};
+    const char *id[] = {"openai/gpt-5", "gpt-5", "gpt-5-codex", "claude-opus"};
+    ui_model_browser_t *b = ui_model_browser_new();
+    for (int i = 0; i < 4; i++) {
+        ms[i].provider = (char *)pv[i];
+        ms[i].id = (char *)id[i];
+        ms[i].name = (char *)id[i];
+        ui_model_browser_add(b, &ms[i]);
+    }
+    ui_model_browser_done_adding(b);
+    ui_model_browser_set_query(b, "openai/gpt");
+    CHECK(b->visible.n >= 3);
+    if (b->visible.n >= 3) {
+        CHECK(str_eq(b->items.v[b->visible.v[0]].selector, "openai/gpt-5"));
+        CHECK(str_eq(b->items.v[b->visible.v[1]].selector, "openai-codex/gpt-5-codex"));
+        CHECK(str_eq(b->items.v[b->visible.v[2]].selector, "openrouter/openai/gpt-5"));
+    }
+    ui_model_browser_set_query(b, "anth/");
+    CHECK(b->visible.n >= 1 && str_eq(b->items.v[b->visible.v[0]].selector, "anthropic/claude-opus"));
+    ui_model_browser_free(b);
+}
+
 int main(void) {
     char tmpl[] = "/tmp/omc-test-catalog.XXXXXX";
     char *dir = mkdtemp(tmpl);
     setenv("OMC_CODING_AGENT_DIR", dir, 1);
     setenv("OMC_NO_LOCAL_DISCOVERY", "1", 1);
+    test_scoped_model_search();
 
     test_credit_rates();
     test_catalog_policy();

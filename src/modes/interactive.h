@@ -63,6 +63,14 @@ bool lp_escape(ui_t *u);                         /* app.interrupt with loop mode
 bool lp_run_end(ui_t *u);                        /* a run ended idle: schedule the next iteration; true when loop mode is on */
 void lp_shutdown(ui_t *u);
 
+/* predictctl.c (composer-prediction-controller.ts) */
+void pred_attach(ui_t *u);        /* wire the composer's ghost predictions */
+void pred_request(ui_t *u);       /* a run settled done: predict the next message */
+void pred_cancel(ui_t *u);        /* abort an in-flight prediction and retire the shown one */
+void pred_shutdown(ui_t *u);      /* teardown: cancel and join the side turns */
+void pred_job_done(void *ud);
+char *pred_parse_one(const char *reply);                     /* parseComposerPrediction (owned or NULL) */
+bool pred_parse_many(const char *reply, int max, strvec_t *out); /* parseComposerPredictions */
 /* copyctl.c (builtin-collaboration.ts copy / open, SelectorController.showCopySelector) */
 void cc_copy_command(ui_t *u, const char *arg); /* /copy [code|cmd|link]: picker or the latest target */
 void cc_open_command(ui_t *u, const char *arg); /* /open [link] */

@@ -83,6 +83,10 @@ void ui_model_browser_render(const ui_model_browser_t *b, int width, strvec_t *o
 char *ui_format_number(double n);
 /* modelhub.c buildSessionModelScope: a browser over the available chat models (sortModelItems order) with the
  * role assignments (chips) and MRU order; call ui_model_browser_done_adding after adjusting it */
-ui_model_browser_t *ui_session_model_browser(void); /* upstream formatNumber: 4096 -> "4.1K" */
+ui_model_browser_t *ui_session_model_browser(void);
+/* thinkingSlider (modelpicker.c): the slider steps of `m` (auto, off, its efforts; *disabled when it has no effort to
+ * pick) and `level` as one of them in *value; returns the step count (at most cap) */
+size_t ui_thinking_slider(const ai_model_t *m, const char *level, const char **steps, size_t cap, const char **value,
+                          bool *disabled); /* upstream formatNumber: 4096 -> "4.1K" */
 
 #endif

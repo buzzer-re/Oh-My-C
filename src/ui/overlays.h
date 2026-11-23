@@ -359,6 +359,8 @@ tui_component_t *ui_plan_review_component(ui_plan_review_t *p);
 void ui_plan_review_set_plan(ui_plan_review_t *p, const char *plan); /* external-editor round trip */
 void ui_plan_review_set_annotation_draft(ui_plan_review_t *p, const char *text);
 void ui_plan_review_set_slider(ui_plan_review_t *p, int index);
+/* setChoices: an approval choice's meta and availability (keep-context re-measured for the selected tier) */
+void ui_plan_review_set_choice(ui_plan_review_t *p, size_t index, const char *meta, bool disabled);
 bool ui_plan_review_select(ui_plan_review_t *p, const char *label); /* commit like Enter; false if refused */
 
 /* showHookConfirm: `title` box with `message` and Yes / No in the composer's place; cb(yes) runs on the

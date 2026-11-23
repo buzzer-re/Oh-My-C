@@ -15,11 +15,15 @@
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "text/htmlform.h"
+#include "tui/fuzzy.h"
+#include "ui/modelbrowser.h"
 #include "tui/ansi.h"
 #include "tui/symbols.h"
 #include "ui/ui.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <errno.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -62,6 +66,7 @@ struct rpc {
     int abort_waiters;
     unsigned agent_ends;
     json_t *skill_msg;  /* the prompt invokes a skill (dispatchRpcSkillPrompt): its built custom message */
+    bool resume;        /* the run is a `resume` (AgentSession.resume): no prompt ticket */
     pthread_mutex_t mu;
     /* /btw (rpc-btw.ts) */
     pthread_mutex_t btw_mu;
@@ -939,9 +944,262 @@ static json_t *rpc_ask(void *ud, const json_t *qs) {
     return out;
 }
 
-/* ---------- the ask tool's field-by-field fallback (tool_ui_t.select / input / editor) ---------- */
-
 #define RPC_GONE "RPC client disconnected before extension UI response completed"
+
+/* ---------- the ask tool's whole HTML form (requestRpcFormDialog, omp b1470da89c and its follow-ups) ---------- */
+
+static char *js_quote(const char *s) { /* JSON.stringify of a string (owned) */
+    json_t *j = json_str(s ? s : "");
+    char *q = json_dump(j, 0);
+    json_free(j);
+    return q;
+}
+
+/* parseFormChoice: each string one of the field's enabled option values, except one free-text entry when the field
+ * offers "Other"; checkbox groups and multi-selects take an array. *val (owned, NULL = nothing chosen) */
+static bool form_choice(const hf_field_t *f, const json_t *value, json_t **val, char **err) {
+    *val = NULL;
+    bool *checked = xcalloc(f->opts.n ? f->opts.n : 1, sizeof *checked);
+    if (!value) {
+        *val = hf_choice_value(f, checked, NULL);
+        free(checked);
+        return true;
+    }
+    char *label = js_quote(f->name);
+    bool array = hf_is_array_choice(f);
+    const char *shape = array ? "an array of strings" : "one string, not an array";
+    const char *other = NULL;
+    bool ok = true;
+    if (array != json_is_arr(value)) {
+        *err = xasprintf("Form field %s must carry %s", label, shape);
+        ok = false;
+    }
+    size_t n = !ok ? 0 : array ? json_len(value) : 1;
+    for (size_t i = 0; i < n && ok; i++) {
+        const json_t *e = array ? json_at(value, i) : value;
+        if (!json_is_str(e)) {
+            *err = xasprintf("Form field %s must carry %s", label, shape);
+            ok = false;
+            break;
+        }
+        const char *entry = json_sv(e);
+        long enabled = -1, any = -1;
+        for (size_t k = 0; k < f->opts.n; k++) {
+            if (strcmp(f->opts.v[k].value ? f->opts.v[k].value : "", entry)) continue;
+            if (any < 0) any = (long)k;
+            if (enabled < 0 && !f->opts.v[k].disabled) enabled = (long)k;
+        }
+        long idx = enabled >= 0 ? enabled : any;
+        if (idx >= 0 && f->opts.v[idx].disabled) {
+            char *q = js_quote(entry);
+            *err = xasprintf("Form field %s carries disabled option %s", label, q);
+            free(q);
+            ok = false;
+        } else if (idx >= 0 && !checked[idx]) checked[idx] = true;
+        else if (idx < 0 && f->other && !other) other = entry;
+        else {
+            char *q = js_quote(entry);
+            *err = xasprintf("Form field %s carries unexpected value %s", label, q);
+            free(q);
+            ok = false;
+        }
+    }
+    if (ok) *val = hf_choice_value(f, checked, other);
+    free(label);
+    free(checked);
+    return ok;
+}
+
+/* parseChoiceOrHiddenFallback: an echoed same-name hidden value counts as no selection when it cannot be the answer */
+static bool form_choice_hidden(const hf_field_t *f, const json_t *value, const char *hidden, json_t **val, char **err) {
+    if (!hidden || !value) return form_choice(f, value, val, err);
+    long echo = -1;
+    if (json_is_arr(value)) {
+        for (size_t i = 0; i < json_len(value) && echo < 0; i++)
+            if (json_is_str(json_at(value, i)) && !strcmp(json_sv(json_at(value, i)), hidden)) echo = (long)i;
+    } else if (json_is_str(value) && !strcmp(json_sv(value), hidden)) echo = 0;
+    if (echo < 0) return form_choice(f, value, val, err);
+    json_t *without = NULL;
+    if (json_is_arr(value)) {
+        without = json_arr();
+        for (size_t i = 0; i < json_len(value); i++)
+            if ((long)i != echo) json_push(without, json_clone(json_at(value, i)));
+    }
+    bool carried_by_option = false;
+    for (size_t k = 0; k < f->opts.n; k++)
+        if (str_eq(f->opts.v[k].value, hidden)) carried_by_option = true;
+    bool ok;
+    if (json_is_arr(value) && !carried_by_option) ok = form_choice(f, without, val, err);
+    else {
+        char *e1 = NULL;
+        ok = form_choice(f, value, val, &e1);
+        if (!ok) {
+            free(e1);
+            ok = form_choice(f, without, val, err);
+        }
+    }
+    json_free(without);
+    return ok;
+}
+
+/* parseFormText: a string, or a finite number for `number`/`range` inputs; absent counts as empty */
+static bool form_text(const hf_field_t *f, const json_t *value, json_t **val, char **err) {
+    *val = NULL;
+    if (!value) {
+        *val = hf_text_value(f, "");
+        return true;
+    }
+    bool numeric = str_eq(f->type, "number") || str_eq(f->type, "range");
+    if (json_is_str(value)) {
+        *val = hf_text_value(f, json_sv(value));
+        return true;
+    }
+    if (numeric && json_is_num(value) && isfinite(value->u.num.d)) {
+        char *t = json_dump(value, 0); /* String(value) */
+        *val = hf_text_value(f, t);
+        free(t);
+        return true;
+    }
+    char *label = js_quote(f->name);
+    *err = xasprintf("Form field %s must carry a string%s", label, numeric ? " or a number" : "");
+    free(label);
+    return false;
+}
+
+static bool form_field_value(const hf_field_t *f, const json_t *entry, const char *hidden, json_t **val, char **err) {
+    return f->kind == HF_CHOICE ? form_choice_hidden(f, entry, hidden, val, err) : form_text(f, entry, val, err);
+}
+
+/* parseFormDialogResponse: validates submitted `data` against the parsed form; any mismatch fails (owned data, or NULL
+ * with *err) */
+static json_t *form_parse_data(const hf_form_t *form, const json_t *submitted, char **err) {
+    if (!json_is_obj(submitted)) {
+        *err = xstrdup("Form dialog response must carry a data object");
+        return NULL;
+    }
+    for (size_t i = 0; i < json_len(submitted); i++) {
+        const char *key = submitted->u.obj.keys[i];
+        bool known = strvec_contains(&form->hidden_names, key);
+        for (size_t k = 0; k < form->fields.n && !known; k++)
+            if (form->fields.v[k]->name && *form->fields.v[k]->name && !strcmp(form->fields.v[k]->name, key)) known = true;
+        if (!known) {
+            char *q = js_quote(key);
+            *err = xasprintf("Form dialog data carries unknown field %s", q);
+            free(q);
+            return NULL;
+        }
+    }
+    json_t *data = json_obj();
+    for (size_t i = 0; i < form->hidden_names.n; i++) json_set_str(data, form->hidden_names.v[i], form->hidden_values.v[i]);
+    for (size_t i = 0; i < form->fields.n; i++) {
+        const hf_field_t *first = form->fields.v[i];
+        if (!first->name || !*first->name) continue;
+        bool seen = false;
+        for (size_t k = 0; k < i && !seen; k++) seen = str_eq(form->fields.v[k]->name, first->name);
+        if (seen) continue;
+        const char *name = first->name;
+        const json_t *entry = json_get(submitted, name);
+        const char *hidden = NULL;
+        for (size_t k = 0; k < form->hidden_names.n; k++) /* new Map(form.hidden): the last pair wins */
+            if (!strcmp(form->hidden_names.v[k], name)) hidden = form->hidden_values.v[k];
+        VEC(const hf_field_t *) fields = {0};
+        for (size_t k = i; k < form->fields.n; k++)
+            if (str_eq(form->fields.v[k]->name, name)) vec_push(&fields, form->fields.v[k]);
+        json_t **vals = xcalloc(fields.n, sizeof *vals);
+        bool *carried = xcalloc(fields.n, sizeof *carried), any = false, ok = true;
+        char *mismatch = NULL;
+        for (size_t k = 0; k < fields.n && ok; k++) {
+            char *e = NULL;
+            if (form_field_value(fields.v[k], entry, hidden, &vals[k], &e)) {
+                carried[k] = any = true;
+                continue;
+            }
+            /* only a field sharing its name may decline the entry; a lone field's mismatch fails the answer */
+            if (fields.n == 1) {
+                *err = e;
+                ok = false;
+                break;
+            }
+            if (!mismatch) mismatch = e;
+            else free(e);
+            char *e2 = NULL;
+            form_field_value(fields.v[k], NULL, NULL, &vals[k], &e2);
+            free(e2);
+        }
+        if (ok && !any) {
+            *err = mismatch;
+            mismatch = NULL;
+            ok = false;
+        }
+        for (size_t k = 0; k < fields.n && ok; k++) {
+            char *problem = hf_field_error(fields.v[k], vals[k]);
+            if (problem) {
+                char *q = js_quote(name);
+                *err = xasprintf("Form field %s: %s", q, problem);
+                free(q);
+                free(problem);
+                ok = false;
+                break;
+            }
+            if (carried[k] && vals[k]) json_set(data, name, json_clone(vals[k]));
+        }
+        for (size_t k = 0; k < fields.n; k++) json_free(vals[k]);
+        free(vals);
+        free(carried);
+        free(mismatch);
+        vec_free(&fields);
+        if (!ok) {
+            json_free(data);
+            return NULL;
+        }
+    }
+    return data;
+}
+
+/* tool_ui_t.form: the ask tool's HTML form as one `form` request; a timeout submits the form's defaults. A frame
+ * larger than the negotiated protocol delivers intact fails without being sent (omp 9a323f5dc7). */
+static json_t *rpc_form(void *ud, const char *html, int64_t timeout_ms, bool *timed_out, json_t **notes,
+                        volatile sig_atomic_t *cancel, char **err) {
+    rpc_t *r = ud;
+    *timed_out = false;
+    if (notes) *notes = NULL;
+    json_t *f = json_obj();
+    json_set_str(f, "method", "form");
+    json_set_str(f, "html", html);
+    if (timeout_ms > 0) json_set_int(f, "timeout", timeout_ms);
+    { /* a throwaway 16-character id measures the frame */
+        json_t *probe = json_obj();
+        json_set_str(probe, "type", "extension_ui_request");
+        json_set_str(probe, "id", "0000000000000000");
+        for (size_t i = 0; i < json_len(f); i++) json_set(probe, f->u.obj.keys[i], json_clone(f->u.obj.vals[i]));
+        char *enc = json_dump(probe, 0);
+        size_t bytes = strlen(enc), limit = r->proto == 2 ? RPC_MAX_REASSEMBLED_BYTES : RPC_MAX_FRAME_BYTES - 1;
+        free(enc);
+        json_free(probe);
+        if (bytes > limit) {
+            *err = xasprintf("Form is too large for the RPC host (%zu bytes, limit %zu); use fewer or smaller images, or split the form",
+                             bytes, limit);
+            json_free(f);
+            return NULL;
+        }
+    }
+    hf_form_t *form = hf_parse(html);
+    json_t *resp = NULL;
+    bool to = false;
+    int rc = ui_request(r, f, timeout_ms, cancel, &resp, &to);
+    json_t *data = NULL;
+    if (rc < 0) *err = xstrdup(RPC_GONE);
+    else if (to || (rc == 0 && json_get_bool(resp, "cancelled", false) && json_get_bool(resp, "timedOut", false))) {
+        data = hf_default_data(form);
+        *timed_out = true;
+    } else if (rc == 0 && !json_get_bool(resp, "cancelled", false))
+        data = form_parse_data(form, json_get(resp, "data"), err);
+    json_free(resp);
+    hf_form_free(form);
+    return data;
+}
+
+/* ---------- the ask tool's field-by-field fallback (tool_ui_t.select / input / editor) ---------- */
 
 static char *rpc_fb_select(void *ud, const char *title, const strvec_t *options, const tool_select_opts_t *so,
                            int64_t timeout_ms, bool *timed_out, volatile sig_atomic_t *cancel, char **err) {
@@ -1402,6 +1660,18 @@ again:;
             pthread_mutex_unlock(&r->mu);
             return NULL;
         }
+    } else if (r->resume) {
+        char *err = NULL;
+        if (app_resume(r->a, &err) != 0 && err) { /* a failure after the acknowledgement is a late error */
+            json_t *f = json_obj();
+            json_set_str(f, "type", "response");
+            json_set_str(f, "command", "resume");
+            json_set_bool(f, "success", false);
+            json_set_str(f, "error", err);
+            emit(r, f);
+            json_free(f);
+        }
+        free(err);
     } else if (r->hidden) app_prompt_hidden(r->a, r->text, r->hidden);
     else if (r->skill_msg) {
         json_t *m = r->skill_msg;
@@ -1469,7 +1739,8 @@ again:;
     bool was_cont = false;
     const char *prev_type = r->hidden;
     /* a background-job wake run has no prompt ticket: omp reports no prompt_result for it (rpc-prompt-results.ts) */
-    bool wake_run = str_eq(r->hidden, "async-result");
+    bool wake_run = str_eq(r->hidden, "async-result") || r->resume;
+    r->resume = false;
     for (;;) {
         json_t *run = json_arr();
         pthread_mutex_lock(&r->a->agent->mu);
@@ -1738,12 +2009,117 @@ static bool session_settled(rpc_t *r) {
     return !running && !agent_is_running(a->agent) && !queued && !jobs_running(a->env->jobs) && !jobs_undelivered(a->env->jobs);
 }
 
+/* getAvailableEffortSelectors: off, auto, then the model's efforts; [] without reasoning */
+static json_t *effort_selectors(app_t *a) {
+    json_t *lv = json_arr();
+    if (!a->model || !a->model->reasoning) return lv;
+    json_push_str(lv, "off");
+    json_push_str(lv, "auto");
+    for (int i = EFFORT_OFF + 1; i <= EFFORT_MAX; i++)
+        if (model_supports_effort(a->model, (ai_effort_t)i)) json_push_str(lv, effort_name((ai_effort_t)i));
+    return lv;
+}
+
+/* get_model_picker (rpc-model-picker.ts): omp's session model picker served over RPC: the Recent block first, the
+ * search ranking, role chips, the thinking slider, `@` quick roles */
+static json_t *model_picker_json(app_t *a, const char *query, int64_t limit) {
+    json_t *rows = json_arr(), *out = json_obj();
+    int64_t total = 0, recent = 0;
+    if (query && query[0] == '@') {
+        app_role_entry_t *cyc = NULL;
+        int cur = 0;
+        size_t n = app_role_cycle(a, &cyc, &cur);
+        char **texts = xcalloc(n ? n : 1, sizeof *texts);
+        for (size_t i = 0; i < n; i++) texts[i] = xasprintf("/@%s", cyc[i].role); /* modelSearchText of `@role` */
+        size_t *idx = xmalloc((n ? n : 1) * sizeof *idx), m = n;
+        char *q = str_trim(query);
+        if (*q) m = tui_fuzzy_rank(query, (const char *const *)texts, n, idx);
+        else
+            for (size_t i = 0; i < n; i++) idx[i] = i;
+        free(q);
+        total = (int64_t)m;
+        for (size_t k = 0; k < m && (int64_t)k < limit; k++) {
+            const app_role_entry_t *e = &cyc[idx[k]];
+            json_t *row = json_obj();
+            json_set_str(row, "provider", e->model->provider);
+            json_set_str(row, "id", e->model->id);
+            json_set_str(row, "name", e->model->name ? e->model->name : e->model->id);
+            json_set_str(row, "role", e->role);
+            if (e->explicit_level && e->level) json_set_str(row, "thinkingLevel", e->level);
+            if ((int)idx[k] == cur) json_set_bool(row, "current", true);
+            json_push(rows, row);
+        }
+        for (size_t i = 0; i < n; i++) free(texts[i]);
+        free(texts);
+        free(idx);
+        app_role_cycle_free(cyc, n);
+    } else {
+        ui_model_browser_t *b = ui_session_model_browser();
+        ui_model_browser_done_adding(b);
+        char *q = str_trim(query ? query : "");
+        ui_model_browser_set_query(b, *q ? q : NULL);
+        free(q);
+        /* the untouched slider shows the level the session runs at: auto's resolved effort once a turn settled it */
+        const char *level = a->auto_thinking ? (a->auto_resolved >= 0 ? effort_name((ai_effort_t)a->auto_resolved) : "auto")
+                                             : effort_name(a->thinking);
+        int64_t tokens = a->model ? ui_context_used(a) : 0;
+        bool sep_seen = false;
+        for (size_t v = 0; v < b->visible.n; v++) {
+            if (b->visible.v[v] == UI_MB_SEPARATOR) {
+                sep_seen = true;
+                continue;
+            }
+            if (!sep_seen) recent++;
+            total++;
+            if (total > limit) continue;
+            const ai_model_t *m = b->items.v[b->visible.v[v]].model;
+            json_t *row = json_obj();
+            json_set_str(row, "provider", m->provider);
+            json_set_str(row, "id", m->id);
+            json_set_str(row, "name", m->name ? m->name : m->id);
+            json_t *roles = json_arr();
+            for (size_t i = 0; i < b->nroles; i++) {
+                if (b->roles[i].model != m || b->roles[i].hidden) continue;
+                json_t *ro = json_obj();
+                json_set_str(ro, "role", b->roles[i].role);
+                json_set_str(ro, "label", b->roles[i].label ? b->roles[i].label : b->roles[i].role);
+                if (b->roles[i].auto_selected) json_set_bool(ro, "auto", true);
+                json_push(roles, ro);
+            }
+            if (json_len(roles)) json_set(row, "roles", roles);
+            else json_free(roles);
+            const char *steps[12], *value = NULL;
+            bool disabled = true;
+            size_t ns = ui_thinking_slider(m, level, steps, ARRAY_LEN(steps), &value, &disabled);
+            if (!disabled) {
+                json_t *th = json_arr();
+                for (size_t i = 0; i < ns; i++) json_push_str(th, steps[i]);
+                json_set(row, "thinking", th);
+                json_set_str(row, "thinkingLevel", value);
+            }
+            if (tokens > 0 && m->context_window > 0 && tokens > m->context_window) json_set_bool(row, "overContext", true);
+            if (a->model == m) json_set_bool(row, "current", true);
+            json_push(rows, row);
+        }
+        if (!sep_seen) recent = 0;
+        recent = MIN(recent, (int64_t)json_len(rows));
+        ui_model_browser_free(b);
+    }
+    json_set(out, "rows", rows);
+    json_set_int(out, "recent", recent);
+    json_set_int(out, "total", total);
+    return out;
+}
+
 /* RpcSessionState (get_state) */
 static json_t *state_json(rpc_t *r) {
     app_t *a = r->a;
     json_t *s = json_obj();
     if (a->model) json_set(s, "model", model_json(a->model));
     if (app_wire_thinking(a)) json_set_str(s, "thinkingLevel", app_wire_thinking(a));
+    /* the user's selector (`auto` while auto mode picks the effort) and the selectors the model accepts */
+    json_set_str(s, "configuredThinkingLevel", a->auto_thinking ? "auto" : effort_name(a->thinking));
+    json_set(s, "thinkingLevels", effort_selectors(a));
     bool streaming = agent_is_running(a->agent);
     json_set_bool(s, "isStreaming", streaming);
     json_set_bool(s, "isCompacting", a->compacting);
@@ -3006,6 +3382,70 @@ static void handle(rpc_t *r, json_t *cmd) {
             r->running = false;
             respond(r, id, type, false, NULL, "failed to start agent thread");
         }
+    } else if (!strcmp(type, "abort_and_deliver_queue")) {
+        /* the TUI's empty Enter (omp 82e8e939a7): a streaming run with queued user input is interrupted and continues
+         * with that input; ordered behind earlier input, so a prompt sent just before is the input it delivers */
+        pthread_mutex_lock(&r->mu);
+        bool running = r->running && !r->settling;
+        pthread_mutex_unlock(&r->mu);
+        bool aborted = running && agent_has_interruptible_input(a->agent);
+        if (aborted) {
+            agent_abort_deliver_queued(a->agent);
+            app_abort_user(a);
+        }
+        json_t *d = json_obj();
+        json_set_bool(d, "aborted", aborted);
+        respond(r, id, type, true, d, NULL);
+    } else if (!strcmp(type, "resume")) {
+        /* the TUI's `.`/`c` continue (AgentSession.resume): a running turn is interrupted first; queued input continues
+         * the run in place of the directive; answered once the continuation is under way */
+        pthread_mutex_lock(&r->mu);
+        bool running = r->running;
+        pthread_mutex_unlock(&r->mu);
+        if (running && agent_has_interruptible_input(a->agent)) {
+            agent_abort_deliver_queued(a->agent);
+            app_abort_user(a);
+            respond(r, id, type, true, NULL, NULL);
+            return;
+        }
+        if (running) {
+            app_abort_user(a);
+            for (int k = 0; k < 600; k++) { /* wait for the run to unwind (max ~60s) */
+                pthread_mutex_lock(&r->mu);
+                bool busy = r->running;
+                pthread_mutex_unlock(&r->mu);
+                if (!busy) break;
+                usleep(100 * 1000);
+            }
+        }
+        bool has_user = false;
+        pthread_mutex_lock(&a->agent->mu);
+        const json_t *m;
+        json_arr_foreach(a->agent->messages, mi, m) if (str_eq(json_get_str(m, "role"), "user")) has_user = true;
+        pthread_mutex_unlock(&a->agent->mu);
+        pthread_mutex_lock(&r->mu);
+        if (!has_user || r->running) {
+            pthread_mutex_unlock(&r->mu);
+            respond(r, id, type, false, NULL, "Nothing to resume");
+            return;
+        }
+        if (r->th) pthread_join(r->th, NULL);
+        r->th = 0;
+        r->running = true;
+        r->settling = false;
+        r->hidden = NULL;
+        r->resume = true;
+        r->text = xstrdup("");
+        r->prompt_id = NULL;
+        r->images = NULL;
+        r->skill_msg = NULL;
+        r->slash = r->slash_reply = false;
+        pthread_mutex_unlock(&r->mu);
+        respond(r, id, type, true, NULL, NULL);
+        if (pthread_create(&r->th, NULL, prompt_thread, r) != 0) {
+            r->running = false;
+            r->resume = false;
+        }
     } else if (!strcmp(type, "steer") || !strcmp(type, "follow_up")) {
         /* steer() / followUp(): prompt templates expand (no slash or skill commands) */
         const char *raw = json_get_str(cmd, "message");
@@ -3523,8 +3963,22 @@ static void handle(rpc_t *r, json_t *cmd) {
             respond(r, id, type, false, NULL, e);
             free(e);
         } else {
-            app_use_model(a, m);
+            /* `role` records the role the switch belongs to (a quick-role pick); `thinkingLevel` runs it at that
+             * level, clamped; nothing is persisted (omp 4189e22bea) */
+            const char *role = json_get_str(cmd, "role");
+            if (role && *role) app_use_model_role(a, m, role);
+            else app_use_model(a, m);
+            const char *lv = json_get_str(cmd, "thinkingLevel");
+            if (lv) app_set_thinking_level(a, lv);
             respond(r, id, type, true, model_json(m), NULL);
+        }
+    } else if (!strcmp(type, "get_model_picker")) {
+        const json_t *lj = json_get(cmd, "limit");
+        int64_t limit = lj ? json_get_int(cmd, "limit", 0) : 100;
+        if (lj && (!json_is_num(lj) || lj->u.num.d != floor(lj->u.num.d) || lj->u.num.d < 1)) {
+            respond(r, id, type, false, NULL, "`limit` must be a positive integer.");
+        } else {
+            respond(r, id, type, true, model_picker_json(a, json_get_str(cmd, "query"), limit), NULL);
         }
     } else if (!strcmp(type, "set_thinking_level")) {
         if (app_set_thinking_level(a, json_get_str(cmd, "level"))) {
@@ -3648,6 +4102,7 @@ rpc_t *rpc_attach(app_t *a, rpc_sink_fn sink, void *ud) {
     a->queue_snapshot = qsnap;
     pthread_mutex_unlock(&a->mu);
     a->env->ui.ask = rpc_ask;
+    a->env->ui.form = rpc_form;
     a->env->ui.select = rpc_fb_select;
     a->env->ui.input = rpc_fb_input;
     a->env->ui.editor = rpc_fb_editor;
@@ -3728,6 +4183,7 @@ void rpc_detach(rpc_t *r) {
     }
     if (a->env->ui.ud == r) {
         a->env->ui.ask = NULL;
+        a->env->ui.form = NULL;
         a->env->ui.select = NULL;
         a->env->ui.input = NULL;
         a->env->ui.editor = NULL;

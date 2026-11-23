@@ -247,6 +247,10 @@ char *tui_truncate_to_width(const char *s, int width, const char *ellipsis) {
     }
     sb_append(&b, TUI_RESET);
     if (st.link[0]) sb_append(&b, TUI_LINK_CLOSE);
+    if (st.bg[0]) { /* preserveTruncatedBackground: the ellipsis keeps a tinted row's fill (omp 559afe1a70) */
+        sb_appendf(&b, "\x1b[%sm%s\x1b[49m", st.bg, ellipsis);
+        return sb_detach(&b);
+    }
     sb_append(&b, ellipsis);
     return sb_detach(&b);
 }

@@ -107,6 +107,12 @@ try:
     check("pick applies level", "Session-only model: mock/mock-r" in out, out)
     out = press("\x1bp", 1.5)
     check("picked level kept", "mock/mock-r" in out and "thinking Med" in out, out)
+    # Esc on the current model's row with the slider moved keeps that level (omp 081b4fbf8b onKeepThinking)
+    out = press("\x1b[C")
+    check("step right", "thinking High" in out, out)
+    press("\x1b", 1.0)
+    out = press("\x1bp", 1.5)
+    check("esc keeps level", "thinking High" in out, out)
 finally:
     if os.environ.get("MP_DUMP"):
         open(os.environ["MP_DUMP"], "wb").write(raw)

@@ -3,6 +3,7 @@
  * commands/acp.ts. Every ACP session is its own app_t; prompts run on a per-session worker thread chain
  * while the stdin reader keeps dispatching (cancel, steering, client responses). */
 #define _GNU_SOURCE /* memmem, strcasestr, vasprintf: glibc before 2.38 declares them only with it */
+#include "tools/jobtext.h"
 #include "coding/skilldesc.h"
 #include "coding/slashcmd.h"
 #include "coding/xdnotice.h"
@@ -437,11 +438,18 @@ static char *tool_title(const char *name, const json_t *args, const char *intent
         char *t = start_text(name, args);
         if (t) return t;
     }
-    if (intent) {
-        char *t = trim_dup(intent);
-        if (*t) return t;
+    /* the intent, else the args' `i`, as its brief label (omp 4d08e232b3) */
+    char *t = intent ? trim_dup(intent) : NULL;
+    if (!t || !*t) {
         free(t);
+        t = str_prop(args, "i") ? trim_dup(str_prop(args, "i")) : NULL;
     }
+    if (t && *t) {
+        char *l = tool_intent_label(t);
+        free(t);
+        return l;
+    }
+    free(t);
     const char *keys[] = {"path", "command", "pattern", "query"};
     for (size_t i = 0; i < ARRAY_LEN(keys); i++) {
         const char *v = str_prop(args, keys[i]);

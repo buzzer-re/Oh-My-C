@@ -16,6 +16,11 @@ bool job_caption_needed(const char *command);
 /* normalizeJobCaption: the first non-empty line of a reply as plain text with home paths shortened, unquoted, without
  * list markers or a final period, at most 200 characters (owned); NULL when none */
 char *job_caption_normalize(const char *reply);
+/* toolIntentLabel: the activity label before the first colon followed by whitespace or the end (`[Brief label]:
+ * detail` -> `[Brief label]`), the whole intent when none or when the label is blank (owned) */
+char *tool_intent_label(const char *intent);
+/* jobDisplayLabel: the job's intent label, else its label (owned) */
+char *job_display_label(const char *intent, const char *label);
 /* omp truncate(): at most `max` UTF-16 units including the `…` (owned) */
 char *job_truncate(const char *s, size_t max);
 

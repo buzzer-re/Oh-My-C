@@ -4,6 +4,7 @@ requests the mock model receives, the OSC 52 clipboard writes and a fake `xdg-op
 usage: loop_copy_tui.py <omc> <req.jsonl> <scratch dir> loop|copy
 Prints "loop copy ok" or the first failing step."""
 import base64, fcntl, json, os, pty, re, select, struct, sys, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, reqlog, scratch, part = sys.argv[1:5]
 bindir = os.path.join(scratch, "bin")
@@ -22,7 +23,7 @@ for k in ("OMC_NO_BROWSER", "TMUX", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"):
     env.pop(k, None)
 lc_pid, fd = pty.fork()
 if lc_pid == 0:
-    os.execve(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
+    os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))  # wide: notices stay on one row
 out = bytearray()
 
@@ -168,6 +169,12 @@ def copy_part():
     send("/copy cmd\r", 0.8)
     if not wait_out("No command to copy.", 3, mark):
         fail("copy cmd none", out[-300:])
+    # /copy local creates and copies the session's local:// directory (omp 7cc6ba48cc)
+    mark = len(out)
+    send("/copy local\r", 0.8)
+    got = clipboard_since(mark)
+    if not got or not os.path.isdir(got) or not wait_out("to clipboard", 3, mark):
+        fail("copy local", got)
 
     # the picker: the last turn is outlined; Enter copies it, Right descends into its blocks, `o` opens a link
     mark = len(out)
@@ -207,6 +214,19 @@ def copy_part():
     opened = open(openlog).read().split() if os.path.exists(openlog) else []
     if opened != ["https://example.org/plain-link", "https://example.org/plain-link"]:
         fail("opener calls", opened)
+
+    # a turn whose prose is an out:// reply copies that prose whole (omp 0ef71cbc5c, a2f81bc721)
+    mark = len(out)
+    send('call:write:{"path":"out://","content":"Reply **prose** here"}\r')
+    if not wait_out("Tool said", 10, mark):
+        fail("reply fixture", out[-500:])
+    pump(0.8)
+    mark = len(out)
+    send("/copy\r", 0.8)
+    send("\x1b[A", 0.4)
+    send("\r", 0.8)
+    if clipboard_since(mark) != "Reply **prose** here":
+        fail("copy reply prose", clipboard_since(mark))
 
 if part == "loop":
     loop_part()

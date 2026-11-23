@@ -7,6 +7,7 @@ Escape shapes are omp v18.14.2's, captured under `script`.
 usage: display_tui.py <omc> <work dir> <kitty|other|keys>   (agent dir from OMC_CODING_AGENT_DIR, like tests/e2e/run.sh)
 Prints one "<step> ok" line per step, or "<step> FAIL: ..." and exits 1."""
 import base64, json, os, pty, re, select, struct, subprocess, sys, time, zlib
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, work, group = sys.argv[1], sys.argv[2], sys.argv[3]
 root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -57,7 +58,7 @@ def run(proto, keys=(), expect=(), settle=4.5, extra_env=None, config=None):
             env.pop(k, None)
         env.update(extra_env or {})
         os.chdir(work)
-        os.execvpe(omc, [omc, "--model", "mock/mock-1", "-r", sess], env)
+        os.execvpe(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "-r", sess], env)
     import fcntl, termios
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 0, 0))
     raw = b""

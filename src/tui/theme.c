@@ -19,7 +19,8 @@ int tui_theme_slot_from_name(const char *name) {
 }
 
 static bool slot_optional(int i) {
-    return i == TUI_TC_THINKING_MAX || i == TUI_TC_ASSISTANT_MESSAGE_TEXT || i == TUI_TC_LINK;
+    return i == TUI_TC_THINKING_MAX || i == TUI_TC_ASSISTANT_MESSAGE_TEXT || i == TUI_TC_LINK ||
+           (i >= TUI_TC_SUBAGENT1 && i <= TUI_TC_SUBAGENT6);
 }
 
 /* Upstream packages/tui/src/theme/dark.json and light.json (vars + colors). */
@@ -47,7 +48,7 @@ static const char DARK_JSON[] =
     "\"statusLinePath\":\"#00afaf\",\"statusLineGitClean\":\"#5faf5f\",\"statusLineGitDirty\":\"#d7af5f\","
     "\"statusLineContext\":\"#8787af\",\"statusLineSpend\":\"#5fafaf\",\"statusLineStaged\":70,"
     "\"statusLineDirty\":178,\"statusLineUntracked\":39,\"statusLineOutput\":205,\"statusLineCost\":205,"
-    "\"statusLineSubagents\":\"accent\",\"pythonMode\":\"yellow\"}}";
+    "\"statusLineSubagents\":\"accent\",\"pythonMode\":\"yellow\",\"btwMode\":\"accent\"}}";
 
 static const char LIGHT_JSON[] =
     "{\"name\":\"light\",\"vars\":{\"teal\":\"#5a8080\",\"blue\":\"#547da7\",\"green\":\"#588458\","
@@ -74,7 +75,7 @@ static const char LIGHT_JSON[] =
     "\"statusLineGitClean\":\"#005f00\",\"statusLineGitDirty\":\"#af5f00\",\"statusLineContext\":\"#5f5f87\","
     "\"statusLineSpend\":\"#005f5f\",\"statusLineStaged\":28,\"statusLineDirty\":136,"
     "\"statusLineUntracked\":31,\"statusLineOutput\":133,\"statusLineCost\":133,"
-    "\"statusLineSubagents\":\"teal\",\"pythonMode\":\"yellow\"}}";
+    "\"statusLineSubagents\":\"teal\",\"pythonMode\":\"yellow\",\"btwMode\":\"teal\"}}";
 
 static const char *DEFAULT_SPINNER[] = {"\xe2\xa3\xbe", "\xe2\xa3\xbd", "\xe2\xa3\xbb", "\xe2\xa2\xbf",
                                         "\xe2\xa1\xbf", "\xe2\xa3\x9f", "\xe2\xa3\xaf", "\xe2\xa3\xb7"};
@@ -198,6 +199,7 @@ static void resolve_ansi_palette(tui_theme_t *t, const json_t *terminal, const j
     const json_t *ansi = terminal ? json_get(terminal, "ansi") : NULL;
     for (int i = 0; i < 16; i++) {
         snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", i);
+        t->ansi_rgb[i] = -1;
         const json_t *v = json_is_arr(ansi) ? json_at(ansi, (size_t)i) : NULL;
         for (int depth = 0; v && json_is_str(v) && depth < 8; depth++) {
             const char *s = json_sv(v);
@@ -208,6 +210,7 @@ static void resolve_ansi_palette(tui_theme_t *t, const json_t *terminal, const j
             } else if (parse_hex(s, &r, &g, &b)) {
                 if (t->mode == TUI_COLOR_TRUECOLOR) snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;2;%d;%d;%dm", r, g, b);
                 else snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", tui_rgb_to_256(r, g, b));
+                t->ansi_rgb[i] = (r << 16) | (g << 8) | b;
                 v = NULL;
             } else {
                 v = vars ? json_get(vars, s) : NULL;
@@ -215,8 +218,28 @@ static void resolve_ansi_palette(tui_theme_t *t, const json_t *terminal, const j
         }
         if (v && json_is_num(v)) {
             int idx = (int)json_d2i(v->u.num.d);
-            if (idx >= 0 && idx <= 255) snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", idx);
+            if (idx >= 0 && idx <= 255) {
+                snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", idx);
+                t->ansi_rgb[i] = tui_palette_rgb(idx);
+            }
         }
+    }
+    /* terminal.background: the surface the theme was made for */
+    t->surface_rgb = -1;
+    const json_t *bgv = terminal ? json_get(terminal, "background") : NULL;
+    for (int depth = 0; bgv && depth < 8; depth++) {
+        int r, g, b;
+        if (json_is_num(bgv)) {
+            int idx = (int)json_d2i(bgv->u.num.d);
+            if (idx >= 0 && idx <= 255) t->surface_rgb = tui_palette_rgb(idx);
+            break;
+        }
+        if (!json_is_str(bgv) || !*json_sv(bgv)) break;
+        if (parse_hex(json_sv(bgv), &r, &g, &b)) {
+            t->surface_rgb = (r << 16) | (g << 8) | b;
+            break;
+        }
+        bgv = vars ? json_get(vars, json_sv(bgv)) : NULL;
     }
 }
 

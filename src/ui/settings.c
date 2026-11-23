@@ -222,6 +222,7 @@ static bool condition_ok(const char *c) {
     if (!strcmp(c, "hasImageProtocol") || !strcmp(c, "nativeRendering")) return false;
     if (!strcmp(c, "advisorEnabled")) return get_bool("advisor.enabled", false);
     if (!strcmp(c, "vimModeEnabled")) return get_bool("tui.vimMode", false);
+    if (!strcmp(c, "composerPredictionsEnabled")) return get_bool("composer.predictions", true);
     if (!strcmp(c, "hindsightActive")) return str_eq(get_str("memory.backend", "off"), "hindsight");
     if (!strcmp(c, "mnemopiActive")) return str_eq(get_str("memory.backend", "off"), "mnemopi");
     if (!strcmp(c, "autolearnActive")) return get_bool("autolearn.enabled", false);

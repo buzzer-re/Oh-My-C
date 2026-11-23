@@ -6,6 +6,8 @@
 
 #include "tui/ansi.h"
 #include "tui/markdown.h"
+#include "text/regex.h"
+#include <pthread.h>
 
 static const char *const PROVIDER_LABELS[][2] = {
     {"parallel", "Parallel"},   {"perplexity", "Perplexity"}, {"gemini", "Gemini"},       {"anthropic", "Anthropic"},
@@ -60,7 +62,8 @@ char *tc_url_hyperlink_always(const char *url, const char *text) {
 
 char *tc_format_age(int64_t secs) {
     if (secs <= 0) return xstrdup("");
-    int64_t mins = secs / 60, hours = mins / 60, days = hours / 24, weeks = days / 7, months = days / 30;
+    int64_t mins = secs / 60, hours = mins / 60, days = hours / 24, weeks = days / 7, months = days / 30, years = days / 365;
+    if (years > 0) return xasprintf("%lldy ago", (long long)years);
     if (months > 0) return xasprintf("%lldmo ago", (long long)months);
     if (weeks > 0) return xasprintf("%lldw ago", (long long)weeks);
     if (days > 0) return xasprintf("%lldd ago", (long long)days);
@@ -120,6 +123,41 @@ static void fallback_text(const char *text, bool expanded, int width, strvec_t *
     strvec_free(&all);
 }
 
+/* most excerpt lines under a source when the provider returned no synthesized answer (PREVIEW_LIMITS.COLLAPSED_LINES) */
+#define WS_EXCERPT_LINES 3
+
+static rx_t *g_ws_letnum;
+static pthread_once_t g_ws_letnum_once = PTHREAD_ONCE_INIT;
+static void ws_letnum_init(void) { g_ws_letnum = rx_compile("[\\p{L}\\p{N}]", 0, NULL); }
+
+/* excerptLines: control characters and tabs removed, whitespace runs collapsed, lines without a letter or digit
+ * dropped, capped at WS_EXCERPT_LINES */
+static void ws_excerpt_lines(const char *snippet, strvec_t *out) {
+    if (!snippet) return;
+    pthread_once(&g_ws_letnum_once, ws_letnum_init);
+    strvec_t raw = {0};
+    tc_split_lines(snippet, &raw);
+    for (size_t i = 0; i < raw.n && out->n < WS_EXCERPT_LINES; i++) {
+        size_t rl = strlen(raw.v[i]);
+        if (rl && raw.v[i][rl - 1] == '\r') raw.v[i][rl - 1] = 0; /* split(/\r?\n/) */
+        char *san = tc_sanitize_line(raw.v[i]);
+        sb_t b = SB_INIT;
+        bool sp = false;
+        for (const char *p = san; *p; p++) {
+            if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\v' || *p == '\f' || *p == '\r') sp = true;
+            else {
+                if (sp && b.len) sb_putc(&b, ' ');
+                sp = false;
+                sb_putc(&b, *p);
+            }
+        }
+        free(san);
+        if (g_ws_letnum && b.len && rx_matches(g_ws_letnum, sb_cstr(&b))) strvec_push_own(out, sb_detach(&b));
+        else sb_free(&b);
+    }
+    strvec_free(&raw);
+}
+
 static void ws_result(const tc_call_t *c, int width, strvec_t *out) {
     const json_t *d = c->details;
     const char *err = json_get_str(d, "error");
@@ -155,7 +193,6 @@ static void ws_result(const tc_call_t *c, int width, strvec_t *out) {
     const char *provider = json_get_str(resp, "provider");
     const char *answer = json_get_str(resp, "answer");
     char *ans = answer ? str_trim(answer) : xstrdup("");
-    const char *content_text = *ans ? ans : raw;
     const char *plabel = provider && !str_eq(provider, "none") ? provider_label(provider) : "None";
     const char *q = json_get_str(c->args, "query");
     if (!q || !*q) {
@@ -190,15 +227,44 @@ static void ws_result(const tc_call_t *c, int width, strvec_t *out) {
         free(b);
         ns++;
     }
-    /* answer */
-    secs[ns].label = labels[0];
-    if (*content_text) {
-        tui_md_opts_t mo;
-        tui_md_opts_default(&mo);
-        tui_md_render(content_text, cw, &mo, &secs[ns].lines);
+    /* answer: without a synthesized answer the result text is the model-facing numbered listing of these same
+     * sources, so each source shows its excerpt instead (omp e42b1f9e89) */
+    bool excerpts = !*ans;
+    if (!(excerpts && nsrc > 0)) {
+        secs[ns].label = labels[0];
+        if (excerpts) {
+            strvec_t fb = {0}, all = {0};
+            tc_split_lines(raw, &all);
+            for (size_t i = 0; i < all.n; i++) {
+                size_t rl = strlen(all.v[i]);
+                if (rl && all.v[i][rl - 1] == '\r') all.v[i][rl - 1] = 0;
+                char *l = tc_sanitize_line(all.v[i]);
+                char *t = str_trim(l);
+                if (*t) strvec_push_own(&fb, l);
+                else free(l);
+                free(t);
+            }
+            size_t shown = c->expanded ? fb.n : MIN(fb.n, 3); /* PREVIEW_LIMITS.OUTPUT_COLLAPSED */
+            for (size_t i = 0; i < shown; i++) {
+                char *tr = tui_truncate_to_width(fb.v[i], cw, NULL);
+                strvec_push_own(&secs[ns].lines, tc_fg(TUI_TC_DIM, tr));
+                free(tr);
+            }
+            if (shown < fb.n) {
+                char *m = tc_more_items((int64_t)(fb.n - shown), "line");
+                strvec_push_own(&secs[ns].lines, tc_fg(TUI_TC_MUTED, m));
+                free(m);
+            }
+            strvec_free(&fb);
+            strvec_free(&all);
+        } else {
+            tui_md_opts_t mo;
+            tui_md_opts_default(&mo);
+            tui_md_render(ans, cw, &mo, &secs[ns].lines);
+        }
+        if (!secs[ns].lines.n) strvec_push_own(&secs[ns].lines, tc_fg(TUI_TC_MUTED, "No answer text returned"));
+        ns++;
     }
-    if (!secs[ns].lines.n) strvec_push_own(&secs[ns].lines, tc_fg(TUI_TC_MUTED, "No answer text returned"));
-    ns++;
     /* sources */
     secs[ns].label = labels[1];
     {
@@ -237,7 +303,22 @@ static void ws_result(const tc_call_t *c, int width, strvec_t *out) {
             char *tr = tui_truncate_to_width(title, title_budget, NULL);
             char *ta = tc_fg(TUI_TC_ACCENT, tr);
             char *linked = url && *url ? tc_hyperlink(url, ta) : xstrdup(ta);
-            strvec_push_own(&items, xasprintf("%s%s", linked, sb_cstr(&ms)));
+            sb_t item = SB_INIT;
+            sb_appendf(&item, "%s%s", linked, sb_cstr(&ms));
+            if (excerpts) {
+                strvec_t ex = {0};
+                ws_excerpt_lines(json_get_str(src, "snippet"), &ex);
+                size_t exn = c->expanded ? ex.n : MIN(ex.n, 1);
+                for (size_t k = 0; k < exn; k++) {
+                    char *et = tui_truncate_to_width(ex.v[k], line_budget, NULL);
+                    char *ef = tc_fg(TUI_TC_DIM, et);
+                    sb_appendf(&item, "\n%s", ef);
+                    free(ef);
+                    free(et);
+                }
+                strvec_free(&ex);
+            }
+            strvec_push_own(&items, sb_detach(&item));
             free(linked);
             free(ta);
             free(tr);

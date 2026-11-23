@@ -72,8 +72,6 @@ task.showResolvedModelBadge	inert	no resolved-model badge in the task widget
 async.widgets	partial	gates job captions only; no live job widgets (WP-22b remainder)
 emojiAutocomplete	inert	no :shortcode: emoji completion
 spelling.autocomplete	inert	no word-prediction hints
-composer.predictions	inert	no next-message prediction
-composer.predictionAlternatives	inert	omc has no composer predictions (omp v18.16.0)
 task.workerThreads	inert	omc subagents are threads already; no worker-thread placement
 providers.openaiResponsesWebsockets	wired	standard Responses over WebSocket
 extensionRenderers.transcriptPresenters	oos	needs the JS extension runtime

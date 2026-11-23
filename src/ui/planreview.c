@@ -1748,6 +1748,16 @@ void ui_plan_review_set_annotation_draft(ui_plan_review_t *p, const char *text) 
     tui_component_request_render(&p->base);
 }
 
+void ui_plan_review_set_choice(ui_plan_review_t *p, size_t index, const char *meta, bool disabled) {
+    if (index >= p->metas.n) return;
+    free(p->metas.v[index]);
+    p->metas.v[index] = xstrdup(meta ? meta : "");
+    p->disabled[index] = disabled;
+    /* a highlight on a now-disabled choice moves to the nearest enabled one */
+    if (entry_disabled(p, p->selected)) p->selected = coerce_index(p, p->selected);
+    if (p->tui) tui_request_render(p->tui);
+}
+
 void ui_plan_review_set_slider(ui_plan_review_t *p, int index) {
     if (p->committed || !p->has_slider) return;
     move_slider(p, index - p->slider_index);

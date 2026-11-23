@@ -9,6 +9,7 @@ Every launch runs a throwaway copy of omc (<dir>/bin/omc), never the build itsel
 usage: update_tui.py <omc> <dir> (env: HOME, OMC_CODING_AGENT_DIR and the OMC_LATEST_URL / OMC_DOWNLOAD_URL mocks;
 the agent dir needs a models.yml for mock/mock-1). Prints "update tui ok" or the first failing step."""
 import fcntl, json, os, pty, select, shutil, signal, struct, subprocess, sys, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, d = sys.argv[1:3]
 copy = os.path.join(d, "bin", "omc")
@@ -63,7 +64,7 @@ def launch(*args):
     out = bytearray()
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(copy, [copy, "--model", "mock/mock-1", *args], env)
+        os.execve(copy, [copy, "--config", NOPRED, "--model", "mock/mock-1", *args], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
 
 
@@ -94,7 +95,7 @@ def wait_out(needle, timeout=15):
 # a session to resume, so the startup transcript has a message to replay
 fresh_copy()
 open(config, "w").close()
-subprocess.run([copy, "--model", "mock/mock-1", "-p", "say:transcript-marker"], env=env, stdin=subprocess.DEVNULL,
+subprocess.run([copy, "--config", NOPRED, "--model", "mock/mock-1", "-p", "say:transcript-marker"], env=env, stdin=subprocess.DEVNULL,
                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
 
 # 1. the notice follows the transcript; the lookup (held back 3 s) never delays the first frame

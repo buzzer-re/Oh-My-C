@@ -1959,6 +1959,7 @@ static char *chrome_border(void *ud, const char *s) {
     if (py && !(p[py] == ' ' || p[py] == '\t' || p[py] == '\n' || p[py] == '\r')) py = 0;
     if (*p == '!') r = fgw(TUI_TC_BASH_MODE, s);
     else if (py) r = fgw(TUI_TC_PYTHON_MODE, s);
+    else if (*p == '?') r = fgw(TUI_TC_BTW_MODE, s); /* the /btw shortcut */
     else {
         const char *title = ui_session_title(u);
         if (title && *title && settings_bool("statusLine.sessionAccent", true)) r = fg_rgb(tui_session_accent(title, TH()), s);

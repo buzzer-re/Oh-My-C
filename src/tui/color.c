@@ -242,26 +242,16 @@ static uint32_t name_hash(const char *name) {
     return h;
 }
 
-uint32_t tui_session_accent(const char *name, const tui_theme_t *th) {
-    if (!th) th = tui_theme();
+/* computeSessionAccentHex: the hue at arc position `pos` (shifted off the theme's major hues), carrying the accent's
+ * weight; on a light surface (surf >= 0) its lightness is bisected for 3:1 contrast */
+static uint32_t accent_at(const tui_theme_t *th, const hue_iv_t *iv, int niv, int pos, double surf) {
     static const tui_tc_t MAJORS[] = {TUI_TC_ACCENT,        TUI_TC_BORDER,           TUI_TC_BORDER_ACCENT,  TUI_TC_BORDER_MUTED,
                                       TUI_TC_SUCCESS,       TUI_TC_ERROR,            TUI_TC_WARNING,        TUI_TC_MD_HEADING,
                                       TUI_TC_MD_LINK,       TUI_TC_MD_CODE,          TUI_TC_MD_CODE_BLOCK,  TUI_TC_MD_QUOTE_BORDER,
                                       TUI_TC_MD_LIST_BULLET, TUI_TC_TOOL_DIFF_ADDED, TUI_TC_TOOL_DIFF_REMOVED,
                                       TUI_TC_CUSTOM_MESSAGE_LABEL, TUI_TC_THINKING_TEXT};
-    bool light = tui_theme_is_light(th);
-    static const hue_iv_t LIGHT_IV[1] = {{195, 330}};
-    const hue_iv_t *iv;
-    int niv;
-    if (light) {
-        iv = LIGHT_IV, niv = 1;
-    } else {
-        dark_intervals();
-        iv = g_dark_iv, niv = g_dark_n;
-    }
     int total = arc_len(iv, niv);
     if (total <= 0) return tui_theme_rgb(th, TUI_TC_ACCENT);
-    int pos = (int)(name_hash(name) % (uint32_t)total);
     double occupied[ARRAY_LEN(MAJORS)];
     int nocc = 0;
     for (size_t i = 0; i < ARRAY_LEN(MAJORS); i++) {
@@ -302,11 +292,10 @@ uint32_t tui_session_accent(const char *name, const tui_theme_t *th) {
         frac = 0.7;
     }
     double chroma = MAX(MIN_CHROMA, MIN(MAX_CHROMA, frac * tc));
-    if (!light) {
+    if (surf < 0) {
         double l = MAX(DARK_MIN_L, MIN(DARK_MAX_L, lightness));
         return tui_oklch_to_rgb((tui_oklch_t){l, chroma, hue});
     }
-    double surf = th->rgb[TUI_TC_STATUS_LINE_BG] >= 0 ? tui_relative_luminance((uint32_t)th->rgb[TUI_TC_STATUS_LINE_BG]) : 1;
     double cap = MAX(0.0, (surf + 0.05) / 3 - 0.05);
     uint32_t top = tui_oklch_to_rgb((tui_oklch_t){lightness, chroma, hue});
     if (tui_relative_luminance(top) <= cap) return top;
@@ -317,4 +306,30 @@ uint32_t tui_session_accent(const char *name, const tui_theme_t *th) {
         else lo = mid;
     }
     return tui_oklch_to_rgb((tui_oklch_t){lo, chroma, hue});
+}
+
+uint32_t tui_session_accent(const char *name, const tui_theme_t *th) {
+    if (!th) th = tui_theme();
+    bool light = tui_theme_is_light(th);
+    static const hue_iv_t LIGHT_IV[1] = {{195, 330}};
+    const hue_iv_t *iv;
+    int niv;
+    if (light) {
+        iv = LIGHT_IV, niv = 1;
+    } else {
+        dark_intervals();
+        iv = g_dark_iv, niv = g_dark_n;
+    }
+    int total = arc_len(iv, niv);
+    if (total <= 0) return tui_theme_rgb(th, TUI_TC_ACCENT);
+    double surf = -1;
+    if (light) surf = th->rgb[TUI_TC_STATUS_LINE_BG] >= 0 ? tui_relative_luminance((uint32_t)th->rgb[TUI_TC_STATUS_LINE_BG]) : 1;
+    return accent_at(th, iv, niv, (int)(name_hash(name) % (uint32_t)total), surf);
+}
+
+uint32_t tui_session_accent_at(double fraction, const tui_theme_t *th, double surface_luminance) {
+    if (!th) th = tui_theme();
+    dark_intervals();
+    int total = arc_len(g_dark_iv, g_dark_n);
+    return accent_at(th, g_dark_iv, g_dark_n, (int)floor(fraction * total), surface_luminance);
 }

@@ -491,7 +491,8 @@ static json_t *result_json(const tool_result_t *r) {
 static json_t *loop_copy(const json_t *m) {
     json_t *c = json_clone(m);
     if (str_eq(json_get_str(c, "role"), "assistant") && str_eq(json_get_str(c, "stopReason"), "aborted") &&
-        str_eq(json_get_str(c, "errorMessage"), AGENT_USER_INTERRUPT_LABEL) && json_get_int(c, "errorId", 0) == AIE_ID_USER_INTERRUPT)
+        (str_eq(json_get_str(c, "errorMessage"), AGENT_USER_INTERRUPT_LABEL) || str_eq(json_get_str(c, "errorMessage"), AGENT_KILL_LABEL)) &&
+        json_get_int(c, "errorId", 0) == AIE_ID_USER_INTERRUPT)
         json_del(c, "errorId");
     return c;
 }
@@ -742,6 +743,10 @@ void agent_append_message(agent_t *a, json_t *msg) {
 void agent_abort(agent_t *a) { a->cancel = 1; }
 void agent_abort_user(agent_t *a) {
     a->abort_user = 1;
+    a->cancel = 1;
+}
+void agent_abort_kill(agent_t *a) {
+    if (!a->abort_user) a->abort_user = 2; /* a person's interrupt already under way keeps its label */
     a->cancel = 1;
 }
 void agent_abort_next_silently(agent_t *a) { a->silent_abort_next = 1; }
@@ -1119,8 +1124,8 @@ static void add_message(agent_t *a, json_t *run_msgs, json_t *msg) {
 }
 
 
-static void user_interrupt_label(json_t *msg) {
-    json_set_str(msg, "errorMessage", AGENT_USER_INTERRUPT_LABEL);
+static void user_interrupt_label(agent_t *a, json_t *msg) {
+    json_set_str(msg, "errorMessage", a->abort_user == 2 ? AGENT_KILL_LABEL : AGENT_USER_INTERRUPT_LABEL);
     json_set_int(msg, "errorId", AIE_ID_USER_INTERRUPT);
 }
 
@@ -1129,6 +1134,7 @@ static void user_interrupt_label(json_t *msg) {
  * TurnRecovery.retry looks behind for the failed batch) */
 static json_t *aborted_boundary(agent_t *a) {
     json_t *m = ai_error_message(a->model, "aborted", a->abort_silent ? "__omp.silent_abort__"
+                                                      : a->abort_user == 2 ? AGENT_KILL_LABEL
                                                       : a->abort_user ? AGENT_USER_INTERRUPT_LABEL
                                                                       : "Request was aborted");
     int64_t ts = json_get_int(m, "timestamp", now_ms());
@@ -1271,7 +1277,7 @@ static json_t *stream_assistant(agent_t *a, int *ttsr_abort, json_t **cursor_res
     if (silent) a->cancel = 0; /* internal transition: later side requests must not inherit the abort */
     else if (a->abort_user && !a->abort_silent && str_eq(json_get_str(msg, "stopReason"), "aborted") &&
              (!json_get_str(msg, "errorMessage") || str_eq(json_get_str(msg, "errorMessage"), "Request was aborted")))
-        user_interrupt_label(msg); /* abortReasonText: the caller's reason, classified UserInterrupt */
+        user_interrupt_label(a, msg); /* abortReasonText: the caller's reason, classified UserInterrupt */
     if (a->cancel && !silent && str_eq(json_get_str(msg, "stopReason"), "aborted")) {
         /* finishAbortedStream commits the streaming partial: the provider's closing timings never land on it */
         json_del(msg, "duration");

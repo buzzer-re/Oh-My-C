@@ -76,6 +76,7 @@ struct ui {
     /* cards settled by a synthetic aborted/error result (a call of a failed turn that never ran); an auto-retry
      * that supersedes the turn removes them (omp #syntheticFailureCards) */
     VEC(msgview_t *) synthetic_cards;
+    VEC(msgview_t *) retry_hidden; /* failed attempts whose error a pending retry keeps out of the transcript */
     pthread_t worker;
     bool worker_running;
     bool expand_tools;
@@ -207,6 +208,8 @@ size_t ui_segment_palette(size_t n, int *out);
 void ui_async_result(ui_t *u, const json_t *msg);
 void ui_retry_recovered(ui_t *u, const char *notes); /* "\n"-separated notes for the failed attempts */
 void ui_retry_failed(ui_t *u, int attempts, const char *final_error, const char *error);
+/* a run ended with retry-hidden attempt errors the saga never accounted for: show them again */
+void ui_retry_restore_hidden(ui_t *u);
 void ui_assistant_streamed(ui_t *u, msgview_t *v); /* message_update applied: drive the smooth reveal */
 void ui_assistant_end(ui_t *u, msgview_t *v);      /* message_end: pin a provider error in the banner */
 void ui_tool_started(ui_t *u, const char *tool_call_id); /* tool card added: post-tool text follows */
@@ -217,7 +220,8 @@ tui_component_t *ui_working_new(ui_t *u);
 void ui_working_start(ui_t *u);
 void ui_working_stop(ui_t *u);
 void ui_working_set_message(ui_t *u, const char *message);
-void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms);
+/* the retry countdown row; `reason` (the failed attempt's error, may be NULL) follows the wait */
+void ui_working_retry(ui_t *u, int attempt, int max, int64_t delay_ms, const char *reason);
 void ui_working_compaction(ui_t *u, const char *label);
 bool ui_working_busy(ui_t *u); /* a retry countdown or compaction row replaces the working/title row */
 /* highlightMagicKeywords over a rendered row: paints each keyword standing as prose with its gradient; escapes in the row are

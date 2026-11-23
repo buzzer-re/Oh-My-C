@@ -1,4 +1,5 @@
 /* agents.c - agent registry, task spawns, peer messaging, agent:// and history:// (see agents.h). */
+#include "tui/agentcolor.h"
 #include "agents.h"
 
 #include "app.h"
@@ -630,7 +631,7 @@ static void *cancel_watch(void *p) {
     watch_t *w = p;
     while (!__atomic_load_n(&w->done, __ATOMIC_ACQUIRE)) {
         if (__atomic_load_n(w->flag, __ATOMIC_RELAXED)) {
-            agent_abort(w->ag);
+            agent_abort_kill(w->ag); /* a cancelled task job: the parent's kill (AGENT_KILL_LABEL) */
             break;
         }
         sleep_ms(50);
@@ -1198,6 +1199,7 @@ static aref_t *new_ref(tool_env_t *env, const spawn_spec_t *spec, char **err) {
     }
     json_set_str(r->progress, "id", id);
     vec_push(&g_refs, r);
+    tui_agent_note_arrival(id, r->started_at); /* name colours follow arrival order (omp 87c9959fe1) */
     if (spec->card) task_card_set_id(spec->card, spec->card_index, id, false);
     pthread_mutex_unlock(&g_mu);
     free(base);
@@ -2035,7 +2037,7 @@ bool agents_cancel(const char *id) {
         *r->cancel = 1;
         ok = true;
     } else if (r && !r->is_main && r->running && r->app) {
-        agent_abort(r->app->agent);
+        agent_abort_kill(r->app->agent);
         ok = true;
     }
     pthread_mutex_unlock(&g_mu);
@@ -2154,9 +2156,9 @@ bool agents_kill(const char *id, char **err) {
     bool was = r->killed;
     r->killed = true;
     r->last_activity = now_ms();
-    if (r->running) {
+    if (r->running) { /* a person's stop (the hub, RPC cancel_subagent): USER_INTERRUPT_LABEL, not the parent's kill */
+        if (r->app) agent_abort_user(r->app->agent);
         if (r->cancel) *r->cancel = 1;
-        else if (r->app) agent_abort(r->app->agent);
     }
     pthread_mutex_unlock(&g_mu);
     if (!was) notify_change();

@@ -2224,7 +2224,13 @@ int app_set_model(app_t *a, const char *pattern, char **err) {
 
 void app_use_model(app_t *a, const ai_model_t *m) { app_apply_model(a, m, false, EFFORT_OFF); }
 
-void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
+static void apply_model_role(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e, const char *role);
+
+void app_use_model_role(app_t *a, const ai_model_t *m, const char *role) { apply_model_role(a, m, false, EFFORT_OFF, role); }
+
+void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) { apply_model_role(a, m, has_e, e, NULL); }
+
+static void apply_model_role(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e, const char *role) {
     const ai_model_t *prev_model = a->model;
     const char *prev_wire = app_wire_thinking(a);
     a->model = m;
@@ -2239,7 +2245,7 @@ void app_apply_model(app_t *a, const ai_model_t *m, bool has_e, ai_effort_t e) {
     if (has_e) app_set_thinking(a, e);
     else if (a->auto_thinking) app_set_thinking_auto(a); /* #reapplyThinkingLevel keeps auto, re-clamped */
     char *label = app_model_label(a);
-    session_append_model_change(a->session, label, NULL);
+    session_append_model_change(a->session, label, role);
     free(label);
     app_rebuild_system_prompt(a);
     app_model_state_changed(a, prev_model, prev_wire);
@@ -2649,6 +2655,26 @@ static void eph_event(void *ud, const ai_event_t *ev) {
 /* AgentSession.runEphemeralTurn: a single side-channel turn against the session's current model, system
  * prompt, tool catalog (kept for the prompt cache; the model is told tools are unavailable and any call is
  * dropped) and history. Never touches the session or the agent's messages. */
+static bool budget_thinking(const ai_model_t *m) {
+    const char *mode = m && m->thinking ? json_get_str(m->thinking, "mode") : NULL;
+    return str_eq(mode, "budget") || str_eq(mode, "anthropic-budget-effort");
+}
+
+/* ephemeralMaxTokensRejection: true when an ephemeral turn would reject a maxTokens cap on `m` */
+static bool ephemeral_max_tokens_rejected(const ai_model_t *m) {
+    if (budget_thinking(m) && json_get_bool(m->thinking, "requiresEffort", false) &&
+        !json_get_bool(m->thinking, "suppressWhenOff", false))
+        return true;
+    /* supportsOutputTokenLimit */
+    return json_get_bool(m->raw, "omitMaxOutputTokens", false) || !model_compat_bool(m, "preservesMaxOutputTokens", true);
+}
+
+bool app_ephemeral_max_tokens_preserves_request(app_t *a) {
+    const ai_model_t *m = a->model;
+    if (!m || ephemeral_max_tokens_rejected(m)) return false;
+    return !budget_thinking(m) || a->thinking == EFFORT_OFF;
+}
+
 json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, char **err) {
     *reply = NULL;
     *err = NULL;
@@ -2723,7 +2749,9 @@ json_t *app_ephemeral_turn(app_t *a, const app_ephemeral_t *e, char **reply, cha
     o.metadata = (json_t *)app_session_metadata(a, model->provider);
     o.prompt_cache_key = main_sid;
     o.reasoning = model_clamp_effort(model, a->thinking);
-    o.disable_reasoning = a->thinking == EFFORT_OFF;
+    /* budget-thinking transports can raise explicit caps to make room for their default thinking budget */
+    o.disable_reasoning = a->thinking == EFFORT_OFF || (e->max_tokens > 0 && budget_thinking(model));
+    if (e->max_tokens > 0) o.max_tokens = e->max_tokens;
     o.cancel = e->cancel;
     o.on_payload = NULL;
     o.cursor_exec = NULL;

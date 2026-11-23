@@ -89,15 +89,28 @@ static const char *thinking_step(const ai_model_t *m, const slider_t *s, const c
     return "off";
 }
 
-/* thinkingLevelFor (selector-controller.ts): the role's level, else the session's (auto carries over; a fixed
- * level yields to the model's own default) */
+/* thinkingSlider for other surfaces (the RPC model picker): the steps of `m` and `level` as one of them */
+size_t ui_thinking_slider(const ai_model_t *m, const char *level, const char **steps, size_t cap, const char **value,
+                          bool *disabled) {
+    slider_t sl;
+    thinking_steps(m, &sl);
+    *disabled = sl.disabled;
+    *value = sl.disabled ? "off" : thinking_step(m, &sl, level);
+    size_t n = MIN(sl.n, cap);
+    for (size_t i = 0; i < n; i++) steps[i] = sl.steps[i];
+    return n;
+}
+
+/* configuredThinkingLevel: the session's selection, `auto` included */
+static const char *configured_level(const app_t *a) { return a->auto_thinking ? "auto" : effort_name(a->thinking); }
+
+/* thinkingLevelFor (selector-controller.ts): the level the session runs at, auto's resolved effort once a turn
+ * settled it (as the status line shows); the slider clamps it per model (omp 01985becf3, 081b4fbf8b) */
 static const char *thinking_level_for(const picker_t *p, const ai_model_t *m) {
-    const char *role = app_temporary_thinking(m);
-    if (role) return role;
+    UNUSED(m);
     app_t *a = p->u->app;
-    if (a->auto_thinking) return "auto";
-    const char *dl = m->thinking ? json_get_str(m->thinking, "defaultLevel") : NULL;
-    return dl ? dl : effort_name(a->thinking);
+    if (a->auto_thinking && a->auto_resolved >= 0) return effort_name((ai_effort_t)a->auto_resolved);
+    return configured_level(a);
 }
 
 static bool session_mode(const picker_t *p) { return !p->task_mode && !p->role_mode; }
@@ -339,9 +352,9 @@ typedef struct {
 
 static void apply_now(ui_t *u, const ai_model_t *m, const char *level) {
     app_t *a = u->app;
-    const char *lv = level ? level : app_temporary_thinking(m);
+    /* without a slider level, the session's level carries over (clamped to the model) */
     char *err = NULL;
-    if (app_set_model_temporary(a, m, lv, NULL, &err) != 0) {
+    if (app_set_model_temporary(a, m, level, NULL, &err) != 0) {
         add_notice(u, "error", err);
         free(err);
         return;
@@ -462,6 +475,15 @@ static bool picker_key(tui_component_t *c, const tui_key_t *k) {
         sync_items(p, false);
     }
     if (r == UI_MB_CANCEL) {
+        /* closing on the current model's row with the slider moved keeps that level (onKeepThinking) */
+        const ui_model_item_t *sel = ui_model_browser_selected(p->b);
+        const char *kept = sel && sel->model && p->current && str_eq(sel->selector, p->current) ? pending_thinking(p, sel->model) : NULL;
+        app_t *a = p->u->app;
+        if (kept && !str_eq(kept, configured_level(a))) {
+            ai_effort_t e;
+            if (str_eq(kept, "auto")) app_set_thinking_auto(a);
+            else if (effort_parse(kept, &e) == 0) app_set_thinking(a, e);
+        }
         picker_close(p);
         return true;
     }

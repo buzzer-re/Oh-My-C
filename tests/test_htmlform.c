@@ -253,6 +253,43 @@ static void test_dialog_notes(void) {
     g_done = false;
 }
 
+/* a one-question form submits on Enter, opening on its preselected answer (omp 05c0e53513, 6b213b6d3b) */
+static void test_dialog_sole(void) {
+    const char *html = "<form><fieldset><legend>Size</legend>"
+                       "<label><input type=radio name=size value=s> S</label>"
+                       "<label><input type=radio name=size value=m checked> M</label></fieldset></form>";
+    ui_form_opts_t o = {.term_rows = 40, .done = on_done};
+    tui_component_t *c = ui_form_dialog_new(html, &o);
+    c->focused = true;
+    char *s = screen(c, 80);
+    CHECK(strstr(s, "\xe2\x9d\xaf \xe2\x97\x89 M") && strstr(s, "\xe2\x8f\x8e submit"), "sole layout:\n%s", s);
+    free(s);
+    keys(c, "\r");
+    CHECK(g_done && str_eq(json_get_str(g_done_data, "size"), "m"), "Enter submits the preselected answer");
+    c->vt->destroy(c);
+    json_free(g_done_notes);
+    g_done_notes = NULL;
+    json_free(g_done_data);
+    g_done_data = NULL;
+    g_done = false;
+}
+
+/* table cells word-wrap within their fitted widths instead of truncating, keeping <br> breaks (omp e701ef8cbe) */
+static void test_dialog_table_wrap(void) {
+    const char *html = "<form><table><tr><th>Step</th><th>Notes</th></tr>"
+                       "<tr><td>build</td><td>compiles every module of the project in parallel then links them</td></tr>"
+                       "<tr><td>a<br>b</td><td>x</td></tr></table>"
+                       "<input name=ok value=y></form>";
+    ui_form_opts_t o = {.term_rows = 40, .done = on_done};
+    tui_component_t *c = ui_form_dialog_new(html, &o);
+    char *s = screen(c, 40);
+    CHECK(strstr(s, "compiles every") && strstr(s, "links them"), "wrapped cells:\n%s", s);
+    const char *a = strstr(s, "a  "), *b = a ? strstr(a, "\n") : NULL;
+    CHECK(a && b && strstr(b, "b"), "br break kept:\n%s", s);
+    free(s);
+    c->vt->destroy(c);
+}
+
 static void test_dialog(void) {
     const char *html = "<form><p>Paint it</p><fieldset><legend>Pick a color</legend>"
                        "<label><input type=radio name=color value=red checked> Red</label>"
@@ -363,6 +400,8 @@ int main(void) {
     test_contexts();
     test_dialog();
     test_dialog_notes();
+    test_dialog_sole();
+    test_dialog_table_wrap();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

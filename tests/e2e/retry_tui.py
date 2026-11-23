@@ -13,6 +13,7 @@
 usage: retry_tui.py <omc> <request log> <scratch dir>
 Prints "retry tui ok" or the first failing step."""
 import fcntl, glob, json, os, pty, re, select, signal, struct, sys, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, log, scratch = sys.argv[1:4]
 work = os.path.join(scratch, "work")
@@ -57,7 +58,7 @@ def launch(*args):
     out = bytearray()
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(omc, [omc, "--model", "mock/mock-1", *args], env)
+        os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", *args], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
 
 

@@ -241,6 +241,8 @@ check "todo append ''" 'Errors: Missing phase name for append operation'  python
 # launch.persist (omp 5bc2903877): a print-mode run starts its services persistent, so they outlive the process
 "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"sleep 3","name":"e2e-persist"}' </dev/null >/dev/null 2>&1
 check "service persists" '"persist": true'  bash -c "cat \$(find '$T/agent' -name '*.json' -path '*e2e-persist*' | head -1)"
+# a service's ready.log matches line anchors after earlier startup output (omp cf93771fa1)
+check "service ready per line" 'e2e-ready: ready'  "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"echo starting; sleep 0.3; echo ready; sleep 5","name":"e2e-ready","ready":{"log":"^ready$","timeout":5}}'
 # todo.midRunNudges (omp a80b985192, dab28d7222): 26 bash results after a todo init nudge twice when capped (at 12, 24),
 # once with backoff (12, then 36) and never when off
 NUDGE_SCRIPT=$(python3 -I -c 'import json; print("calls:"+json.dumps([["todo",{"op":"init","items":["a","b"]}]]+[["bash",{"command":"echo %d"%i}] for i in range(26)]))')
@@ -676,7 +678,7 @@ if python3 -c 'import pty' 2>/dev/null; then
     # WP-22b: "Waiting for background job …" row, Esc stops waiting, /agents hub (strips, enable/disable -> config.yml)
     check "agents tui" $'waiting ok\ndelivered ok\nwaiting again ok\nstop waiting ok\nfolded ok\nagents ok\nstrip ok\nmodel strip ok\nback ok\ntoggle ok\nconfig True\nenable ok\nclose ok'  python3 -I "$ROOT/tests/e2e/agents_tui.py" "$B" "$T/agent"
     # Alt+P model picker: Tab provider scopes, ←/→ thinking slider, the pick applies the slider's level (omp 94a10c5b22)
-    check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep left ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
+    check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep left ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok\nstep right ok\nesc keeps level ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
     # WP-29: inline images per protocol, cache-miss marker, Ctrl+Shift+O tool activity, tui.mouse capture
     mkdir -p "$T/agent-disp" "$T/disp" && cp "$T/agent/models.yml" "$T/agent-disp/"
     check "display kitty" $'kitty transmit once ok\nkitty placement ok\ncache miss ok\nkitty placeholders ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp" kitty
@@ -712,10 +714,13 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "tui quiet"    "quiet tui ok"  python3 -I "$ROOT/tests/e2e/quiet_tui.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" "$T/quiet"
     check "tui resume"   "resume tui ok" python3 -I "$ROOT/tests/e2e/resume_tui.py" "$B" "$T/req.jsonl" "$T/resume"
     check "tui btw inject"  "btw inject tui ok"  python3 -I "$ROOT/tests/e2e/btw_inject_tui.py" "$B" "$T/req.jsonl" "$T/btw_inject"
+    check "tui predictions"  "predict tui ok"  python3 -I "$ROOT/tests/e2e/predict_tui.py" "$B" "$T/req.jsonl" "$T/predict"
     # the ask tool's HTML form (omp 18.18 html-form/dialog.ts): submit, validation, Other, inactivity timeout, cancel
     mkdir -p "$T/ask_form" && check "tui ask form" "ask form tui ok"  python3 -I "$ROOT/tests/e2e/ask_form_tui.py" "$B" "$T/req.jsonl" "$T/ask_form"
     # manual retry (omp TurnRecovery.retry, syncRetryHintRow): the idle "F5 to retry" row, tool replay, -c, nothing to retry
     mkdir -p "$T/retry_tui" && check "tui retry"  "retry tui ok"  python3 -I "$ROOT/tests/e2e/retry_tui.py" "$B" "$T/req.jsonl" "$T/retry_tui"
+    # quieter auto-retries: the retry row names the reason, the failed attempt's error stays out of the transcript (omp 5ad164a69e)
+    mkdir -p "$T/retry_quiet" && check "tui quiet retry"  "retry quiet ok"  python3 -I "$ROOT/tests/e2e/retry_quiet_tui.py" "$B" "$T/retry_quiet"
     check "tui fs stall"  "fs stall ok"  python3 -I "$ROOT/tests/e2e/fs_stall_tui.py" "$B" "$T/fs_stall"
 fi
 check "acp file cmd"   "stop end_turn"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "/init"

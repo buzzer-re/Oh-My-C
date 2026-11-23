@@ -5,6 +5,7 @@ there is no instruction, block or send. Ctrl+R over the ask form opens History a
 usage: btw_inject_tui.py <omc> <req.jsonl> <scratch dir>
 Prints "btw inject tui ok" or the first failing step."""
 import fcntl, json, os, pty, select, signal, struct, sys, termios, time
+NOPRED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-predictions.yml")  # composer.predictions off
 
 omc, reqlog, scratch = sys.argv[1:4]
 work = os.path.join(scratch, "work")
@@ -50,7 +51,7 @@ def launch(inject):
     out = bytearray()
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
+        os.execve(omc, [omc, "--config", NOPRED, "--model", "mock/mock-1", "--no-session"], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
     pump(1.0)
 
@@ -184,6 +185,18 @@ pump(1.0)
 if sent_count("say:OFF-SENT"):
     fail("off send")
 os.write(fd, b"\x1b")  # close the panel
+pump(0.3)
+
+# ---- `? question`: the /btw shortcut runs as /btw (omp c910e91258)
+start = len(requests())
+mark = len(out)
+command("? slow:0:Shortcut answer")
+if not wait_out("to close", 15, mark):
+    fail("shortcut answer", out[mark:][-800:])
+side = [r for r in requests()[start:] if any("<btw>" in t for t in user_texts(r))]
+if not side or "Shortcut answer" not in user_texts(side[-1])[-1]:
+    fail("shortcut side request", side[-1:] or "no side request")
+os.write(fd, b"\x1b")
 pump(0.3)
 
 # ---- Ctrl+R over the ask form: History opens over it and the pick lands in the composer (the form has no prompt

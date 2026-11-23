@@ -761,13 +761,13 @@ bool iq_escape(ui_t *u) {
     char *txt = tui_editor_get_text(u->editor);
     const char *p = txt ? txt : "";
     while (*p == ' ' || *p == '\t' || *p == '\n') p++;
-    bool bash_mode = *p == '!', py_mode = python_mode(p);
+    bool bash_mode = *p == '!', py_mode = python_mode(p), btw_mode = *p == '?';
     free(txt);
     if (!bash_mode && u->python) {
         u->python->cancel = 1;
         return true;
     }
-    if (bash_mode || py_mode) { /* leave bash / python mode */
+    if (bash_mode || py_mode || btw_mode) { /* leave bash / python / btw mode */
         tui_editor_set_text(u->editor, "");
         tui_request_render(u->tui);
         return true;
