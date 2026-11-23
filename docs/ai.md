@@ -252,7 +252,8 @@ Points worth knowing per provider:
   `stopDetails {type: "compaction"}` + `providerPayload {type: "anthropicCompaction", …}`, and a summary
   message carrying that payload replays as a `compaction` block opening the following assistant turn
   (its `filesText` queued as a user turn before the first newer message). `anthropic_compaction_supported()`
-  is omp's `supportsAnthropicCompaction` for the model's own route. Bedrock Converse compaction (an
+  is omp's `supportsAnthropicCompaction` for the model's own route; a gateway outside the known deployments qualifies
+  only with `remoteCompaction: {api: "anthropic-messages", enabled: true}` for its own configured `baseUrl`. Bedrock Converse compaction (an
   InvokeModel side request) and the Codex V2 streaming compaction are not implemented.
 - **Kiro** (`kiro.c`): the request key is the credential codec's JSON (`{kind:"oauth", token, region, loginId,
   profileArn?}` from a stored login, `{kind:"api_key", token, region?}` or a raw `ksk_` key; `KIRO_API_KEY`,

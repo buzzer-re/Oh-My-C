@@ -1004,6 +1004,24 @@ static void test_message_threads(void) {
     json_free(a1);
 }
 
+/* supportsAnthropicCompaction: a gateway qualifies only by declaring its own endpoint (omp 51ef3e7060) */
+static void test_anthropic_compaction_gate(void) {
+    const char *base = "{\"id\":\"claude-opus-4-8\",\"api\":\"anthropic-messages\",\"provider\":\"gw\","
+                       "\"baseUrl\":\"https://gw.example/v1/\",\"compat\":{\"supportsServerCompaction\":true}%s}";
+    const char *variants[] = {"", ",\"remoteCompaction\":{\"enabled\":true}",
+                              ",\"remoteCompaction\":{\"api\":\"anthropic-messages\",\"enabled\":true}",
+                              ",\"remoteCompaction\":{\"api\":\"anthropic-messages\",\"enabled\":false}"};
+    const bool want[] = {false, false, true, false};
+    for (int i = 0; i < 4; i++) {
+        char *s = xasprintf(base, variants[i]);
+        json_t *raw = J(s);
+        ai_model_t m = mk_model(raw);
+        CHECK(anthropic_compaction_supported(&m) == want[i]);
+        json_free(raw);
+        free(s);
+    }
+}
+
 /* omp 7f6b4a096f: an empty conversation is named before it reaches Anthropic's bare 400 */
 static void test_anthropic_empty_request(void) {
     json_t *raw = J(SONNET45);
@@ -1033,6 +1051,7 @@ int main(void) {
 
     test_message_threads();
     test_anthropic_empty_request();
+    test_anthropic_compaction_gate();
     test_anthropic_request_apikey();
     test_anthropic_request_adaptive();
     test_anthropic_request_oauth();

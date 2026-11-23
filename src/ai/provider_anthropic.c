@@ -1289,7 +1289,12 @@ bool anthropic_compaction_supported(const ai_model_t *m) {
     char *route = resolve_base_url(m);
     bool official = is_official_url(route);
     bool ok = false;
-    if (cflag(m, "bedrockMessagesApi")) ok = true;
+    char *own = normalize_base_url(m->base_url);
+    /* declaresAnthropicCompactionEndpoint (omp 60304f9e52, 51ef3e7060): a gateway outside the known deployments qualifies
+     * only by declaring remoteCompaction {api: "anthropic-messages", enabled: true} for its own configured endpoint */
+    bool declared = str_eq(json_get_str(rc, "api"), "anthropic-messages") && json_get_bool(rc, "enabled", false) && str_eq(route, own);
+    free(own);
+    if (cflag(m, "bedrockMessagesApi") || declared) ok = true;
     else if (official || (route && (strstr(route, "aiplatform.googleapis.com") || strstr(route, ".services.ai.azure.com"))))
         ok = cflag(m, "firstPartyProvider") || str_eq(m->provider, "google-vertex") || json_get_bool(rc, "enabled", false);
     free(route);
