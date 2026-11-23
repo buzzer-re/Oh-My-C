@@ -3215,6 +3215,17 @@ static const provider_t GROUNDED[] = {
 /* SearchProvider.label (codex reads "OpenAI" there, "OpenAI Codex" in the renderer labels) */
 static const char *provider_label(const char *id) { return str_eq(id, "codex") ? "OpenAI" : label_of(id); }
 
+/* SearchProvider.isKeyless: the search would reach a third party without a user credential or endpoint */
+static bool provider_keyless(const provider_t *prov, const ai_model_t *m) {
+    const char *id = prov->id;
+    if (str_eq(id, "duckduckgo")) return true;
+    if (str_eq(id, "parallel")) return !env_get("PARALLEL_API_KEY") && !key_kind("parallel");
+    if (str_eq(id, "exa")) return !env_get("EXA_API_KEY") && !key_kind("exa");
+    if (str_eq(id, "keenable")) return !has_keenable(m);
+    if (str_eq(id, "perplexity")) return !has_perplexity(m);
+    return false;
+}
+
 static const provider_t *find_provider(const provider_t *tab, size_t n, const char *id) {
     for (size_t i = 0; i < n; i++)
         if (str_eq(tab[i].id, id)) return &tab[i];
@@ -3508,6 +3519,7 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
                      .timeout_ms = (secs > 0 ? MIN(secs, (int64_t)300) : 60) * 1000};
     VEC(failure_t) fails = {0};
     int available = 0;
+    bool keyless_skipped = false;
     char *text = NULL;
     const char *failed_provider = "none";
     for (size_t i = 0; i < exp.n && !text; i++) {
@@ -3540,6 +3552,13 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
                 fail_plain(&f.err, xasprintf("%s web search grounding is not supported by omc.", label_of(model_web_search(m))));
         } else {
             fail_plain(&f.err, xasprintf("Model %s/%s does not support web search", m->provider, m->id));
+        }
+        /* providers.webKeyless off: only a per-request selector reaches a keyless service */
+        if (prov && !model_sel && !settings_bool("providers.webKeyless", true) && provider_keyless(prov, m)) {
+            keyless_skipped = true;
+            free(f.id);
+            free(f.label);
+            continue;
         }
         if (prov) {
             free(f.id);
@@ -3619,8 +3638,10 @@ char *ws_execute(const json_t *args, const char *model_sel, const ai_model_t *se
     if (!text) {
         char *msg;
         if (available == 0 && fails.n == 0)
-            msg = model_sel ? xasprintf("No web search model matches selector \"%s\".", model_sel)
-                            : xstrdup("No web search model configured.");
+            msg = model_sel        ? xasprintf("No web search model matches selector \"%s\".", model_sel)
+                  : keyless_skipped ? xstrdup("No configured web search service is available, and providers.webKeyless is off. "
+                                              "Configure a search credential or turn providers.webKeyless on.")
+                                    : xstrdup("No web search model configured.");
         else if (fails.n > 1) {
             sb_t b = SB_INIT;
             sb_append(&b, "All web search providers failed: ");
