@@ -1886,7 +1886,7 @@ agent_tool_t *tool_glob_new(tool_env_t *env) {
     char *desc = tool_prompt("glob", ctx);
     json_free(ctx);
     json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"hidden\":{\"type\":"
-                           "\"boolean\"},\"gitignore\":{\"type\":\"boolean\"},\"limit\":{\"type\":\"number\"}},"
+                           "\"boolean\"},\"gitignore\":{\"type\":\"boolean\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200}},"
                            "\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("glob", "Glob", desc, s, glob_execute);
     free(desc);

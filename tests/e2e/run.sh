@@ -126,7 +126,8 @@ check "grep named binary" '*1:gqxbin'  "$B" --model mock/mock-1 -p 'call:grep:{"
 check "grep cross-line"  $'*1:gqa\n 2:gqb'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa\\ngqb","path":"gq/x.txt"}'
 check "grep url;path list" $'## x.txt#'  "$B" --model mock/mock-1 -p 'call:grep:{"pattern":"gqa","path":"local://nope.md;gq"}'
 check "glob none"      "No files found matching pattern" "$B" --model mock/mock-1 -p 'call:glob:{"path":"*.zzq"}'
-check "glob limit"     "Requested limit 500 clamped to the max of 200" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
+# the schema bounds limit to 1-200 (omp 1d9d5d1d46: no silent clamp)
+check "glob limit"     "  - limit: limit must be a number at most 200 (was 500)" "$B" --model mock/mock-1 -p 'call:glob:{"path":"a","limit":500}'
 check "plain answer"   "plain answer"                    "$B" --model mock/mock-1 -p "hi"
 check "continue"       "plain answer"                    "$B" --model mock/mock-1 -c -p "again"
 check "json mode"      '"type":"agent_end"'              "$B" --model mock/mock-1 --mode json -p "bash:echo j"
