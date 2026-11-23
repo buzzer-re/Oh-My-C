@@ -1514,7 +1514,8 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
     int64_t maxd = settings_int("retry.maxDelayMs", 5 * 60 * 1000);
     if (billing_cap || (maxd > 0 && delay > (double)maxd)) {
         char *fe = billing_cap ? xstrdup(err)
-                               : xasprintf("Provider requested %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                               : xasprintf("%s %.0fms wait, exceeds retry.maxDelayMs (%lldms). Original error: %s",
+                                           hint >= 0 && delay == (double)hint ? "Provider requested" : "Retry requires",
                                            ceil(delay), (long long)maxd, err ? err : "error");
         json_t *ev = json_obj();
         json_set_str(ev, "type", "auto_retry_end");

@@ -291,6 +291,8 @@ bool tr_billing_cap_usage_limit(int status, const char *msg) {
     if (status == 402) /* is402BillingCapBody */
         return opaque_status_body(msg) || m(P_STATUS_402_QUOTA, msg) || str_eq(reason, "QUOTA_EXHAUSTED") ||
                str_eq(reason, "CONCURRENT_LIMIT");
+    /* parseGoogleRpcRateLimitReason: a RESOURCE_EXHAUSTED ErrorInfo reason INSUFFICIENT_G1_CREDITS_BALANCE */
+    if (strstr(msg, "RESOURCE_EXHAUSTED") && strstr(msg, "INSUFFICIENT_G1_CREDITS_BALANCE")) return true;
     return m(P_OUT_OF_CREDIT, msg) || m(P_INSUFFICIENT_BALANCE, msg) || m(P_CREDITS_EXHAUSTED, msg) ||
            m(P_PREPAID_EXHAUSTED, msg) || m(P_SPEND_LIMIT, msg) || m(P_CREDITS_REQUIRED, msg) || m(P_INSUFFICIENT_QUOTA, msg) ||
            ai_zero_allowance_text(msg);

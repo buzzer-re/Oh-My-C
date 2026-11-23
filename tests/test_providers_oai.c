@@ -1178,6 +1178,19 @@ static void test_retry_hints(void) {
     CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\": \"17h48m25.5s\"}") == 64105500);
     CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\":\"835ms\"}") == 835);
     CHECK(ai_extract_retry_hint(NULL, "{\"quotaResetDelay\": \"5mx\"}") == -1);
+    /* omp 3efa3bab9e: structured Go durations win over earlier display text; fractional ms floor */
+    CHECK(ai_extract_retry_hint(NULL, "{\"metadata\":{\"quotaResetDelay\":\"835.150299ms\"}}") == 835);
+    {
+        static const struct { const char *d; int64_t ms; } gd[] = {{"30m", 1800000}, {"1h", 3600000}, {"1.5h", 5400000}, {"1h30m", 5400000}};
+        for (size_t i = 0; i < sizeof gd / sizeof gd[0]; i++) {
+            char body[300];
+            snprintf(body, sizeof body,
+                     "Cloud Code Assist API error (429): {\"error\":{\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\"Resets in "
+                     "3h0m0s.\",\"details\":[{\"metadata\":{\"quotaResetDelay\":\"%s\"}}]}}",
+                     gd[i].d);
+            CHECK(ai_extract_retry_hint(NULL, body) == gd[i].ms);
+        }
+    }
     {
         time_t future = time(NULL) + 7200;
         char stamp[40], body[120];

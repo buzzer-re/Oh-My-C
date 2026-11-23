@@ -198,7 +198,49 @@ static double hms_at(const char *p) {
     return -1;
 }
 
-/* QUOTA_RESET_PATTERN: the leftmost `reset after` / `resets? in` / `"quotaResetDelay": "` followed by a duration */
+/* (\d+(?:\.\d+)?)<u> at p (u = "h", "m", "ms" or "s"): the end past the unit, else NULL */
+static const char *dec_unit(const char *p, const char *u, double *v) {
+    const char *q = p;
+    while (isdigit((unsigned char)*q)) q++;
+    if (q == p) return NULL;
+    if (*q == '.' && isdigit((unsigned char)q[1]))
+        for (q++; isdigit((unsigned char)*q); q++) {}
+    size_t n = strlen(u);
+    if (strncasecmp(q, u, n)) return NULL;
+    *v = strtod(p, NULL);
+    return q + n;
+}
+
+/* GOOGLE_RPC_RESET_DELAY_PATTERN: `"quotaResetDelay"\s*:\s*"(<h>?<m>?(<n>(ms|s))?)"` with a non-empty Go duration
+ * (`30m`, `17h48m25.5s`, `835ms`): ms, else -1 */
+static double rpc_reset_delay_ms(const char *body) {
+    for (const char *p = str_istr(body, "\"quotaResetDelay\""); p; p = str_istr(p + 1, "\"quotaResetDelay\"")) {
+        const char *q = skip_ws(p + 17);
+        if (*q != ':') continue;
+        q = skip_ws(q + 1);
+        if (*q != '"') continue;
+        q++;
+        for (int with_h = 1; with_h >= 0; with_h--) {
+            double h = 0;
+            const char *a = with_h ? dec_unit(q, "h", &h) : q;
+            if (!a) continue;
+            for (int with_m = 1; with_m >= 0; with_m--) {
+                double mi = 0;
+                const char *b = with_m ? dec_unit(a, "m", &mi) : a;
+                if (!b) continue;
+                for (int with_s = 2; with_s >= 0; with_s--) { /* ms, s, none */
+                    double sv = 0;
+                    const char *c = with_s == 2 ? dec_unit(b, "ms", &sv) : with_s == 1 ? dec_unit(b, "s", &sv) : b;
+                    if (!c || *c != '"' || c == q) continue;
+                    return floor(h * 3600000 + mi * 60000 + (with_s == 2 ? sv : sv * 1000));
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+/* QUOTA_RESET_PATTERN: the leftmost `reset after` / `resets? in` followed by a duration */
 static double quota_reset_ms(const char *body) {
     for (const char *p = body; *p; p++) {
         const char *q = NULL;
@@ -210,9 +252,6 @@ static double quota_reset_ms(const char *body) {
                 r = skip_ws(r);
                 if (!strncasecmp(r, "in", 2)) q = r + 2;
             }
-        } else if (!strncasecmp(p, "\"quotaResetDelay\":", 18)) {
-            const char *r = skip_ws(p + 18);
-            if (*r == '"') q = r + 1;
         }
         if (!q) continue;
         double ms = hms_at(q);
@@ -224,9 +263,11 @@ static double quota_reset_ms(const char *body) {
 /* the body-text half of extractRetryHint */
 static int64_t body_retry_hint(const char *body, int64_t now) {
     hint_acc_t a = {-1, -1, false};
-    /* QUOTA_RESET_PATTERN: "reset after 1h2m3s" / "10m15s" / "39s" / "Resets in 71h48m47s" /
-     * "quotaResetDelay": "17h48m25.5s" / "835ms" (the leftmost match) */
-    double quota = quota_reset_ms(body);
+    /* structured quota timing (Google RPC quotaResetDelay) wins over a display-oriented reset message */
+    double rpc_delay = rpc_reset_delay_ms(body);
+    if (rpc_delay >= 0) consider_clamped(&a, rpc_delay);
+    /* QUOTA_RESET_PATTERN: "reset after 1h2m3s" / "10m15s" / "39s" / "Resets in 71h48m47s" / "835ms" (the leftmost) */
+    double quota = rpc_delay >= 0 ? -1 : quota_reset_ms(body);
     if (quota >= 0) consider(&a, quota);
     /* Cloud Code Assist RPC error detail "quotaResetTimeStamp": "<stamp>Z": an unambiguous absolute reset */
     const char *rpc = str_istr(body, "\"quotaResetTimeStamp\":");

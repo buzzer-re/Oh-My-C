@@ -265,6 +265,10 @@ int main(void) {
     CHECK(tr_billing_cap_usage_limit(402, lithos));
     CHECK(tr_billing_cap_usage_limit(0, lithos));
     CHECK(tr_billing_cap_usage_limit(429, "Insufficient balance in account"));
+    /* omp 3efa3bab9e: a structured INSUFFICIENT_G1_CREDITS_BALANCE is a billing cap */
+    CHECK(tr_billing_cap_usage_limit(429, "{\"error\":{\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\"Resource exhausted\","
+                                          "\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\","
+                                          "\"reason\":\"INSUFFICIENT_G1_CREDITS_BALANCE\"}]}}"));
     /* a zero x-ratelimit-limit-* allowance is a billing wall: no wait or replay can succeed (omp 03a02d0926) */
     const char *zero = "429 Rate limit exceeded (x-ratelimit-limit-req-minute: 0 \xe2\x80\x94 this plan grants no allowance "
                        "for the model; switch models or upgrade the plan)";
