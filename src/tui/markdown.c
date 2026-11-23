@@ -186,12 +186,39 @@ static int em_delim_cmp(const void *a, const void *b) {
     return x->at < y->at ? -1 : x->at > y->at;
 }
 
-static void em_index_build(em_index_t *x, const char *s, size_t n, char marker, size_t width) {
+/* Spans (marked/inline-closers.ts): ascending, disjoint parts of the source that code spans, autolinks, inline HTML
+ * and inline links' parenthesized destinations take; a marker or bracket inside one neither opens nor closes */
+typedef struct {
+    size_t start, end;
+} md_span_t;
+typedef struct {
+    bool built;
+    VEC(md_span_t) v;
+} md_spans_t;
+
+/* Spans.endAt: where the part holding `at` ends, or 0 when none holds it */
+static size_t md_span_end_at(const md_spans_t *sp, size_t at) {
+    size_t lo = 0, hi = sp->v.n;
+    while (lo < hi) { /* first span starting past at */
+        size_t mid = (lo + hi) / 2;
+        if (sp->v.v[mid].start <= at) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo && at < sp->v.v[lo - 1].end ? sp->v.v[lo - 1].end : 0;
+}
+
+static void em_index_build(em_index_t *x, const char *s, size_t n, char marker, size_t width, const md_spans_t *skipped) {
     x->built = true;
     int level = 0;
     for (size_t run = 0; run < n;) {
         if (s[run] != marker) {
             run++;
+            continue;
+        }
+        /* no skipped part starts or ends with a marker, so a run lies wholly inside one or outside all */
+        size_t skipped_to = md_span_end_at(skipped, run);
+        if (skipped_to) {
+            run = skipped_to;
             continue;
         }
         size_t end = run + 1;
@@ -772,10 +799,127 @@ static size_t html_code_close(html_scan_t *x, size_t from, size_t n, size_t *len
     return n;
 }
 
+/* matchDestination: /^(<[^>]*>|\S+?)(?:\s+(?:"([\s\S]*)"|'([\s\S]*)'|\(([\s\S]*)\)))?$/ on the trimmed text */
+static bool md_title_rest(const char *s, size_t n) { /* (?:\s+(?:"…"|'…'|\(…\)))?$ from s */
+    if (!n) return true;
+    size_t k = 0;
+    while (k < n && js_space(s + k, n - k)) k += js_space(s + k, n - k);
+    if (!k || n - k < 2) return false;
+    char o = s[k], e = s[n - 1];
+    return (o == '"' && e == '"') || (o == '\'' && e == '\'') || (o == '(' && e == ')');
+}
+
+static bool md_match_destination(const char *s, size_t n) {
+    while (n && js_space(s, n)) {
+        size_t k = js_space(s, n);
+        s += k;
+        n -= k;
+    }
+    n = js_trim_end(s, n);
+    if (!n) return false;
+    if (s[0] == '<') {
+        const char *gt = memchr(s, '>', n);
+        if (gt && md_title_rest(gt + 1, n - (size_t)(gt + 1 - s))) return true;
+    }
+    size_t t = 0; /* \S+? then the title, or the whole text when it has no whitespace */
+    while (t < n && !js_space(s + t, n - t)) t++;
+    return md_title_rest(s + t, n - t);
+}
+
+/* BracketDepths(round).closeAfter: the first unescaped ")" at or after `from` at the depth `from` starts at */
+static size_t md_round_close(const char *s, size_t n, size_t from) {
+    int dep = 0;
+    for (size_t k = from; k < n && k - from < 4000; k++) {
+        if (s[k] == '\\') {
+            k++;
+            continue;
+        }
+        if (s[k] == '(') dep++;
+        else if (s[k] == ')') {
+            if (dep == 0) return k;
+            dep--;
+        }
+    }
+    return SIZE_MAX;
+}
+
+/* autolinkEnd: one past the ">" of the autolink opened at s[at] == '<', or 0 */
+static size_t md_autolink_end(const char *s, size_t n, size_t at) {
+    size_t sch = 0;
+    if (n - at > 8 && !strncasecmp(s + at + 1, "http://", 7)) sch = at + 8;
+    else if (n - at > 9 && !strncasecmp(s + at + 1, "https://", 8)) sch = at + 9;
+    else if (n - at > 7 && !strncasecmp(s + at + 1, "ftp://", 6)) sch = at + 7;
+    if (!sch) { /* <[^ <>@]+@[^ <>@]+> */
+        size_t k = at + 1, a = k;
+        while (k < n && !strchr(" <>@", s[k])) k++;
+        if (k == a || k >= n || s[k] != '@') return 0;
+        size_t b = ++k;
+        while (k < n && !strchr(" <>@", s[k])) k++;
+        return k > b && k < n && s[k] == '>' ? k + 1 : 0;
+    }
+    size_t k = sch;
+    while (k < n && s[k] != ' ' && s[k] != '>') k++;
+    return k > sch && k < n && s[k] == '>' ? k + 1 : 0;
+}
+
+/* CloserIndexes.consumed: one walk finds code spans, autolinks, inline HTML and inline link destinations where the
+ * lexer's rules match them, past escapes and each part it found (omp f1bb4dbeed) */
+static void md_spans_build(md_spans_t *sp, const char *s, size_t n, html_scan_t *hx) {
+    sp->built = true;
+    size_t open_brackets = 0, no_close[9];
+    memset(no_close, 0xff, sizeof no_close);
+    for (size_t at = 0; at < n;) {
+        char ch = s[at];
+        size_t end = at + 1;
+        if (ch == '\\') {
+            if (at + 1 < n && is_punct(s[at + 1])) end = at + 2;
+        } else if (ch == '`') {
+            size_t r = 0;
+            while (at + r < n && s[at + r] == '`') r++;
+            size_t close = SIZE_MAX, *nc = &no_close[MIN(r, (size_t)8)];
+            if (r >= 8 || at < *nc) {
+                close = code_run_close(s, at, r, n);
+                if (close == SIZE_MAX && r < 8) *nc = at;
+            }
+            if (close == SIZE_MAX) end = at + r;
+            else {
+                end = close + r;
+                vec_push(&sp->v, ((md_span_t){at, end}));
+            }
+        } else if (ch == '<') {
+            size_t e = md_autolink_end(s, n, at);
+            if (!e) {
+                size_t hl = inline_html_len(hx, at, n);
+                if (hl) e = at + hl;
+            }
+            if (e) {
+                end = e;
+                vec_push(&sp->v, ((md_span_t){at, end}));
+            }
+        } else if (ch == '[') {
+            open_brackets++;
+        } else if (ch == ']') {
+            if (open_brackets) {
+                open_brackets--;
+                if (at + 1 < n && s[at + 1] == '(') {
+                    size_t close = md_round_close(s, n, at + 2);
+                    if (close != SIZE_MAX && md_match_destination(s + at + 2, close - at - 2)) {
+                        end = close + 1;
+                        vec_push(&sp->v, ((md_span_t){at + 1, end}));
+                    }
+                }
+            }
+        }
+        at = end;
+        while (at < n && !strchr("\\`<[]", s[at])) at++;
+    }
+}
+
 static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, int depth) {
     istyle_t st = {0};
     scan_cache_t sc;
     em_index_t ed[2][2] = {{{0}}};
+    md_spans_t spans = {0};
     em_open_t es[64];
     /* each emphasis level renders its content with its own HTML list state (a nested #renderInlineTokens) */
     html_state_t hst[65] = {{0}};
@@ -889,7 +1033,13 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
                 char d[4] = {ch, ch, ch, 0};
                 const char *e = s + i + 3;
                 size_t at = SIZE_MAX;
+                if (!spans.built) md_spans_build(&spans, s, n, &hx);
                 while ((e = strstr_n(e, (size_t)(s + limit - e), d))) {
+                    size_t skipped_to = md_span_end_at(&spans, (size_t)(e - s));
+                    if (skipped_to) {
+                        e = s + MIN(skipped_to, limit);
+                        continue;
+                    }
                     size_t k = 0;
                     while ((size_t)(e - s) > k && e[-(ptrdiff_t)k - 1] == '\\') k++;
                     if (k % 2 == 0) {
@@ -907,7 +1057,10 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             if (!open) {
                 size_t w = i + 1 < n && s[i + 1] == ch ? 2 : 1;
                 if (em_can_open_here(s, i, limit, w, ch, prev)) {
-                    if (!ed[ch == '_'][w - 1].built) em_index_build(&ed[ch == '_'][w - 1], s, n, ch, w);
+                    if (!ed[ch == '_'][w - 1].built) {
+                        if (!spans.built) md_spans_build(&spans, s, n, &hx);
+                        em_index_build(&ed[ch == '_'][w - 1], s, n, ch, w, &spans);
+                    }
                     size_t at = em_close_for(&ed[ch == '_'][w - 1], s, n, ch, w, i, limit);
                     if (at != SIZE_MAX) {
                         open = 1;
@@ -956,9 +1109,15 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
             size_t ts = i + (ch == '!' ? 2 : 1);
             int dep = 0;
             size_t j = ts;
+            if (!spans.built) md_spans_build(&spans, s, n, &hx);
             for (; j < n && j - ts < 2000; j++) {
                 if (s[j] == '\\') {
                     j++;
+                    continue;
+                }
+                size_t skipped_to = md_span_end_at(&spans, j); /* a code span, autolink or html tag in the label */
+                if (skipped_to && skipped_to <= n) {
+                    j = skipped_to - 1;
                     continue;
                 }
                 if (s[j] == '[') dep++;
@@ -1102,6 +1261,7 @@ static void render_inline(const char *s, size_t n, const md_ctx_t *c, sb_t *b, i
         else sb_appendn(b, s + i, (size_t)k);
         i += (size_t)k;
     }
+    free(spans.v.v);
     for (int x = 0; x < 2; x++)
         for (int y = 0; y < 2; y++) {
             free(ed[x][y].delims.v);

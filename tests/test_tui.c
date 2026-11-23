@@ -492,6 +492,24 @@ static void test_markdown(void) {
     CHECK_STR(sp, "snake_case_name and a * b * c");
     free(sp);
     free(s);
+    /* markers and brackets inside code spans, autolinks, html and link destinations neither open nor close
+     * (omp f1bb4dbeed) */
+    s = tui_md_inline("*use `*` as the marker*", NULL);
+    sp = tui_strip_ansi(s);
+    CHECK_STR(sp, "use * as the marker");
+    CHECK(strstr(s, "\x1b[3m") != NULL);
+    free(sp);
+    free(s);
+    s = tui_md_inline("**a <x b=\"**\"> c** and *d [e](f*g) h*", NULL);
+    sp = tui_strip_ansi(s);
+    CHECK_STR(sp, "a <x b=\"**\"> c and d e (f*g) h");
+    free(sp);
+    free(s);
+    s = tui_md_inline("[a `]` b](https://u.example) ***x `***` y***", NULL);
+    sp = tui_strip_ansi(s);
+    CHECK(strstr(sp, "a ] b") != NULL && strstr(sp, "](") == NULL && strstr(sp, "x *** y") != NULL);
+    free(sp);
+    free(s);
 }
 
 /* ---------- golden transcript renders (captures of omp under tmux, titanium theme; recaptured from v18.17.0) ----------
