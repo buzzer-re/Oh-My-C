@@ -923,6 +923,14 @@ static void test_message_threads(void) {
     json_free(p);
     anth_thread_turn_free(t);
 
+    /* a body replaying a native compaction block is never threaded (omp 04041d110f) */
+    t = anth_thread_turn_new("https://api.anthropic.com", "tm", "s-compaction", false);
+    p = thread_params("[{\"role\":\"assistant\",\"content\":[{\"type\":\"compaction\",\"content\":\"sum\"}]}," T_U1 "]", "sys");
+    w = anth_thread_plan(t, p, "", 1000, &cont);
+    CHECK(w == NULL);
+    json_free(p);
+    anth_thread_turn_free(t);
+
     /* past the reuse window, changed fixed fields or rewritten history start a new thread */
     static const struct {
         const char *msgs, *system;

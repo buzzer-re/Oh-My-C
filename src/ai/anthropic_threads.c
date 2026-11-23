@@ -163,9 +163,11 @@ static bool is_threadable(const json_t *p) {
     json_arr_foreach(json_get(json_get_obj(p, "context_management"), "edits"), i, e) {
         if (!str_eq(json_get_str(e, "type"), "clear_thinking_20251015")) return false;
     }
-    json_t *msg;
+    json_t *msg, *b;
     json_arr_foreach(json_get(p, "messages"), j, msg) {
         if (str_eq(json_get_str(msg, "clear_at"), "next_user_message")) return false;
+        /* carriesCompactionBlock: a body replaying a native compaction block goes out unthreaded (omp 04041d110f) */
+        json_arr_foreach(json_get_arr(msg, "content"), k, b) if (str_eq(json_get_str(b, "type"), "compaction")) return false;
     }
     return true;
 }
