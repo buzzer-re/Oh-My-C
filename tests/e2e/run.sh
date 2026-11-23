@@ -674,7 +674,7 @@ if python3 -c 'import pty' 2>/dev/null; then
     # WP-22b: "Waiting for background job …" row, Esc stops waiting, /agents hub (strips, enable/disable -> config.yml)
     check "agents tui" $'waiting ok\ndelivered ok\nwaiting again ok\nstop waiting ok\nfolded ok\nagents ok\nstrip ok\nmodel strip ok\nback ok\ntoggle ok\nconfig True\nenable ok\nclose ok'  python3 -I "$ROOT/tests/e2e/agents_tui.py" "$B" "$T/agent"
     # Alt+P model picker: Tab provider scopes, ←/→ thinking slider, the pick applies the slider's level (omp 94a10c5b22)
-    check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep left ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
+    check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep left ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok\nstep right ok\nesc keeps level ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
     # WP-29: inline images per protocol, cache-miss marker, Ctrl+Shift+O tool activity, tui.mouse capture
     mkdir -p "$T/agent-disp" "$T/disp" && cp "$T/agent/models.yml" "$T/agent-disp/"
     check "display kitty" $'kitty transmit once ok\nkitty placement ok\ncache miss ok\nkitty placeholders ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp" kitty
