@@ -879,17 +879,20 @@ static json_t *norm_nulls(const json_t *s, json_t *v, bool is_root, bool *change
     json_obj_foreach(props, i, k, ps) {
         json_t *cur = json_get(v, k);
         if (!cur) continue;
-        /* optional null placeholders are stripped, but a literal "null" stays in a content field whose schema accepts it
+        /* optional null placeholders the property schema rejects are stripped, and a literal "null" stays in a content field whose schema accepts it
          * (e.g. a JSON payload) */
         bool nullish = cur->type == JSON_NULL || (str_eq(json_sv(cur), "null") &&
                                                   !(in_list(k, CONTENT_KEYS, sizeof CONTENT_KEYS / sizeof *CONTENT_KEYS) && node_valid(ps, cur, depth + 1)));
         bool req = is_required(s, k);
         bool bad_empty = json_is_str(cur) && cur->u.str.len == 0 && !req && !node_valid(ps, cur, depth + 1);
-        if ((nullish || bad_empty) && !req) {
+        /* an explicit null the property schema accepts is data ("clear this field"), kept (omp 3763f4df73) */
+        bool accepted_null = cur->type == JSON_NULL && node_valid(ps, cur, depth + 1);
+        if (((nullish && !accepted_null) || bad_empty) && !req) {
             json_del(v, k);
             *changed = true;
             continue;
         }
+        if (accepted_null && !req) continue;
         if (nullish && json_get(ps, "default")) {
             json_set(v, k, json_clone(json_get(ps, "default")));
             *changed = true;
