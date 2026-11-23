@@ -46,10 +46,10 @@ check "usage accounts"   $'anthropic\n  (no identity key: no pool can name this 
 check "usage accounts redact" '`omc usage accounts` prints identity keys verbatim for configuration; --redact does not apply.' "${USGENV[@]}" "$B" usage accounts -r
 check "usage history"    $'Usage history \xc2\xb7 last 7d \xc2\xb7 peak per bucket' "${USGENV[@]}" "$B" usage --history
 check "usage invalidate" 'Invalidated cached usage reports for provider "zai".' "${USGENV[@]}" "$B" usage invalidate -p zai
-check "usage reset list" $'Saved rate-limit resets:\n- codex.user@example.com [Codex \xc2\xb7 openai-codex/5]: 2 saved, 2 usable now, expires' "${USGENV[@]}" "$B" usage reset
+check "usage reset list" $'Saved rate-limit resets:\n- codex.user@example.com [Codex \xc2\xb7 openai-codex/4]: 2 saved, 2 usable now, expires' "${USGENV[@]}" "$B" usage reset
 check "usage reset claude" $'- account [Claude \xc2\xb7 anthropic/1]: 0 saved, 0 usable now (not eligible)' "${USGENV[@]}" "$B" usage reset
 check "usage reset active" '`omc usage reset` runs outside a session, so no account is active.' "${USGENV[@]}" "$B" usage reset codex/active
-check "usage reset spend" $'Reset applied for codex.user@example.com (Codex) \xe2\x80\x94 your rate-limit window has been refreshed.' "${USGENV[@]}" "$B" usage reset codex/5
+check "usage reset spend" $'Reset applied for codex.user@example.com (Codex) \xe2\x80\x94 your rate-limit window has been refreshed.' "${USGENV[@]}" "$B" usage reset codex/4
 check "usage help"       "Saved reset to spend with \`reset\`: <provider>/<credential id> as \`omc usage reset\` lists it" "$B" usage --help
 # text-mode /usage over RPC (helpers/usage-report.ts) and ACP _omp/usage
 check "usage rpc"        $'Anthropic\\n  Models with usage data\\n    anthropic/claude' \
