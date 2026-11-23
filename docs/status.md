@@ -1,8 +1,87 @@
 # omc implementation status
 
-Status of the port against upstream oh-my-pi (reference: omp v18.22.0, see [UPDATE.md](../UPDATE.md) for the pinned upstream commit). ✅ ported and tested · 🟡 partial · ❌ not yet.
+Status of the port against upstream oh-my-pi (reference: omp v19.1.0, see [UPDATE.md](../UPDATE.md) for the pinned upstream commit). ✅ ported and tested · 🟡 partial · ❌ not yet.
 This file is the single source of truth for what is implemented; it is updated with every change.
 [gaps.md](gaps.md) audits omp's full user-facing surface against omc and lists the missing pieces as prioritized work packages. Keep both in sync when a gap closes.
+
+## omp v19.1.0 update (2026-11-23)
+
+Ported from v18.22.0 to v19.1.0 (1,159 non-merge upstream commits; 751 skipped by triage as changelog-only, upstream
+CI and tests, the Rust shell and builtins, the browser and Chrome extension relay, the `computer` tool, the
+disassemblers, the omp daemon, Tern-only native views, JS eval and selective commits, on-device speech). Four streams
+(providers/catalog/prompts, tools, TUI/modes/CLI, agent/sessions/MCP) plus the ask redesign and the leftovers. Embedded
+data refreshed to v19.1.0: prompts (36 new), catalog (6,102 models), compat rules, providers, settings tables (19 new
+keys, 5 removed, `tools.xdev*` renamed `tools.command*`, `composer.predictions` on by default), slash commands, themes
+(`btwMode`), changelog, export viewer.
+
+**Ported:**
+- Tool commands replace xd:// devices (`src/tools/toolcmd.c`, `toolcli.c`; omp tool-commands.ts, exec/tool-cli.ts,
+  tool-command-host.ts): while `bash` is active, discoverable tools and MCP tools run as commands inside a bash call
+  (`<tool> --help`, schema-bound arguments, `-j`, `@FILE`, `-`), `resolve`/`reject`/`propose`/`report_issue`,
+  `help://<tool>/<topic>`, the system prompt's tool-command docs and catalog, MCP command guidance, mount notices,
+  `details.toolCommands`. omc keeps real bash: each command is a shell function calling `omc __tool-command` over a
+  private unix socket, so it is not visible to child processes (`xargs lsp`, `bash -c`) and is refused under `pty`.
+- `local://N.log` spills replace `artifact://N` (claimed only when output overflows; subagents share the parent's root);
+  old sessions' `artifact://` links are not migrated.
+- The `magic` edit mode (`src/tools/magic.c`): Markdown change descriptions under `# path` headings, applied by
+  `edit.magic.model` (else the smol role) through the replace engine, sections in parallel, 120 s budget and transient
+  retries. Omp's native "does the file still parse" guard is not ported.
+- bash `notify` for background jobs and services; wait's 5 s / 4 m windows; intent tracing off outside the TUI unless
+  `tools.intentTracing` / `PI_INTENT_TRACING`; `generate_image` returns image blocks; `providers.webKeyless`; read `:N`
+  is one line and continuation hints say `:N-`; ranged `:raw`, extensionless SQLite, archive image members; glob, grep,
+  LSP, ssh://, mcp:// byte resources and service readiness fixes; the eval bridge's Python 3.9+ check and kernel-loss text.
+- The ask redesign: one stacked scrolling panel above the kept composer (`Ask · N of M answered`, folded answers and
+  option chips, Alt+H hides it), the composer goes faint with the ask's keys and says typing skips the questions, Esc /
+  Tab past Submit / Shift+Tab / ↑ move the keys between them, sending a message skips the ask and the model gets the
+  answers given (`interrupted`). RPC sends the ask as one HTML-form `form` request.
+- TUI: composer predictions (on by default; Tab or → takes the suggestion); `?` submits a /btw question (`btwMode`);
+  agent identity colours (`subagent1..6`); bash cards with the intent header and icon-chip footers; tool intents show
+  their brief label; quieter auto-retries; model search with `provider/model`; `/session` shows `Local:` and `/copy
+  local`; table cells wrap; RPC `resume`, `abort_and_deliver_queue`, `get_model_picker`, `set_model` with thinking level
+  and role.
+- Agent and sessions: the thinking level is kept across model switches (clamped to the new model); `/handoff` is a
+  background compaction (`/compact handoff`); prompt-cache warming strategies (`providers.cacheWarmingStrategy`:
+  auto/keepalive/compact, bridge compaction before expiry, Anthropic `max_tokens: 0` pre-warm with replay fallback);
+  sessions record provider refusals and tool approval requests/outcomes; subagents always get the `lsp` tool
+  (`task.enableLsp` only gates edit checks); `--restore` after SIGTERM/SIGHUP; the goal tool's `pause` op.
+- MCP client: protocol 2026-07-28 (`server/discover`, request `_meta`, roots input rounds, listen stream) with fallback to
+  the 2025-11-25 `initialize` handshake; tool-call deadlines restarted by progress; one retry after an expired HTTP
+  session; OAuth client name `Codex`; `clientInfo` is omp's `omp-coding-agent`/`1.0.0`.
+- Providers: Kiro (`/login kiro`: IAM Identity Center with profile picker, Builder ID, Google/GitHub device sign-in,
+  `KIRO_API_KEY`; per-credential model discovery; streaming with reasoning, tool calls and images; `/usage` credits);
+  `google-gemini-cli` removed; Codex client-version tracking (`PI_AI_CODEX_CLIENT_VERSION`) and 0.169 request
+  formatting; Claude Code 2.1.326; 15-minute stream watchdog; Claude subscription plan in usage; Anthropic compaction
+  for declared gateways; `reasoning_details` kept and replayed on chat completions; the mandatory-reasoning clamp on
+  every API; a Claude `reasoning_extraction` refusal of replayed foreign reasoning is resent once without it and the
+  session keeps that reasoning out of later Claude requests; first-party Anthropic uploads cut off before a response say
+  how far the body got.
+
+**Not ported, too expensive in C or the base feature is absent:** the omp daemon (shared MCP processes across sessions,
+daemon update survival, `OMP_DAEMON_TCP`), MCP result caching and resource subscriptions, `task.crossInstance`
+(`agent://peers`), credential pools (multi-account Kiro ranking), gateway online discovery (Bifrost has a login, its
+models come from models.yml), `antigravity-cli`, extension provider takeovers and provider hooks, prompt perturbation,
+`pty.notify` (no interactive pty console), the jobs sheet's per-step live streams (omp's shell traces), model mentions,
+usage policy diagnostics, `gc --strip`, OSC 11 background detection, the magic edit parse guard, `/tan`, Tern's native
+ask card and "Skip & send" chip, the browser relay, Binary Ninja, JS eval and selective commits, on-device speech.
+
+**Found by the side-by-side pass and fixed:** a Claude classifier refusal walks `retry.fallbackChains` like omp's refusal
+walk (never retried on the refused model, each model once per turn, no candidate ends the turn; a model switch
+announces `auto_retry_start`, print mode says `Retrying (n/max): …`, a dead end pins `Retry failed after N attempts`);
+a refused empty turn that a retry announces is kept as a session message; tool commands run inside a bash call draw as
+nested cards in the bash card, live while the command runs (cell-identical to omp); Anthropic sends `strict: true` on
+omp's allowlisted tools and resends without them after a strict-tools 400; composer predictions survive `/compact` and
+are not shown after a run that retried; grep card continuation cells. Checked side by side with the installed `omp`
+19.1.0 and mocks, predictions on: startup, turns, read/edit/bash/grep/todo cards, tool commands in bash, the ask, btw,
+`/model`, `/settings`, `/plan`, `/compact`, `/handoff`, a retry, a refusal walk and all 15 spec replays are identical
+apart from the out-of-scope prompt sections' token counts; the first request (`request_diff.sh`, plain and
+`edit.mode: magic`) has identical tools and messages apart from those sections. Fixtures recaptured from omp 19.1.0.
+
+**Still differs from omp (seen side by side):** when chrome below the transcript shrinks (the Alt+H-hidden ask, a
+closing ask taller than the screen), omp leaves the freed rows blank and omc pulls committed rows back down (needs a
+transcript/chrome boundary in the renderer); RPC retries run inside one agent run (omp starts a new run per attempt);
+ACP lists fewer commands; the pinned TODO panel; read tool details for plain files (and the ACP `locations` they
+imply); `debug launch` adapter choice for an extensionless missing program; the mid-retry working-row wording; the
+Anthropic strict-tools fallback is remembered per process (omp: per session); the magic edit parse guard.
 
 ## omp v18.22.0 update (2026-11-18)
 
