@@ -2,6 +2,7 @@
 #include "tools.h"
 #include "toolcmd.h"
 #include "jobs.h"
+#include "notify.h"
 #include "services.h"
 #include "vurl.h"
 #include "iurl.h"
@@ -635,11 +636,12 @@ static bool has_url_scheme(const char *s) {
 
 /* extractLeadingCdTarget: a leading `cd <path> && rest` or `cd <path>; rest` → (literal path, rest, separator ';' or '&').
  * Bails (false) on anything but exactly `cd`, one path token and a top-level `&&`/`;`: redirects, extra arguments,
- * paths needing expansion (`$`, backticks, `(`), line continuations, `;;`/`;&` case terminators. */
+ * paths needing expansion (unquoted `$`, backticks, parentheses, globs, braces; `$`/backticks inside double quotes), directory-stack operands, named-user tildes, line continuations, `;;`/`;&` case terminators. */
 bool bash_extract_leading_cd(const char *cmd, char **dir, char **rest, char *sep) {
     if (strncmp(cmd, "cd", 2) != 0 || (cmd[2] != ' ' && cmd[2] != '\t')) return false;
     size_t i = 2;
     while (cmd[i] == ' ' || cmd[i] == '\t') i++;
+    bool unquoted_tilde = cmd[i] == '~';
     sb_t path = SB_INIT;
     bool in_single = false, in_double = false;
     for (; cmd[i]; i++) {
@@ -660,6 +662,7 @@ bool bash_extract_leading_cd(const char *cmd, char **dir, char **rest, char *sep
                 }
             }
             if (ch == '"') in_double = false;
+            else if (ch == '$' || ch == '`') goto fail;
             else sb_putc(&path, ch);
             continue;
         }
@@ -676,10 +679,17 @@ bool bash_extract_leading_cd(const char *cmd, char **dir, char **rest, char *sep
             sb_putc(&path, cmd[++i]);
             continue;
         }
-        if (strchr(" \t\n\r&|;<>()", ch)) break;
+        if (strchr("$`()*?[]{}", ch)) goto fail; /* CD_TARGET_EXPANSION_CHARS: the shell expands these */
+        if (strchr(" \t\n\r&|;<>", ch)) break;
         sb_putc(&path, ch);
     }
-    if (in_single || in_double || !path.len || strpbrk(sb_cstr(&path), "$`(")) goto fail;
+    if (in_single || in_double || !path.len) goto fail;
+    {
+        /* directory-stack operands (`-`, `+N`, `-N`) and named-user tildes are the shell's own */
+        const char *p = sb_cstr(&path);
+        bool stack = !strcmp(p, "-") || ((p[0] == '+' || p[0] == '-') && p[1] && !p[1 + strspn(p + 1, "0123456789")]);
+        if (stack || (unquoted_tilde && strcmp(p, "~") != 0 && !str_starts(p, "~/"))) goto fail;
+    }
     while (cmd[i] == ' ' || cmd[i] == '\t') i++;
     if (cmd[i] == '&' && cmd[i + 1] == '&') {
         *sep = '&';
@@ -837,8 +847,9 @@ static void bash_service(tool_env_t *env, tool_ctx_t *ctx, const char *name, con
     json_t *snap = NULL;
     bool timed_out = false;
     char *err = NULL;
-    if (services_start(env->jobs, env->cwd, name, cmd, cwd, pty, has_ready ? &ready : NULL, ctx ? ctx->cancel : NULL, &snap,
-                       &timed_out, &err) != 0) {
+    const char *notify = blank_null(json_get_str(args, "notify"));
+    if (services_start(env->jobs, env->cwd, name, cmd, cwd, pty, has_ready ? &ready : NULL, notify, ctx ? ctx->cancel : NULL,
+                       &snap, &timed_out, &err) != 0) {
         tool_result_error(out, "%s", err ? err : "service start failed");
         free(err);
         return;
@@ -851,6 +862,7 @@ static void bash_service(tool_env_t *env, tool_ctx_t *ctx, const char *name, con
         sb_appendf(&b, "\nNOT ready — readiness timed out after %gs; process state: %s.", ready.timeout > 0 ? ready.timeout : 30,
                    json_get_str(snap, "state"));
     for (size_t i = 0; i < notices->n; i++) sb_appendf(&b, "\n%s", notices->v[i]);
+    if (notify) sb_appendf(&b, "\nOutput lines matching /%s/ arrive as follow-ups while it runs.", notify);
     char *log = services_logs(env->cwd, name);
     if (*log) sb_appendf(&b, "\n%s", log);
     free(log);
@@ -889,7 +901,10 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     bool launch = settings_bool("launch.enabled", true);
     bool async_on = settings_bool("async.enabled", true);
     const char *name = blank_null(json_get_str(args, "name"));
-    bool async_req = json_get_bool(args, "async", false);
+    /* `notify` reports output while the command runs: a service does that as it is, anything else starts in the
+     * background as `async` does */
+    const char *notify = blank_null(json_get_str(args, "notify"));
+    bool async_req = json_get_bool(args, "async", false) || (notify && !name);
     strvec_t notices = {0};
     if (name) {
         if (!launch) {
@@ -908,6 +923,23 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
             return 0;
         }
     }
+    if (notify && !env->jobs) {
+        tool_result_error(out, "notify is unavailable in this session.");
+        strvec_free(&notices);
+        return 0;
+    }
+    /* compiled before anything runs: a bad regex fails the call instead of a job that never reports (a service's
+     * regex is checked when it starts) */
+    if (notify && !name) {
+        char *nerr = NULL;
+        if (!notify_pattern_ok(notify, &nerr)) {
+            tool_result_error(out, "%s", nerr);
+            free(nerr);
+            strvec_free(&notices);
+            return 0;
+        }
+    }
+
     char *cmd = xstrdup(command);
     strvec_t tc_names = {0};
     toolcmd_run_t *tc_run = NULL;
@@ -978,7 +1010,9 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (async_req && env->jobs) {
         toolcmd_run_t *jrun = tc_names.n && !pty ? toolcmd_run_begin(ctx, env) : NULL;
         if (jrun) toolcmd_run_detach(jrun);
-        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL, jrun);
+        char *jid = jobs_start_bash(env->jobs, full, cwd, timeout_ms, NULL, ctx ? ctx->intent : NULL, jrun, notify);
+        /* tells the model which output reaches it before the command ends */
+        if (notify) strvec_push_own(&notices, xasprintf("Output lines matching /%s/ arrive as follow-ups while it runs.", notify));
         background_result(out, jid, NULL, &notices, tsec);
         free(jid);
         goto done;
@@ -1228,17 +1262,27 @@ char *bash_tool_description(bool has_eval, bool pty_ok) {
     return r;
 }
 
-json_t *bash_tool_schema(void) {
+/* bashSchema*: pty only with an interactive UI or launch (a service keeps it), `notify` with async or launch, the
+ * service fields with launch */
+json_t *bash_tool_schema(bool pty_ok) {
     bool async_on = settings_bool("async.enabled", true), launch = settings_bool("launch.enabled", true);
     sb_t b = SB_INIT;
     sb_append(&b, "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},"
                   "\"timeout\":{\"type\":\"number\",\"description\":\"" BASH_TIMEOUT_DESC "\"},"
-                  "\"cwd\":{\"type\":\"string\"},\"pty\":{\"type\":\"boolean\"}");
+                  "\"cwd\":{\"type\":\"string\"}");
+    if (launch || pty_ok) sb_append(&b, ",\"pty\":{\"type\":\"boolean\"}");
     if (async_on) sb_append(&b, ",\"async\":{\"type\":\"boolean\"}");
+    if (async_on || launch) sb_append(&b, ",\"notify\":{\"type\":\"string\"}");
     if (launch)
-        sb_append(&b, ",\"name\":{\"type\":\"string\",\"maxLength\":48},\"ready\":{\"type\":\"object\",\"properties\":{"
-                      "\"log\":{\"type\":\"string\"},\"port\":{\"type\":\"number\"},\"host\":{\"type\":\"string\"},"
-                      "\"timeout\":{\"type\":\"number\"}},\"additionalProperties\":false}");
+        sb_append(&b, ",\"name\":{\"type\":\"string\",\"pattern\":\"^(?:\\\\s*|[A-Za-z0-9][A-Za-z0-9._-]{0,47})$\","
+                      "\"description\":\"starts a long-lived supervised service under this name; omit for finite commands, async "
+                      "jobs included. 1-48 of [A-Za-z0-9._-]\"},"
+                      "\"ready\":{\"type\":\"object\",\"properties\":{"
+                      "\"log\":{\"type\":\"string\",\"description\":\"regex an output line matches once the service is ready\"},"
+                      "\"port\":{\"type\":\"number\",\"description\":\"TCP port the service accepts connections on once ready\"},"
+                      "\"host\":{\"type\":\"string\",\"description\":\"host for the port probe; default localhost (127.0.0.1 and ::1)\"},"
+                      "\"timeout\":{\"type\":\"number\",\"description\":\"seconds to wait for readiness; default 30\"}},"
+                      "\"description\":\"service readiness; needs log or port\",\"additionalProperties\":false}");
     sb_append(&b, "},\"required\":[\"command\"],\"additionalProperties\":false}");
     json_t *s = json_parse_str(sb_cstr(&b));
     sb_free(&b);
@@ -1247,7 +1291,7 @@ json_t *bash_tool_schema(void) {
 
 agent_tool_t *tool_bash_new(tool_env_t *env) {
     char *desc = bash_tool_description(python_available(), pty_available(env));
-    agent_tool_t *t = agent_tool_new("bash", "Bash", desc, bash_tool_schema(), bash_execute);
+    agent_tool_t *t = agent_tool_new("bash", "Bash", desc, bash_tool_schema(pty_available(env)), bash_execute);
     t->exclusive = true;
     free(desc);
     t->ud = env;
@@ -1557,6 +1601,10 @@ static int wait_run(agent_tool_t *self, tool_ctx_t *ctx, tool_env_t *env, tool_r
         }
         if (jobs && jobs_undelivered(jobs)) {
             wake = WAKE_JOB;
+            break;
+        }
+        if (jobs && jobs_has_notices(jobs)) { /* hasBackgroundCompletions: a queued notice injects right after */
+            wake = WAKE_STEER;
             break;
         }
         if (service_running && !running && jobs_running_all(jobs) == jobs_running(jobs)) {

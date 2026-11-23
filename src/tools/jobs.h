@@ -28,9 +28,15 @@ void jobs_set_notify(jobs_t *j, void (*fn)(void *ud), void *ud);
 char *job_command_identity(const char *command);    /* commandIdentity (owned) */
 char *job_escape_harness_tags(const char *text);    /* escapeHarnessTags (owned) */
 struct toolcmd_run;
-/* run: the call's tool commands (owned by the job, ended when its shell run ends; NULL: none) */
+/* run: the call's tool commands (owned by the job, ended when its shell run ends; NULL: none); notify: a `notify` regex
+ * (already validated) whose matching output lines queue as notices while it runs */
 char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent,
-                      struct toolcmd_run *run);
+                      struct toolcmd_run *run, const char *notify);
+/* `notify` batches (notify.h): queue one (service watchers), peek, take (each entry's `running` set now; owned, NULL
+ * when none). Queuing wakes the session like a settled job and ends a blocked wait. */
+void jobs_queue_notice(jobs_t *j, json_t *entry);
+bool jobs_has_notices(jobs_t *j);
+json_t *jobs_take_notices(jobs_t *j);
 /* generic job of `type` ("task", "service", ...). id_hint NULL => bg_N; a taken id gets a -N suffix.
  * agent_id: subagent behind a task job (NULL otherwise). hidden: never listed (service watchers).
  * ud_free (may be NULL) releases ud after the job is reaped. Returns the owned job id. */

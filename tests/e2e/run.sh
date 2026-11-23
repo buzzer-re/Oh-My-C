@@ -65,6 +65,12 @@ check "intent stripped" "Tool said: hi-intent"           "$B" --model mock/mock-
 check "bash cd hoist"  "Tool said: Working directory does not exist: /nonexistent-omc-cd" "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd && echo hi"}'
 check "bash cd semi"   "after-cd"                         "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /nonexistent-omc-cd; echo after-cd"}'
 check "bash cd root"   "Tool said: /"                     "$B" --model mock/mock-1 -p 'call:bash:{"command":"cd /; pwd"}'
+# bash `notify` (omp ab21189ab7): matching output of a background job arrives as an async-notify follow-up and ends a
+# blocked wait; a bad regex fails the call; cd targets the shell expands stay in the command (omp 25ba9cbe22)
+NOTIFYQ='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; print("\n".join((m["content"] if isinstance(m["content"],str) else "".join(b.get("text","") for b in m["content"])) for m in r[-1]["messages"] if m["role"] in ("user","tool")))'
+check "bash notify"    $'Wait interrupted by message.\n<system-notice>\nBackground job bg_1 (echo start; echo ERROR one; sleep 2) is still running. Its output matched /ERROR/:\nERROR one\n</system-notice>'  bash -c "'$B' --model mock/mock-1 --no-session -p 'seq:[[\"bash\",{\"command\":\"echo start; echo ERROR one; sleep 2\",\"notify\":\"ERROR\"}],[\"wait\",{}]]' >/dev/null 2>&1 </dev/null; python3 -I -c '$NOTIFYQ' '$T/req.jsonl'"
+check "bash notify bad" "Invalid notify regex: "  "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"true","notify":"(unclosed"}'
+check "bash cd glob"   "Tool said: /"  "$B" --model mock/mock-1 --no-session -p 'call:bash:{"command":"cd /* 2>/dev/null; cd /; pwd"}'
 # tool commands: discoverable tools run as bash commands (`<tool> --help`, `<tool> args`, `-j` JSON), recorded on the
 # bash result as details.toolCommands; doc topics are help://<tool>/<topic> (omp de21c0ac45)
 tc() { python3 -I -c 'import json,shlex,sys; print("call:bash:"+json.dumps({"command": sys.argv[1]+" -j "+shlex.quote(sys.argv[2])}))' "$1" "$2"; }
@@ -559,7 +565,7 @@ check "plan approval entry" '"mode":"none","data":{"approvedPlanFilePath":"local
 check "plan propose off" 'No plan is awaiting approval' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B"
 check "plan ends at new"  'plan new ok' python3 -I "$ROOT/tests/e2e/plan_new_rpc.py" "$B"
 # --plan-yolo: plan phase first, approved on the first propose, then implemented on the hand-off model
-check "plan yolo"      '"tool": "propose"}} Plan approved. Implementing now with mock-1.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-yolo --plan-yolo-into mock/mock-1
+check "plan yolo"      '"wallTimeNoticeEmitted": false} Plan approved. Implementing now with mock-1.' python3 -I "$ROOT/tests/e2e/plan_rpc.py" "$B" --plan-yolo --plan-yolo-into mock/mock-1
 check "plan yolo into" '--plan-yolo-into requires --plan-yolo' "$B" --model mock/mock-1 --plan-yolo-into mock/mock-1 -p hi
 check "plan yolo model" 'Model "nope/none" not found' "$B" --model mock/mock-1 --plan-yolo --plan-yolo-into nope/none -p hi
 check "rpc btw"        "btw ok"                   python3 -I "$ROOT/tests/e2e/rpc_btw.py" "$B"
@@ -846,7 +852,8 @@ grep -q '"requestedModel": "gpt-5.4", "maxMode": false, "parameters": \[{"id": "
 grep -q '"modelDetails": "gpt-5.4-high"' "$T/cursor.jsonl" && echo "   ok  cursor model details" || { echo "   FAIL cursor model details"; fail=1; }
 grep -q '"clientVersion": "cli-2026.09.02-c22c1a3", "clientType": "cli", "streaming": "true"' "$T/cursor.jsonl" \
     && echo "   ok  cursor client headers" || { echo "   FAIL cursor client headers"; fail=1; }
-grep -q '"requestContext": {"tools": \[[^]]*"write"' "$T/cursor.jsonl" && echo "   ok  cursor request context" || { echo "   FAIL cursor request context"; fail=1; }
+# the built-in bash rides along with the pi-agent tools: staged previews resolve through its commands (omp de21c0ac45)
+grep -q '"requestContext": {"tools": \[[^]]*"bash"' "$T/cursor.jsonl" && echo "   ok  cursor request context" || { echo "   FAIL cursor request context"; fail=1; }
 grep -q '"originalRequestId": "[0-9a-f-]\{36\}"' "$T/cursor.jsonl" && echo "   ok  cursor retry original id" || { echo "   FAIL cursor retry original id"; fail=1; }
 # Cursor login hook (deep-control browser login polled with the PKCE verifier) and token refresh, against the mock
 CAUTH=(env HOME="$T" OMC_TEST_CURSOR_API="http://127.0.0.1:$CPORT" OMC_NO_BROWSER=1)

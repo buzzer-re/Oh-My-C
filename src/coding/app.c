@@ -24,6 +24,7 @@
 #include "tools/approval.h"
 #include "tools/artifacts.h"
 #include "tools/jobs.h"
+#include "tools/notify.h"
 #include "coding/jobcaption.h"
 #include "tools/patch.h"
 #include "tools/toolcmd.h"
@@ -263,6 +264,27 @@ static json_t *job_batch_details(const json_t *done) {
     return d;
 }
 
+/* buildAsyncNotifyBatchMessage: the queued `notify` batches as one `async-notify` custom message (shown, agent-attributed) */
+static char *notify_text(app_t *a, json_t **details) {
+    json_t *entries = jobs_take_notices(a->env->jobs);
+    char *txt = notify_build_message(entries, details);
+    json_free(entries);
+    return txt;
+}
+
+static json_t *notify_message(app_t *a) {
+    json_t *details = NULL;
+    char *txt = notify_text(a, &details);
+    if (!txt) return NULL;
+    json_t *m = msg_user_text(txt);
+    json_set_bool(m, "synthetic", true);
+    json_set_str(m, "customType", "async-notify");
+    json_set_str(m, "attribution", "agent");
+    json_set(m, "details", details);
+    free(txt);
+    return m;
+}
+
 static json_t *job_results_message(app_t *a) {
     json_t *done = jobs_take_finished(a->env->jobs);
     if (!json_len(done)) {
@@ -352,6 +374,11 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
     if (ev->type == AGENT_EV_TOOL_END) app_plan_note_tool_end(a, ev->tool_name, ev->result, ev->is_error);
     guards_on_event(a, ev); /* tool-call loop redirect at the turn end, ahead of async results */
     if (ev->type == AGENT_EV_TURN_END) prewalk_on_turn_end(a, ev);
+    /* `notify` matches inject ahead of results at the same boundary (registered first in omp's yield queue) */
+    if (ev->type == AGENT_EV_TURN_END && a->env && jobs_has_notices(a->env->jobs)) {
+        json_t *m = notify_message(a);
+        if (m) agent_steer(a->agent, m);
+    }
     if (ev->type == AGENT_EV_TURN_END && a->env && jobs_undelivered(a->env->jobs)) {
         json_t *m = job_results_message(a);
         if (m) agent_steer(a->agent, m);
@@ -2546,8 +2573,17 @@ bool app_set_advisor(app_t *a, bool on) {
 }
 
 char *app_job_results_text(app_t *a) {
+    json_t *nd = NULL;
+    char *ntxt = notify_text(a, &nd); /* a job's matches read before its result */
+    json_free(nd);
     json_t *done = jobs_take_finished(a->env->jobs);
     char *txt = json_len(done) ? jobs_render_results(done) : NULL;
+    if (ntxt) {
+        char *both = txt ? xasprintf("%s\n\n%s", ntxt, txt) : xstrdup(ntxt);
+        free(ntxt);
+        free(txt);
+        txt = both;
+    }
     json_free(a->job_batch);
     a->job_batch = json_len(done) ? job_batch_details(done) : NULL;
     json_free(done);
@@ -2594,7 +2630,7 @@ char *app_after_run(app_t *a, const json_t *run_messages, const char *prev_type,
         while (mono_ms() < deadline && !agents_has_pending(a) &&
                !jobs_wait_any(a->env->jobs, NULL, MIN(500, MAX(1, deadline - mono_ms()))) && jobs_running(a->env->jobs)) {}
     }
-    if (jobs_undelivered(a->env->jobs) || agents_has_pending(a)) {
+    if (jobs_undelivered(a->env->jobs) || jobs_has_notices(a->env->jobs) || agents_has_pending(a)) {
         char *t = app_job_results_text(a);
         if (t) {
             *custom_type = "async-result";

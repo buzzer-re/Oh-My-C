@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include "jobs.h"
 #include "toolcmd.h"
+#include "notify.h"
 #include "jobtext.h"
 #include "tools.h"
 #include "artifacts.h"
@@ -317,6 +318,8 @@ typedef struct {
     void *fwd_ud;
     streams_t *streams;
     struct toolcmd_run *tc_run; /* the run's tool commands (owned: ended with the shell run; NULL: none) */
+    notifier_t *notifier;       /* `notify` matches reported while it runs (NULL: none) */
+    char *notify_pattern;
 } bashx_t;
 
 struct job {
@@ -348,6 +351,7 @@ struct jobs {
     void (*notify)(void *ud);
     void *notify_ud;
     strvec_t services;
+    json_t *notices; /* queued `notify` batches (async-notify entries) */
 };
 
 jobs_t *jobs_new(void) {
@@ -367,6 +371,8 @@ void jobs_set_notify(jobs_t *j, void (*fn)(void *ud), void *ud) {
 static void bashx_free(bashx_t *b) {
     if (!b) return;
     if (b->tc_run) toolcmd_run_end(b->tc_run); /* a job that never ran */
+    notifier_free(b->notifier);
+    free(b->notify_pattern);
     free(b->cmd);
     free(b->cwd);
     proc_result_free(&b->res);
@@ -564,6 +570,7 @@ static void bash_out(void *ud, int stream, const char *data, size_t len) {
     pthread_mutex_lock(&b->fwd_mu);
     if (b->fwd) b->fwd(b->fwd_ud, stream, data, len);
     pthread_mutex_unlock(&b->fwd_mu);
+    if (b->notifier && !x->cancel) notifier_feed(b->notifier, data, len);
 }
 
 /* settled job text: omp's completed-result text plus its meta notice (#extractTextResult), captured
@@ -628,6 +635,9 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
     b->wall_ms = mono_ms() - t0;
     b->rc = rc;
     free(pre);
+    /* the result reports the last output: pending matches are dropped (OutputNotifier.stop) */
+    notifier_free(b->notifier);
+    b->notifier = NULL;
     if (b->tc_run) {
         toolcmd_run_end(b->tc_run);
         b->tc_run = NULL;
@@ -651,11 +661,77 @@ static bgjob_t *bash_job_new(jobs_t *j, const char *cmd, const char *cwd, int64_
     return x;
 }
 
+/* openAsyncNotify's channel: one batch of a job's matches queued for the session that started it */
+static void job_notify_emit(void *ud, json_t *lines, int64_t omitted, bool stopped) {
+    bgjob_t *x = ud;
+    jobs_t *j = x->owner;
+    json_t *e = json_obj();
+    pthread_mutex_lock(&j->mu);
+    json_set_str(e, "id", x->id ? x->id : "");
+    json_set_str(e, "type", "bash");
+    json_set_str(e, "command", x->bash->cmd);
+    json_set_str(e, "pattern", x->bash->notify_pattern ? x->bash->notify_pattern : "");
+    json_set(e, "lines", lines);
+    json_set_int(e, "omitted", omitted);
+    json_set_bool(e, "stopped", stopped);
+    if (!j->notices) j->notices = json_arr();
+    json_push(j->notices, e);
+    void (*fn)(void *) = j->notify;
+    void *ud2 = j->notify_ud;
+    pthread_cond_broadcast(&j->cv);
+    pthread_mutex_unlock(&j->mu);
+    if (fn) fn(ud2);
+}
+
+void jobs_queue_notice(jobs_t *j, json_t *entry) {
+    pthread_mutex_lock(&j->mu);
+    if (!j->notices) j->notices = json_arr();
+    json_push(j->notices, entry);
+    void (*fn)(void *) = j->notify;
+    void *ud = j->notify_ud;
+    pthread_cond_broadcast(&j->cv);
+    pthread_mutex_unlock(&j->mu);
+    if (fn) fn(ud);
+}
+
+bool jobs_has_notices(jobs_t *j) {
+    if (!j) return false;
+    pthread_mutex_lock(&j->mu);
+    bool r = json_len(j->notices) > 0;
+    pthread_mutex_unlock(&j->mu);
+    return r;
+}
+
+json_t *jobs_take_notices(jobs_t *j) {
+    if (!j) return NULL;
+    pthread_mutex_lock(&j->mu);
+    json_t *out = j->notices;
+    j->notices = NULL;
+    /* running is asked when the notice is built */
+    json_t *e;
+    json_arr_foreach(out, i, e) {
+        bool running = false;
+        if (str_eq(json_get_str(e, "type"), "bash")) {
+            for (size_t k = 0; k < j->v.n; k++)
+                if (str_eq(j->v.v[k]->id, json_get_str(e, "id"))) running = !j->v.v[k]->done;
+        } else {
+            running = json_get_bool(e, "running", false);
+        }
+        json_set_bool(e, "running", running);
+    }
+    pthread_mutex_unlock(&j->mu);
+    return out;
+}
+
 char *jobs_start_bash(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent,
-                      struct toolcmd_run *run) {
+                      struct toolcmd_run *run, const char *notify) {
     prune(j);
     bgjob_t *x = bash_job_new(j, cmd, cwd, timeout_ms, label, intent);
     x->bash->tc_run = run;
+    if (notify) { /* a job has a deadline: its allowance refills */
+        x->bash->notify_pattern = xstrdup(notify);
+        x->bash->notifier = notifier_new(notify, true, job_notify_emit, x);
+    }
     pthread_mutex_lock(&j->mu);
     x->id = assign_id(j, NULL);
     char *id = xstrdup(x->id);

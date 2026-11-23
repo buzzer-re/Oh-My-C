@@ -1527,7 +1527,7 @@ again:;
     free(r->prompt_id);
     r->prompt_id = NULL;
     /* a job may have settled between the run's last check and now: deliver it in this same thread */
-    char *late = jobs_undelivered(r->a->env->jobs) ? app_job_results_text(r->a) : NULL;
+    char *late = jobs_undelivered(r->a->env->jobs) || jobs_has_notices(r->a->env->jobs) ? app_job_results_text(r->a) : NULL;
     if (late) {
         r->text = late;
         r->hidden = "async-result";

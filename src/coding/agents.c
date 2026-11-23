@@ -670,7 +670,7 @@ static void settle_owned_jobs(app_t *child, volatile sig_atomic_t *cancel) {
         if (cancel && *cancel) return;
         const char *stop = json_get_str(last_assistant(child->agent->messages), "stopReason");
         if (str_eq(stop, "aborted")) return;
-        if (jobs_undelivered(jobs) > 0) {
+        if (jobs_undelivered(jobs) > 0 || jobs_has_notices(jobs)) {
             char *t = app_job_results_text(child);
             if (t) {
                 app_prompt_hidden(child, t, "async-result");

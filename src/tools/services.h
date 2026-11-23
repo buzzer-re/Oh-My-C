@@ -16,10 +16,10 @@ typedef struct {
 } service_ready_t;
 
 /* Start (or replace) service `name` in project `project` (the session cwd); waits for readiness when `ready` is
- * given. Snapshot: {name,state,pid,startedAt,readyAt?,exitedAt?,exitCode?,persist,detached}. */
+ * given; `notify` (a regex, NULL: none) reports matching log lines to the owner's session while it runs (notify.h). Snapshot: {name,state,pid,startedAt,readyAt?,exitedAt?,exitCode?,persist,detached}. */
 int services_start(jobs_t *owner, const char *project, const char *name, const char *command, const char *cwd, bool pty,
-                   const service_ready_t *ready, volatile sig_atomic_t *cancel, json_t **snapshot, bool *ready_timed_out,
-                   char **err);
+                   const service_ready_t *ready, const char *notify, volatile sig_atomic_t *cancel, json_t **snapshot,
+                   bool *ready_timed_out, char **err);
 json_t *services_list(const char *project);                   /* owned array of snapshots, by name */
 json_t *services_find(const char *project, const char *name); /* owned snapshot or NULL */
 char *services_status_line(const json_t *snap);               /* "<name> [service] — <state> — up 3s — pid N…" */

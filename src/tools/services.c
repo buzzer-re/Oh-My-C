@@ -1,6 +1,7 @@
 /* services.c - named long-lived bash services under detached supervisor processes (see services.h). */
 #define _GNU_SOURCE
 #include "services.h"
+#include "notify.h"
 #include "config/settings.h"
 
 #include "core/fs.h"
@@ -490,10 +491,50 @@ static bool port_open(const char *host, int port) {
 typedef struct {
     char *project, *name;
     int64_t started;
+    jobs_t *owner;
+    char *notify;          /* `notify` regex (NULL: none) */
+    notifier_t *notifier;  /* matches of the service log, reported to the owning session */
+    int64_t log_off;
 } watch_t;
+
+/* a service's batch: queued like a job's (queueServiceNotify) */
+static void watch_notify_emit(void *ud, json_t *lines, int64_t omitted, bool stopped) {
+    watch_t *w = ud;
+    json_t *s = services_find(w->project, w->name);
+    bool running = s && !services_state_terminal(json_get_str(s, "state"));
+    json_free(s);
+    json_t *e = json_obj();
+    json_set_str(e, "id", w->name);
+    json_set_str(e, "type", "service");
+    json_set_str(e, "pattern", w->notify ? w->notify : "");
+    json_set(e, "lines", lines);
+    json_set_int(e, "omitted", omitted);
+    json_set_bool(e, "stopped", stopped);
+    json_set_bool(e, "running", running);
+    jobs_queue_notice(w->owner, e);
+}
+
+/* feed the log bytes written since the last look */
+static void watch_feed_log(watch_t *w) {
+    if (!w->notifier) return;
+    char *path = services_log_path(w->project, w->name);
+    int fd = path ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    free(path);
+    if (fd < 0) return;
+    char buf[65536];
+    for (;;) {
+        ssize_t n = pread(fd, buf, sizeof buf, w->log_off);
+        if (n <= 0) break;
+        w->log_off += n;
+        notifier_feed(w->notifier, buf, (size_t)n);
+    }
+    close(fd);
+}
 
 static void watch_free(void *p) {
     watch_t *w = p;
+    notifier_free(w->notifier);
+    free(w->notify);
     free(w->project);
     free(w->name);
     free(w);
@@ -509,7 +550,9 @@ static char *watch_body(bgjob_t *job, void *ud, bool *failed) {
             *failed = false;
             return xasprintf("Service %s was replaced or removed.", w->name);
         }
+        watch_feed_log(w);
         if (services_state_terminal(json_get_str(s, "state"))) {
+            notifier_finish(w->notifier); /* the exit notice does not carry the output: the last matches go out */
             *failed = str_eq(json_get_str(s, "state"), "failed");
             char *st = services_status_line(s);
             char *r = xasprintf("%s (exit %lld). Read proc://%s for its output.", st, (long long)json_get_int(s, "exitCode", 0), w->name);
@@ -526,12 +569,17 @@ static char *watch_body(bgjob_t *job, void *ud, bool *failed) {
     }
 }
 
-static void start_watch(jobs_t *owner, const char *project, const char *name, int64_t started) {
+static void start_watch(jobs_t *owner, const char *project, const char *name, int64_t started, const char *notify) {
     if (!owner) return;
     watch_t *w = xcalloc(1, sizeof *w);
     w->project = xstrdup(project);
     w->name = xstrdup(name);
     w->started = started;
+    w->owner = owner;
+    if (notify) { /* no deadline: the burst once per start */
+        w->notify = xstrdup(notify);
+        w->notifier = notifier_new(notify, false, watch_notify_emit, w);
+    }
     char *label = xasprintf("service %s", name);
     char *hint = xasprintf("svc_%s", name);
     char *id = jobs_start(owner, "service", hint, label, name, true, watch_body, w, watch_free);
@@ -559,7 +607,7 @@ static void kill_service(const char *dir, json_t *spec, int64_t wait_ms) {
 }
 
 static int start_locked(jobs_t *owner, const char *project, const char *name, const char *command, const char *cwd, bool pty,
-                        bool persist, bool detached, const json_t *ready_spec, json_t **spec_out, char **err) {
+                        bool persist, bool detached, const json_t *ready_spec, const char *notify, json_t **spec_out, char **err) {
     char *dir = service_dir(project, name);
     fs_mkdir_p(dir, 0700);
     json_t *old = read_spec(dir);
@@ -588,7 +636,7 @@ static int start_locked(jobs_t *owner, const char *project, const char *name, co
     write_spec(dir, spec);
     if (owner) {
         jobs_own_service(owner, name);
-        start_watch(owner, project, name, json_get_int(spec, "startedAt", 0));
+        start_watch(owner, project, name, json_get_int(spec, "startedAt", 0), notify);
     }
     *spec_out = spec;
     free(dir);
@@ -596,8 +644,8 @@ static int start_locked(jobs_t *owner, const char *project, const char *name, co
 }
 
 int services_start(jobs_t *owner, const char *project, const char *name, const char *command, const char *cwd, bool pty,
-                   const service_ready_t *ready, volatile sig_atomic_t *cancel, json_t **snapshot, bool *ready_timed_out,
-                   char **err) {
+                   const service_ready_t *ready, const char *notify, volatile sig_atomic_t *cancel, json_t **snapshot,
+                   bool *ready_timed_out, char **err) {
     *snapshot = NULL;
     *ready_timed_out = false;
     *err = NULL;
@@ -605,6 +653,7 @@ int services_start(jobs_t *owner, const char *project, const char *name, const c
         *err = xstrdup("Service name must be 1-48 letters, numbers, dots, underscores, or hyphens");
         return -1;
     }
+    if (notify && !notify_pattern_ok(notify, err)) return -1;
     rx_t *rx = NULL;
     json_t *rspec = NULL;
     if (ready) {
@@ -633,7 +682,7 @@ int services_start(jobs_t *owner, const char *project, const char *name, const c
     pthread_mutex_lock(&g_mu);
     json_t *spec = NULL;
     /* startService: persist follows launch.persist (on for print, RPC and ACP runs; omp 5bc2903877) */
-    int rc = start_locked(owner, project, name, command, cwd, pty, settings_bool("launch.persist", false), false, rspec, &spec, err);
+    int rc = start_locked(owner, project, name, command, cwd, pty, settings_bool("launch.persist", false), false, rspec, notify, &spec, err);
     pthread_mutex_unlock(&g_mu);
     json_free(rspec);
     if (rc != 0) {
@@ -802,7 +851,7 @@ int services_mode(jobs_t *owner, const char *project, const char *name, const ch
                 char *command = xstrdup(json_get_str(spec, "command"));
                 char *cwd = xstrdup(json_get_str(spec, "cwd") ? json_get_str(spec, "cwd") : project);
                 json_t *ready = json_clone(json_get(spec, "ready"));
-                rc = start_locked(owner, project, name, command, cwd, false, true, true, ready, &nspec, err);
+                rc = start_locked(owner, project, name, command, cwd, false, true, true, ready, NULL, &nspec, err);
                 json_free(ready);
                 free(command);
                 free(cwd);
