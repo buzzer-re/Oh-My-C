@@ -140,10 +140,12 @@ The first request with a thinking level (`tp_stream`, from `ai_stream`) first le
   control (openai-completions: `reasoning_effort` × 6 + a plain request = 7 parallel requests); later batches run only
   when nothing was accepted (openai-completions: `openrouter` `reasoning.effort` × 6, `zai` `thinking`, `qwen`
   `enable_thinking`, `qwen-chat-template`, `chat-template` × 6 = 15; anthropic adaptive then budget; Google level then
-  budget; Responses has one). HTTP 400/422 rejects a tier; any other failure (auth, quota, 5xx, timeout) makes the
-  run inconclusive: nothing is saved and the next request probes again. The first accepted format wins with the
-  efforts it accepted; observed reasoning is `reasoningTokens` > 0 or a non-empty thinking block. With nothing
-  accepted but the control the verdict is `none`.
+  budget; Responses has one). HTTP 400/422 rejects a tier; any other failure (auth, quota, 5xx, timeout) is
+  inconclusive for that attempt's format only (omp 537c08fe41). A format whose own ladder finished with an acceptance
+  is saved with the efforts it accepted; an accepted format whose ladder did not finish serves the turn without being
+  saved; with nothing accepted and a ladder unfinished, the turn uses the first format not refused, minus the
+  efforts its probes refused, and the next request probes again. Observed reasoning is `reasoningTokens` > 0 or a
+  non-empty thinking block. With nothing accepted but the control the verdict is `none`.
 - **Cache**: `<agent dir>/thinking-capability.json`, `{"rows":[{provider_id, api, endpoint, wire_model_id,
   capability}]}`, mirroring omp's `thinking_capability` table in `models.db` (omc has no SQLite); `capability` is the
   same JSON text (`checkedAt` ms, `format`, `efforts`, `observed`, `attempts`). The endpoint is the base URL without
@@ -156,8 +158,8 @@ The first request with a thinking level (`tp_stream`, from `ai_stream`) first le
   `google-budget`) and the format's compat overrides (`thinkingFormat`, `reasoningDisableMode`, `supportsReasoning*`,
   toggle-only `omitReasoningEffort`; `none`: no reasoning params, `trustExplicitThinkingOnly`; Anthropic adaptive /
   `disabledThinking: omit`); limits, prices and kind stay. The request then clamps its level onto the learned ladder
-  (omp `clampThinkingLevelForModel`). An inconclusive run sends the request with the first format's hypothesis, so
-  the requested level still goes out.
+  (omp `clampThinkingLevelForModel`). A run that saved nothing sends the request with the format chosen above, so the
+  requested level still goes out and no refused dialect is repeated.
 - **Next start**: the catalog applies a fresh cached capability to every provisional row it loads (custom models,
   `catalog_register`; omp `#finalizeModels`), so the picker shows the learned ladder and no probe runs. Probes and the
   learned overlay never touch the session, its transcript or the TUI (omp logs only at debug level).
