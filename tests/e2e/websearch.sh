@@ -22,6 +22,12 @@ out=$(ws_search anthropic/claude-sonnet-4-5 "anthropic query" ANTHROPIC_API_KEY=
 req=$(ws_last)
 [[ "$out" == *"Anthropic answer about anthropic query"* && "$req" == *'"tools": [{"type": "web_search_20250305", "name": "web_search"}]'* && "$req" == *"/anthropic/v1/messages?beta=true"* ]] \
     && echo "   ok  web search: anthropic grounding" || { echo "   FAIL web search anthropic: $out / $req"; fail=1; }
+# a search backend must always search: the instruction rides on API-key requests too; a decline is reported (omp 88e412881e)
+[[ "$req" == *'Always call web_search at least once before answering'* ]] \
+    && echo "   ok  web search: anthropic search instruction" || { echo "   FAIL web search anthropic instruction: $req"; fail=1; }
+out=$(ws_search anthropic/claude-sonnet-4-5 "refuse me" ANTHROPIC_API_KEY=sk-ant-api-fake)
+[[ "$out" == *"claude-sonnet-4-5 declined the query (cyber safety classifier): Not this one."* ]] \
+    && echo "   ok  web search: anthropic refusal" || { echo "   FAIL web search anthropic refusal: $out"; fail=1; }
 out=$(ws_search openai/gpt-5.2 "openai query" OPENAI_API_KEY=sk-fake)
 req=$(ws_last)
 [[ "$out" == *"Responses answer about openai query"* && "$req" == *'"tool_choice": {"type": "web_search"}'* && "$req" == *'"include": ["web_search_call.action.sources"]'* ]] \

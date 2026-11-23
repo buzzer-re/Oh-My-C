@@ -2563,9 +2563,13 @@ json_t *provider_anthropic_stream_ex(const ai_model_t *m, const ai_context_t *ct
 
 /* ---------- hosted web search (coding-agent web/search/providers/anthropic.ts callSearch) ---------- */
 
+/* compat_detect.c (weak: the provider unit tests link without the catalog) */
+extern const json_t *compat_catalog_policy(const char *provider, const char *api, const char *id, const char *key)
+    __attribute__((weak));
+
 char *anthropic_search_request(const ai_model_t *m, const char *key, const char *query, const char *system_prompt,
-                               int64_t max_tokens, double temperature, const char *session_id, http_headers_t *h,
-                               char **url_out) {
+                               int64_t max_tokens, double temperature, const char *session_id, const char *search_instruction,
+                               http_headers_t *h, char **url_out) {
     bool oauth = anthropic_is_oauth_token(key);
     /* buildAnthropicAuthConfig: the model's base URL, else ANTHROPIC_BASE_URL, else the default */
     char *base = normalize_base_url(m->base_url);
@@ -2578,6 +2582,12 @@ char *anthropic_search_request(const ai_model_t *m, const char *key, const char 
     strvec_t betas = {0};
     if (oauth) claude_code_betas(&betas, true, true, false, true);
     beta_add(&betas, "web-search-2025-03-05");
+    /* server-side refusal fallback (fallbacks: "default", omp 88e412881e): only Anthropic's own endpoint runs the chain, and
+     * only models with a refusal classifier have targets to fall back to */
+    const json_t *targets =
+        compat_catalog_policy ? compat_catalog_policy(m->provider, m->api, m->id, "fallbackCreditTargets") : NULL;
+    bool server_fallback = official && json_len(targets) > 0;
+    if (server_fallback) beta_add(&betas, "server-side-fallback-2026-07-01");
     char *beta_hdr = strvec_join(&betas, ",");
     strvec_free(&betas);
     http_headers_t caller = {0};
@@ -2646,6 +2656,7 @@ char *anthropic_search_request(const ai_model_t *m, const char *key, const char 
     json_set_str(tool, "name", "web_search");
     json_push(tools, tool);
     json_set(body, "tools", tools);
+    if (server_fallback) json_set_str(body, "fallbacks", "default");
     /* resolveAnthropicMetadataUserId(sessionId, isOAuth, sessionId): API keys forward the session id verbatim */
     json_t *md = json_obj();
     if (session_id && *session_id) json_set_str(md, "user_id", session_id);
@@ -2670,7 +2681,11 @@ char *anthropic_search_request(const ai_model_t *m, const char *key, const char 
         json_set(id, "cache_control", e);
         json_push(sys, id);
     }
+    /* the search instruction (always search, keep operators as intent) on every request; extra instructions are trimmed */
     if (oauth) json_push(sys, text_block("You are a helpful AI assistant with web search capabilities."));
+    char *instr = search_instruction ? str_trim(search_instruction) : NULL;
+    if (instr && *instr) json_push(sys, text_block(instr));
+    free(instr);
     if (system_prompt && !str_blank(system_prompt)) json_push(sys, text_block(system_prompt));
     if (json_len(sys)) json_set(body, "system", sys);
     else json_free(sys);
