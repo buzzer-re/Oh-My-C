@@ -32,6 +32,12 @@ loop:
 agent_end(messages added in this run)
 ```
 
+- **Replay policy** (`agent_provider_replay`, replay-policy.ts): the request context (app.c's transform hook, after the
+  image placeholders) and the `/context` view drop API-level provider refusals (`stopReason` error with
+  `stopDetails.type` `refusal`/`sensitive`), and a provider-error placeholder result (`source: assistant_stop_error`)
+  replays only "Tool call was not executed because the provider stream ended with an error before the tool could run.";
+  the provider's text stays in `details.upstreamError` for the UI.
+
 - **Steering** (`agent_steer`) is delivered at the batch boundary, after the current turn's tools: the next turn opens
   (`turn_start`) and the steer is emitted into it. A steer queued while a batch runs (or while its calls were still
   streaming) never skips an already-emitted call (agent-loop.ts runTool, omp #10439): the expensive part, generating

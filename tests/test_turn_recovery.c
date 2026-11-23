@@ -5,6 +5,7 @@
 #include "ai/ai.h"
 #include "config/model_resolver.h"
 #include "session/session.h"
+#include "agent/agent.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -335,6 +336,33 @@ int main(void) {
         CHECK(c.thinking && !strcmp(c.thinking, "medium"));
         session_context_free(&c);
         json_free(path);
+    }
+
+    /* replay-policy.ts toProviderReplayMessage: refusals dropped, provider-error placeholders lose the error text */
+    {
+        json_t *msgs = json_parse_str(
+            "[{\"role\":\"user\",\"content\":\"hi\"},"
+            "{\"role\":\"assistant\",\"stopReason\":\"error\",\"stopDetails\":{\"type\":\"refusal\"},"
+            "\"errorMessage\":\"refused\",\"content\":[{\"type\":\"toolCall\",\"id\":\"c1\",\"name\":\"read\"}]},"
+            "{\"role\":\"toolResult\",\"toolCallId\":\"c1\",\"toolName\":\"read\",\"isError\":true,"
+            "\"content\":[{\"type\":\"text\",\"text\":\"Tool call was not executed because the provider stream ended with "
+            "an error before the tool could run: refused\"}],"
+            "\"details\":{\"__synthetic\":true,\"source\":\"assistant_stop_error\",\"upstreamError\":\"refused\"}},"
+            "{\"role\":\"assistant\",\"stopReason\":\"error\",\"errorMessage\":\"boom\",\"content\":[]}]");
+        json_t *rp = agent_provider_replay(msgs);
+        CHECK(rp && json_len(rp) == 3);
+        if (rp && json_len(rp) == 3) {
+            CHECK(!strcmp(json_get_str(json_at(rp, 1), "role"), "toolResult"));
+            CHECK(!strcmp(json_get_str(json_at(json_get(json_at(rp, 1), "content"), 0), "text"),
+                          "Tool call was not executed because the provider stream ended with an error before the tool could run."));
+            CHECK(!strcmp(json_get_str(json_get(json_at(rp, 1), "details"), "upstreamError"), "refused"));
+            CHECK(!strcmp(json_get_str(json_at(rp, 2), "errorMessage"), "boom")); /* a plain error turn stays */
+        }
+        json_free(rp);
+        json_t *plain = json_parse_str("[{\"role\":\"user\",\"content\":\"hi\"}]");
+        CHECK(agent_provider_replay(plain) == NULL);
+        json_free(plain);
+        json_free(msgs);
     }
 
     if (fails) fprintf(stderr, "%d failure(s)\n", fails);

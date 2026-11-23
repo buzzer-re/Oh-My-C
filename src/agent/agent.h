@@ -315,6 +315,13 @@ json_t *text_block(const char *text);
 json_t *image_block(const char *b64, const char *mime);
 /* last assistant message in an array (borrowed) */
 const json_t *last_assistant(const json_t *messages);
+/* replay-policy.ts toProviderReplayMessage: NULL when the message is replayed as is, AGENT_REPLAY_DROP for an API-level
+ * provider refusal (stopReason error, stopDetails refusal/sensitive), else an owned copy of a provider-error tool
+ * placeholder without the provider's error text */
+#define AGENT_REPLAY_DROP ((json_t *)(uintptr_t)1)
+json_t *agent_provider_replay_msg(const json_t *msg);
+/* filterProviderReplayMessages over a message array: NULL when nothing changes, else an owned copy */
+json_t *agent_provider_replay(const json_t *messages);
 /* the call is the only tool call of the latest assistant message (wait.ts isOnlyCallOfTurn) */
 bool agent_tool_call_alone(agent_t *a, const char *tool_call_id);
 

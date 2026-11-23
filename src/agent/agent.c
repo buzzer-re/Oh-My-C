@@ -465,6 +465,45 @@ const json_t *last_assistant(const json_t *messages) {
     return NULL;
 }
 
+/* replay-policy.ts PROVIDER_ERROR_NOT_EXECUTED_TEXT: the model-facing text of a provider-error placeholder (the
+ * provider's error, details.upstreamError, stays in the session for the UI) */
+static const char PROVIDER_ERROR_NOT_EXECUTED_TEXT[] =
+    "Tool call was not executed because the provider stream ended with an error before the tool could run.";
+
+json_t *agent_provider_replay_msg(const json_t *msg) {
+    const char *role = json_get_str(msg, "role");
+    if (str_eq(role, "assistant")) {
+        /* isProviderRefusalMessage */
+        const char *sd = json_get_str(json_get_obj(msg, "stopDetails"), "type");
+        bool refusal = str_eq(json_get_str(msg, "stopReason"), "error") && (str_eq(sd, "refusal") || str_eq(sd, "sensitive"));
+        return refusal ? AGENT_REPLAY_DROP : NULL;
+    }
+    if (!str_eq(role, "toolResult")) return NULL;
+    /* isProviderErrorPlaceholder: replaying a refusal explanation feeds the classifier its own verdict */
+    const json_t *d = json_get_obj(msg, "details");
+    if (!json_get_bool(d, "__synthetic", false) || !str_eq(json_get_str(d, "source"), "assistant_stop_error")) return NULL;
+    json_t *r = json_clone(msg);
+    json_t *c = json_arr();
+    json_push(c, text_block(PROVIDER_ERROR_NOT_EXECUTED_TEXT));
+    json_set(r, "content", c);
+    return r;
+}
+
+json_t *agent_provider_replay(const json_t *messages) {
+    json_t *out = NULL, *m;
+    json_arr_foreach((json_t *)messages, i, m) {
+        json_t *r = agent_provider_replay_msg(m);
+        if (!r && !out) continue;
+        if (!out) {
+            out = json_arr();
+            for (size_t k = 0; k < i; k++) json_push(out, json_clone(json_at(messages, k)));
+        }
+        if (r == AGENT_REPLAY_DROP) continue;
+        json_push(out, r ? r : json_clone(m));
+    }
+    return out;
+}
+
 /* ---------- events ---------- */
 
 static const char *ev_names[] = {"agent_start",   "agent_end",      "turn_start",           "turn_end",

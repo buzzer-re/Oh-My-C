@@ -790,9 +790,15 @@ static json_t *hook_transform_inner(void *ud, agent_t *ag, const json_t *message
 static json_t *hook_transform(void *ud, agent_t *ag, const json_t *messages) {
     json_t *r = hook_transform_inner(ud, ag, messages);
     json_t *o = omit_images_for_model(r ? r : messages, ag->model);
-    if (!o) return r;
+    if (o) {
+        json_free(r);
+        r = o;
+    }
+    /* sdk.ts filterProviderReplayMessages(convertToLlmWithBlockImages(...)) */
+    json_t *p = agent_provider_replay(r ? r : messages);
+    if (!p) return r;
     json_free(r);
-    return o;
+    return p;
 }
 
 static json_t *hook_transform_inner(void *ud, agent_t *ag, const json_t *messages) {
