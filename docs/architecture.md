@@ -161,7 +161,7 @@ usually because Bun, npm packages or Rust crates provide it in omp.
 | `text/walker.c`, `text/glob.c` | `crates/pi-walker`, ignore/globset in `crates/pi-natives` |
 | `text/search.c` | `crates/pi-natives` grep |
 | `text/yaml.c`, `config/yaml_file.c` | YAML parser used by `utils/src/yaml-config.ts` and frontmatter |
-| `text/htmlform.c` | `tui/src/html-form/{parse,data,paginate}.ts` and the linkedom/htmlparser2 `parseHTML` they run on (from-scratch tokenizer + tree builder) |
+| `text/htmlform.c` | `tui/src/html-form/{parse,data}.ts` and the linkedom/htmlparser2 `parseHTML` they run on (from-scratch tokenizer + tree builder) |
 | `text/fuzzy.c` | fzf-style scorer (omc-only; exercised by tests, not used at runtime) |
 | `img/img.c`, `png.c`, `jpeg.c`, `gif.c`, `webp.c`, `webp_enc.c`, `vp8*.c` | `Bun.Image` (libpng / libjpeg-turbo / giflib / libwebp inside Bun): from-scratch bounds-checked decoders (PNG all color types + Adam7, JPEG baseline/progressive, GIF first frame, WebP VP8/VP8L/ALPH), encoders (PNG, baseline JPEG, lossy WebP), separable resampling; header sniffing = `utils/src/mime.ts` `parseImageMetadata` |
 | `img/imgpipe.c` | `coding-agent/src/utils/image-resize.ts` (`resizeImage`, `formatDimensionNote`), `utils/image-loading.ts` (`loadImageInput`), `tui/src/chat/image-loading.ts` (`imageDecodeFailureReason`, size limits) |
