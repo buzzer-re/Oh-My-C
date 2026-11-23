@@ -2299,6 +2299,12 @@ void ui_chat_rebuild(ui_t *u) {
         json_free(msgs);
     }
     flush_pending_usage(u);
+    /* a compaction (or model / plan-mode switch) after the last assistant turn rewrote the prompt prefix: the next
+     * live turn's miss is expected (omp 5649620e0e nextCacheMissExplained) */
+    if (g_rt.pending_reset) {
+        json_free(g_last_usage);
+        g_last_usage = NULL;
+    }
     json_free(path);
     hmap_free(&pending, NULL);
     toolcard_set_replaying(false);
