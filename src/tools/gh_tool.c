@@ -1422,6 +1422,37 @@ static void op_pr_checkout(tool_env_t *env, const json_t *args, tool_result_t *o
 
 /* ---------- pr_push ---------- */
 
+/* prCheckoutBranch: the local branch `pr_checkout` made for `pr` (a number, `#N` or PR URL): `pr-N`, which its
+ * worktree holds; NULL otherwise */
+static char *pr_checkout_branch(const json_t *pr) {
+    const char *first = json_is_str(pr) ? json_sv(pr) : json_is_arr(pr) ? json_sv(json_at(pr, 0)) : NULL;
+    char *ref = first ? gh_norm_opt(first) : NULL;
+    if (!ref) return NULL;
+    const char *d = ref[0] == '#' ? ref + 1 : ref;
+    bool digits = *d != 0;
+    for (const char *p = d; *p; p++) digits &= isdigit((unsigned char)*p) != 0;
+    char *r = NULL;
+    if (digits) r = xasprintf("pr-%s", d);
+    else if (str_starts(ref, "https://")) { /* PR_URL_PATTERN: https://host/owner/repo/pull/N[/...] */
+        const char *p = ref + 8;
+        int slashes = 0;
+        const char *pull = NULL;
+        for (const char *q = p; *q; q++)
+            if (*q == '/' && ++slashes == 3) {
+                pull = q + 1;
+                break;
+            }
+        if (pull && str_starts(pull, "pull/") && isdigit((unsigned char)pull[5])) {
+            const char *n = pull + 5, *e = n;
+            while (isdigit((unsigned char)*e)) e++;
+            bool host_ok = strchr(p, '/') > p;
+            if (host_ok && (!*e || *e == '/')) r = xasprintf("pr-%.*s", (int)(e - n), n);
+        }
+    }
+    free(ref);
+    return r;
+}
+
 static void op_pr_push(tool_env_t *env, const json_t *args, tool_result_t *out) {
     char *root = git_repo_root(env->cwd);
     if (!root) {
@@ -1429,6 +1460,7 @@ static void op_pr_push(tool_env_t *env, const json_t *args, tool_result_t *out) 
         return;
     }
     char *local = opt_str(args, "branch");
+    if (!local) local = pr_checkout_branch(json_get(args, "pr"));
     if (!local) local = git_current_branch(root);
     char *lref = NULL, *head = NULL, *push_remote = NULL, *remote = NULL, *pr_url = NULL, *rurl = NULL, *cur = NULL;
     if (!local || !*local) {
