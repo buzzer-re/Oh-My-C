@@ -13,6 +13,7 @@
 
 #include "coding/agents.h"
 #include "tools/jobtext.h"
+#include "tui/agentcolor.h"
 #include "config/settings.h"
 #include "tui/keys.h"
 
@@ -1513,7 +1514,13 @@ static void render_entry(hub_t *h, const json_t *ref, bool selected, int width, 
     char *cursor = selected ? S(TUI_TC_ACCENT, sym("nav.cursor")) : xstrdup(" ");
     char *branch = h->tree ? tree_prefix(h, ref, max, false) : xstrdup("");
     char *id = one_line(json_get_str(ref, "id"));
-    char *sid = selected ? bold_fg(TUI_TC_ACCENT, id) : tui_bold(id);
+    char *sid;
+    if (selected) sid = bold_fg(TUI_TC_ACCENT, id);
+    else { /* the agent's identity colour (omp e696bb732b) */
+        char *col = tui_agent_colored(json_get_str(ref, "id"), id);
+        sid = tui_bold(col);
+        free(col);
+    }
     const char *st = json_get_str(ref, "status");
     char *gl = status_glyph(st);
     sb_t left = SB_INIT;

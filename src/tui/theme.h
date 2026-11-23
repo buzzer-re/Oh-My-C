@@ -68,6 +68,8 @@ typedef struct {
     int nspinner;
     bool spinner_custom; /* symbols.spinnerFrames override: wins over the preset's frames (omp getSpinnerFrames) */
     char ansi_fg[16][24]; /* foreground SGR per terminal.ansi slot; omitted slots use the terminal's palette */
+    int64_t ansi_rgb[16]; /* getAnsiHex: 0xRRGGBB per terminal.ansi slot the theme declares, -1 where it leaves it */
+    int64_t surface_rgb;  /* surfaceHex: terminal.background, else -1 (statusLineBg) */
 } tui_theme_t;
 
 /* Theme.ansiFg palette slots (ANSI_COLOR_INDEX) */

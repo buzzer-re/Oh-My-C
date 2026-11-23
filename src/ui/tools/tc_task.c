@@ -4,6 +4,7 @@
  * output and nested task trees are not ported (omc subagents do not produce them). */
 #include "ui/tools/tc.h"
 #include "tools/jobtext.h"
+#include "tui/agentcolor.h"
 
 #include "tui/ansi.h"
 #include "tui/markdown.h"
@@ -195,7 +196,20 @@ static char *agent_row(const json_t *p, int width, int spinner, bool frozen, boo
     }
     *desc_shown = shown;
     char *title;
-    if (live && shown) {
+    /* the agent's identity colour on its name (omp e696bb732b); a frozen snapshot of a live row stays dim */
+    const char *identity = live && frozen ? NULL : json_get_str(p, "id");
+    if (identity) {
+        char *bi = shown ? tc_bold(id) : xstrdup(id);
+        char *name = tui_agent_colored(identity, bi);
+        if (shown) {
+            char *c = tc_fg(name_color, ":"), *d = tc_fg(name_color, desc);
+            title = xasprintf("%s%s %s", name, c, d);
+            free(c);
+            free(d);
+            free(name);
+        } else title = name;
+        free(bi);
+    } else if (live && shown) {
         char *bi = tc_bold(id);
         char *a = tc_fg(name_color, bi), *c = tc_fg(name_color, ":"), *d = tc_fg(name_color, desc);
         title = xasprintf("%s%s %s", a, c, d);
@@ -446,14 +460,20 @@ static void agent_result(const json_t *r, bool expanded, int width, strvec_t *ou
         shown = tui_visible_width(p) <= width;
         free(p);
     }
-    char *tp;
+    /* the name keeps the agent's identity colour on finished rows (omp e77c4109a9) */
+    char *bi = shown ? tc_bold(id) : xstrdup(id);
+    char *tt = tui_agent_colored(json_get_str(r, "id"), bi);
+    free(bi);
     if (shown) {
-        char *bi = tc_bold(id);
-        tp = xasprintf("%s: %s", bi, desc);
-        free(bi);
-    } else tp = xstrdup(id);
+        char *dp = xasprintf(": %s", desc);
+        char *dd = tc_fg(success && !needs_warning ? TUI_TC_TEXT : TUI_TC_ACCENT, dp);
+        char *t2 = xasprintf("%s%s", tt, dd);
+        free(tt);
+        free(dd);
+        free(dp);
+        tt = t2;
+    }
     char *ic = tc_fg(color, icon);
-    char *tt = tc_fg(success && !needs_warning ? TUI_TC_TEXT : TUI_TC_ACCENT, tp);
     sb_t line = SB_INIT;
     sb_appendf(&line, "%s %s%s", ic, tt, badges);
     stat_run(&line, r);
@@ -495,7 +515,6 @@ static void agent_result(const json_t *r, bool expanded, int width, strvec_t *ou
     free(du);
     free(tt);
     free(ic);
-    free(tp);
     free(desc);
     free(badges);
     free(rb);

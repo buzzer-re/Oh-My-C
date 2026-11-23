@@ -196,6 +196,11 @@ shapes: `box`, `band` (default), `claude`, `pi`, `borderless`, `rule`, `field`, 
   diff-added colors toward blue (`ui/appearance.c`).
 - `color.c`: OKLCH/HSV math and the per-session accent color derived from the title (omp
   `utils/color.ts`, `theme/session-color.ts`).
+- `agentcolor.c`: agent identity colours (omp `overlays/agent-identity.ts`): Main is the accent; subagents take
+  up to six colours in arrival order (creation time), from the optional `subagent1..6` theme tokens (a declared
+  `subagentN` keeps slot N), then the theme's `terminal.ansi` hues, then accent-derived hues, then a fixed palette,
+  each 3:1 on the terminal background and the Task card tints and 0.10 apart in OKLab. Task progress/result rows and
+  the agent hub list colour agent names with it.
 - `symbols.c`: glyph presets `unicode` (default), `nerd`, `ascii` and spinner frames, read from
   `assets/tui/symbols.json` (generated from omp's `symbols.ts`). Code uses `tui_sym("status.success")`
   with omp's key names, never literal glyphs.

@@ -1,4 +1,5 @@
 /* agents.c - agent registry, task spawns, peer messaging, agent:// and history:// (see agents.h). */
+#include "tui/agentcolor.h"
 #include "agents.h"
 
 #include "app.h"
@@ -1198,6 +1199,7 @@ static aref_t *new_ref(tool_env_t *env, const spawn_spec_t *spec, char **err) {
     }
     json_set_str(r->progress, "id", id);
     vec_push(&g_refs, r);
+    tui_agent_note_arrival(id, r->started_at); /* name colours follow arrival order (omp 87c9959fe1) */
     if (spec->card) task_card_set_id(spec->card, spec->card_index, id, false);
     pthread_mutex_unlock(&g_mu);
     free(base);

@@ -199,6 +199,7 @@ static void resolve_ansi_palette(tui_theme_t *t, const json_t *terminal, const j
     const json_t *ansi = terminal ? json_get(terminal, "ansi") : NULL;
     for (int i = 0; i < 16; i++) {
         snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", i);
+        t->ansi_rgb[i] = -1;
         const json_t *v = json_is_arr(ansi) ? json_at(ansi, (size_t)i) : NULL;
         for (int depth = 0; v && json_is_str(v) && depth < 8; depth++) {
             const char *s = json_sv(v);
@@ -209,6 +210,7 @@ static void resolve_ansi_palette(tui_theme_t *t, const json_t *terminal, const j
             } else if (parse_hex(s, &r, &g, &b)) {
                 if (t->mode == TUI_COLOR_TRUECOLOR) snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;2;%d;%d;%dm", r, g, b);
                 else snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", tui_rgb_to_256(r, g, b));
+                t->ansi_rgb[i] = (r << 16) | (g << 8) | b;
                 v = NULL;
             } else {
                 v = vars ? json_get(vars, s) : NULL;
@@ -216,8 +218,28 @@ static void resolve_ansi_palette(tui_theme_t *t, const json_t *terminal, const j
         }
         if (v && json_is_num(v)) {
             int idx = (int)json_d2i(v->u.num.d);
-            if (idx >= 0 && idx <= 255) snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", idx);
+            if (idx >= 0 && idx <= 255) {
+                snprintf(t->ansi_fg[i], sizeof t->ansi_fg[i], "\x1b[38;5;%dm", idx);
+                t->ansi_rgb[i] = tui_palette_rgb(idx);
+            }
         }
+    }
+    /* terminal.background: the surface the theme was made for */
+    t->surface_rgb = -1;
+    const json_t *bgv = terminal ? json_get(terminal, "background") : NULL;
+    for (int depth = 0; bgv && depth < 8; depth++) {
+        int r, g, b;
+        if (json_is_num(bgv)) {
+            int idx = (int)json_d2i(bgv->u.num.d);
+            if (idx >= 0 && idx <= 255) t->surface_rgb = tui_palette_rgb(idx);
+            break;
+        }
+        if (!json_is_str(bgv) || !*json_sv(bgv)) break;
+        if (parse_hex(json_sv(bgv), &r, &g, &b)) {
+            t->surface_rgb = (r << 16) | (g << 8) | b;
+            break;
+        }
+        bgv = vars ? json_get(vars, json_sv(bgv)) : NULL;
     }
 }
 

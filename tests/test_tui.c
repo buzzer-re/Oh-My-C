@@ -12,6 +12,8 @@
 #include "tui/render.h"
 #include "tui/term.h"
 #include "tui/theme.h"
+#include "tui/agentcolor.h"
+#include "tui/color.h"
 #include "tui/symbols.h"
 
 #include <fcntl.h>
@@ -1971,7 +1973,38 @@ static void test_pending_bullet(void) {
     }
 }
 
+/* agent identity colours (omp agent-identity.ts); the titanium palette is the one omp 19.1.0 drew for
+ * tests/tui/specs/task.json side by side */
+static void test_agent_colors(void) {
+    tui_theme_t *ti = tui_theme_builtin("titanium", TUI_COLOR_TRUECOLOR);
+    CHECK(ti != NULL);
+    if (!ti) return;
+    uint32_t main_rgb, sub[6];
+    size_t n = tui_agent_palette(ti, &main_rgb, sub);
+    static const uint32_t WANT[6] = {0x00ff88, 0xf0c040, 0xd06fed, 0x13d1cd, 0xe69dfc, 0x75efea};
+    CHECK(n == 6 && main_rgb == tui_theme_rgb(ti, TUI_TC_ACCENT));
+    for (size_t i = 0; i < n && i < 6; i++) CHECK(sub[i] == WANT[i]);
+    /* a declared subagentN keeps slot N; generated colours fill the rest in order */
+    ti->rgb[TUI_TC_SUBAGENT3] = 0x123456;
+    n = tui_agent_palette(ti, &main_rgb, sub);
+    CHECK(n == 6 && sub[2] == 0x123456 && sub[0] == WANT[0] && sub[1] == WANT[1]);
+    ti->rgb[TUI_TC_SUBAGENT3] = -1;
+    /* arrival order by creation time, Main is the accent, the seventh subagent reuses the first */
+    tui_agent_note_arrival("late", 20);
+    tui_agent_note_arrival("early", 10);
+    CHECK(tui_agent_color(ti, "early") == WANT[0] && tui_agent_color(ti, "late") == WANT[1]);
+    CHECK(tui_agent_color(ti, "Main") == main_rgb);
+    for (int i = 0; i < 4; i++) {
+        char id[8];
+        snprintf(id, sizeof id, "x%d", i);
+        tui_agent_color(ti, id);
+    }
+    CHECK(tui_agent_color(ti, "x4") == WANT[0]);
+    tui_theme_free(ti);
+}
+
 int main(void) {
+    test_agent_colors();
     test_cooked_enter();
     test_pending_bullet();
     test_colorful_markdown();

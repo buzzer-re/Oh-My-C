@@ -36,5 +36,8 @@ const char *tui_rgb_fg(const tui_theme_t *th, uint32_t rgb, char *buf, size_t n)
 
 /* Stable accent color for a session title on the given theme (upstream getSessionAccentHex). */
 uint32_t tui_session_accent(const char *name, const tui_theme_t *th);
+/* getSessionAccentHexAt: the hue at `fraction` (0..1) of the wide (dark-theme) arc; `surface_luminance` < 0 for dark
+ * themes (clamped lightness), else the light surface it must reach 3:1 against */
+uint32_t tui_session_accent_at(double fraction, const tui_theme_t *th, double surface_luminance);
 
 #endif
