@@ -31,18 +31,13 @@ curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh |
 ./install.sh --build                # the same, from a clone
 ```
 
-On Windows 10/11 (x64), paste this into PowerShell. It installs the release's `omc.exe` the same way, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\Programs\omc`, and offers to add it to your PATH. omc's bash tool runs Git for Windows' bash when it's installed, PowerShell otherwise. See [docs/windows.md](docs/windows.md).
+On Windows (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1 | iex
 ```
 
-To pass options, run it as a script block: `-Lib` also installs `libomc.dll`, and `-Build` compiles it from source (it needs MinGW-w64 in WSL or MSYS2):
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1))) -Lib
-.\install.ps1 -Build -Source .      # from a clone
-```
+More options in [docs/windows.md](docs/windows.md).
 
 ### Updating
 
@@ -102,8 +97,7 @@ commands with `omc_send()` and receive the responses and agent events through on
 `omc_prompt()` runs a turn synchronously, `omc_register_tool()` adds native tools implemented by your
 app, and `omc_main()` runs the whole CLI/TUI in-process. You can check `examples/embed.c` for an example.
 
-On Windows, `make WINDOWS=1 lib` (or `install.ps1 -Lib`) gives `libomc.dll` with its import library, a static
-`libomc.a`, a `.def` for MSVC and `omc.h`; link with `-lomc`. See [docs/windows.md](docs/windows.md#libomc-on-windows).
+On Windows it's `libomc.dll`, see [docs/windows.md](docs/windows.md#libomc-on-windows).
 
 ## Documentation
 
