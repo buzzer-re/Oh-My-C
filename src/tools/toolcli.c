@@ -526,7 +526,7 @@ typedef struct {
     char *err; /* usage error (owned) */
 } perr_t;
 
-static void usage_err(perr_t *e, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void usage_err(perr_t *e, const char *fmt, ...) PRINTF_LIKE(2, 3);
 static void usage_err(perr_t *e, const char *fmt, ...) {
     if (e->err) return;
     va_list ap;

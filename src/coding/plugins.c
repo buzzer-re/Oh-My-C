@@ -102,7 +102,7 @@ static char *project_registry_path(const char *cwd) {
             git_anchor = xstrdup(dir);
             break;
         }
-        if (!strcmp(dir, "/")) break;
+        if (path_is_root(dir)) break;
         char *p = path_dirname(dir);
         free(dir);
         dir = p;
@@ -119,7 +119,7 @@ static char *project_registry_path(const char *cwd) {
             free(git_anchor);
             return r;
         }
-        if (!strcmp(dir, "/")) break;
+        if (path_is_root(dir)) break;
         char *p = path_dirname(dir);
         free(dir);
         dir = p;

@@ -408,6 +408,9 @@ static void test_session_concurrent_reads(void) {
  * never ends up with a hole in its parent chain (omp #rewriteRequired / onPersistenceError) */
 static void test_session_write_failure(void) {
     if (geteuid() == 0) return; /* root writes through file modes */
+#ifdef _WIN32
+    return; /* a directory has no write permission bit to take away (chmod 0555) */
+#endif
     char tmpl[] = "/tmp/omc-tree-XXXXXX";
     char *dir = mkdtemp(tmpl);
     CHECK(dir != NULL);

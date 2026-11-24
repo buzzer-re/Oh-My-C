@@ -450,7 +450,14 @@ static void test_walker(const char *root) {
     /* symlink loop with follow */
     char *lnk = path_join(root, "src/sub/loop");
     char *target = path_join(root, "src");
-    CHECK(symlink(target, lnk) == 0, "symlink");
+    int sl = symlink(target, lnk);
+#ifdef _WIN32
+    if (sl != 0 && errno == EPERM) { /* no Developer Mode / privilege: Windows creates no symlinks */
+        fprintf(stderr, "  symlink checks skipped (symlinks need Developer Mode or admin on Windows)\n");
+        goto no_symlink;
+    }
+#endif
+    CHECK(sl == 0, "symlink");
     memset(&o, 0, sizeof(o));
     o.follow_symlinks = true;
     CHECK(walk_collect(root, &o, &l) == 0, "walk follow");
@@ -462,6 +469,9 @@ static void test_walker(const char *root) {
     CHECK(l.n == 1 && list_has(&l, "src/sub/loop") && l.v[0].is_link, "unfollowed symlink reported as link");
     walk_list_free(&l);
     unlink(lnk);
+#ifdef _WIN32
+no_symlink:
+#endif
     free(lnk);
     free(target);
 

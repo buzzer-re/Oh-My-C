@@ -9,6 +9,9 @@ make lib             # optional: build/libomc.a, build/libomc.so.0, build/omc.pc
 make install         # installs ~/.local/bin/omc (PREFIX defaults to $HOME/.local)
 make install-lib     # installs PREFIX/include/omc.h, PREFIX/lib/libomc.{a,so*}, PREFIX/lib/pkgconfig/omc.pc
 make clean
+make windows         # build/omc.exe, cross-built with MinGW-w64 (= make WINDOWS=1; see windows.md)
+make WINDOWS=1 lib   # build/windows/libomc.{dll,dll.a,a,def}, omc.pc (linking: windows.md "libomc on Windows")
+make WINDOWS=1 dist  # build/dist/omc-<version>-windows-x86_64.zip (+ .sha256), the asset install.ps1 downloads
 ```
 
 Variables: `CC`, `OPT` (default `-O2`), `CFLAGS` (default `$(OPT) -g`), `PKG` (pkg-config),
@@ -87,7 +90,8 @@ What is embedded and why:
 
 ## Dev-time tools (`build-tools/`)
 
-Only `embedgen.c` takes part in the build. The rest regenerate committed assets from an upstream
+Only `embedgen.c` takes part in the build (and `zipdir.py`, which packs the Windows release zip for `make WINDOWS=1
+dist`). The rest regenerate committed assets from an upstream
 checkout. They are run by hand when omp is updated, and the binary never runs them:
 
 | Tool | Regenerates | Notes |
@@ -120,6 +124,9 @@ update procedure.
 `build/libomc.syms` is generated from the `OMC_API` declarations in `include/omc.h`. To add a public
 function, declare it there with `OMC_API` and nothing else changes.
 
+On Windows (`make WINDOWS=1 lib`) the same list becomes `build/windows/libomc.def`, the DLL's exports; the files and
+how to link them with MinGW or MSVC are in [windows.md](windows.md#libomc-on-windows).
+
 ```sh
 cc app.c $(pkg-config --cflags --libs omc)
 cc app.c -Iinclude build/libomc.a -lssl -lcrypto -lz -lpthread -lm
@@ -140,7 +147,8 @@ carries `struct_size` so that new option fields can be added without breaking th
 
 ## Platforms
 
-omc builds on Linux (glibc or musl; GCC or Clang) and macOS (Apple Clang).
+omc builds on Linux (glibc or musl; GCC or Clang), macOS (Apple Clang) and Windows 10 1809+ x64 (MinGW-w64,
+cross-built from Linux/WSL or native in MSYS2; see [windows.md](windows.md)).
 
 - **Build tree per platform:** objects, the embed generator, generated sources and test binaries go to
   `build/obj/<uname -s>-<uname -m>/`, so one checkout can be shared between machines (e.g. a macOS host
@@ -156,3 +164,9 @@ omc builds on Linux (glibc or musl; GCC or Clang) and macOS (Apple Clang).
   missing include there only fails on a Mac. `build-tools/check_apple.sh` compiles those branches
   syntax-only with `-D__APPLE__` (implicit declarations are errors, unused variables warnings); run it
   after touching any `__APPLE__` code.
+- **Windows:** `make WINDOWS=1` force-includes `src/plat/win/posix.h` into every file and adds the
+  `src/plat/win/` layer, which stands in for POSIX, OpenSSL (Schannel/CNG) and zlib, so the binary imports only
+  system DLLs. Objects go to `build/obj/Windows-x86_64/`, `make WINDOWS=1 lib` writes `build/windows/libomc.{a,dll,dll.a}`
+  and `omc.pc`, and `make WINDOWS=1 test-build` adds the unit tests, `tests/windows/conpty_drive.exe` and the embed
+  examples. `MINGW` is the tool prefix (default `x86_64-w64-mingw32-`, the `-posix` gcc when present), `HOSTCC` builds
+  the embed generator. Code under `#ifdef _WIN32` must keep the zero-warning rule in both builds.

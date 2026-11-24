@@ -320,7 +320,7 @@ char *ui_double_tap_hint(const char *key);
 /* $VISUAL / $EDITOR on a temp file with the TUI stopped (interactive.c); owned result, NULL when it failed or
  * exited non-zero; *no_editor when none is configured */
 char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_editor);
-char *ui_editor_command(void); /* getEditorCommand: trimmed $VISUAL, else $EDITOR; owned or NULL */
+char *ui_editor_command(void); /* getEditorCommand: trimmed $VISUAL, else $EDITOR, else notepad on Windows; owned or NULL */
 /* openEditorOnPath: `ed` on `path` with the TUI handed over; the editor's exit code (-1 when it did not start) */
 int ui_editor_on_path(ui_t *u, const char *ed, const char *path);
 /* move.c: the /move overlay (move-overlay.ts); done(dir or NULL on cancel) runs once on the UI thread */

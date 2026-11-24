@@ -32,7 +32,13 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define UNUSED(x) ((void)(x))
 
-#if defined(__GNUC__)
+#if defined(__GNUC__) && defined(_WIN32)
+/* MinGW: `printf` names the Microsoft CRT's format checker; omc builds with the C99 stdio (__USE_MINGW_ANSI_STDIO) */
+#define PRINTF_LIKE(f, a) __attribute__((format(gnu_printf, f, a)))
+#define NORETURN __attribute__((noreturn))
+#define LIKELY(x) __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#elif defined(__GNUC__)
 #define PRINTF_LIKE(f, a) __attribute__((format(printf, f, a)))
 #define NORETURN __attribute__((noreturn))
 #define LIKELY(x) __builtin_expect(!!(x), 1)

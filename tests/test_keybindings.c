@@ -96,9 +96,7 @@ int main(void) {
     free(yml);
 
     tui_keybindings_free(kb);
-    char *cmd = xasprintf("rm -rf '%s'", root);
-    CHECK(system(cmd) == 0);
-    free(cmd);
+    CHECK(fs_rm_rf(root) == 0);
     free(a);
     free(b);
     free(c);

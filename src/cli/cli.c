@@ -32,6 +32,9 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <sys/wait.h>
+#endif
 
 /* ---------- shared helpers ---------- */
 
@@ -49,8 +52,21 @@ static void restart_exec(const char *resume) {
     vec_push(&argv, NULL);
     fflush(stdout);
     fflush(stderr);
+#ifdef _WIN32
+    /* no exec on Windows: the new omc runs on this console while this one waits, then leaves with its status */
+    {
+        omc_win_spawn_opts_t so = {.exe = n ? exe : NULL, .fd_in = OMC_WIN_INHERIT, .fd_out = OMC_WIN_INHERIT, .fd_err = OMC_WIN_INHERIT};
+        int pid = omc_win_spawn(argv.v, &so);
+        if (pid > 0) {
+            int st = 0;
+            while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+            exit(WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
+        }
+    }
+#else
     if (n) execv(exe, argv.v);
     else execvp(CLI_BIN, argv.v);
+#endif
     char *m = xasprintf("Restart exec failed: %s", strerror(errno));
     cli_err_line(m);
     free(m);
@@ -315,7 +331,7 @@ int cmd_version_raw(int argc, char **argv) {
 /* resolveReadPath's CLI subset: `~` expansion, then resolved against the cwd */
 static char *resolve_file_arg(const char *arg) {
     char *e = path_expand_home(arg);
-    if (e[0] == '/') return e;
+    if (path_is_absolute(e)) return e;
     char *cwd = get_cwd();
     char *abs = path_join(cwd, e);
     char *norm = path_normalize(abs);
@@ -1097,6 +1113,14 @@ static void install_crash_handler(void) {
 }
 
 int omc_main(int argc, char **argv) {
+#ifdef _WIN32
+    omc_win_init();
+    /* the detached supervisor of a background service (tools/services.c; fork stands in for it on POSIX) */
+    if (argc >= 3 && !strcmp(argv[1], "__omc_service_supervisor")) {
+        extern int services_supervisor_main(const char *dir);
+        return services_supervisor_main(argv[2]);
+    }
+#endif
     /* a session tool command run inside a bash call (toolcmd.h): hand it to the omc process, nothing else */
     if (argc >= 2 && !strcmp(argv[1], "__tool-command")) return toolcmd_client_main(argc, argv);
     proc_ignore_sigpipe();

@@ -572,11 +572,20 @@ static void write_row(tui_term_t *tm, const char *line, int width) {
         if (*p >= 0x80) {
             tui_term_puts(tm, "\x1b[0m\x1b[K");
             tui_term_puts(tm, line);
+#ifdef _WIN32
+            tui_term_puts(tm, "\r"); /* see below */
+#endif
             return;
         }
     }
     tui_term_puts(tm, line);
     if (tui_visible_width(line) < width) tui_term_puts(tm, "\x1b[K");
+#ifdef _WIN32
+    /* omp #lineRewriteSequence (#9783): every rewrite ends at column zero. ConPTY materializes a full row's pending
+     * wrap before the next cursor move even with autowrap off; on the bottom row that is an untracked scroll that
+     * leaks the status line and borders into the transcript. */
+    tui_term_puts(tm, "\r");
+#endif
 }
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }

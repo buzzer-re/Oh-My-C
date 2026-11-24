@@ -1671,7 +1671,7 @@ static char *normalize_hashline_path(const char *raw, const char *cwd) {
     free(t);
     char *cleaned = xstrdup(strip_apply_patch_noise(u));
     free(u);
-    if (!cwd || cleaned[0] != '/') return cleaned;
+    if (!cwd || !path_is_absolute(cleaned)) return cleaned;
     char *pn = path_abs(cleaned, "/");
     char *cn = path_abs(cwd, "/");
     size_t cl = strlen(cn);

@@ -86,7 +86,7 @@ static void load_file(ssh_hosts_t *out, const char *path) {
         char *key = jstr_exp(h, "keyPath");
         if (!key) key = jstr_exp(h, "key");
         if (key && key[0] == '~' && (key[1] == '/' || !key[1])) {
-            char *k2 = xasprintf("%s%s", env_get("HOME") ? env_get("HOME") : "", key + 1);
+            char *k2 = xasprintf("%s%s", home_env() ? home_env() : "", key + 1);
             free(key);
             key = k2;
         }

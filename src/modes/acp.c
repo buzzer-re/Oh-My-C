@@ -149,7 +149,7 @@ static void reply_internal(const json_t *id, const char *details) {
     reply_error(id, -32603, "Internal error", d);
 }
 
-static void reply_internalf(const json_t *id, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void reply_internalf(const json_t *id, const char *fmt, ...) PRINTF_LIKE(2, 3);
 static void reply_internalf(const json_t *id, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -366,7 +366,9 @@ static bool has_text(const json_t *content, const char *text) {
 
 /* ---------- event mapper (acp-event-mapper.ts) ---------- */
 
-static bool is_command_tool(const char *t) { return str_eq(t, "bash") || str_eq(t, "shell") || str_eq(t, "exec"); }
+static bool is_command_tool(const char *t) {
+    return str_eq(t, "bash") || str_eq(t, "powershell") || str_eq(t, "shell") || str_eq(t, "exec");
+}
 
 /* mapToolKind */
 static const char *tool_kind(const char *name, const json_t *args) {
@@ -1301,7 +1303,7 @@ static tool_gate_t gate_decide(asess_t *s, app_t *app, const json_t *call, const
     if (!approval_acp_tool_gated(name)) return TOOL_ALLOW;
     /* default-config sessions still ask for executable calls even though the schema defaults to yolo; explicit
      * yolo is an intentional opt-in (a non-allow tools.approval.<tool> keeps the gate) */
-    if (!str_eq(name, "bash") && explicit_auto_approve(app)) {
+    if (!str_eq(name, "bash") && !str_eq(name, "powershell") && explicit_auto_approve(app)) {
         json_t *pol = json_get(settings_get("tools.approval"), name);
         if (!json_truthy(pol) || (json_is_str(pol) && !strcmp(json_sv(pol), "allow"))) return TOOL_ALLOW;
     }
@@ -1309,7 +1311,7 @@ static tool_gate_t gate_decide(asess_t *s, app_t *app, const json_t *call, const
     char *restricted = approval_restricted_reason(&c, settings_get("tools.restrictedFolders"), app->cwd);
     bool cacheable = restricted == NULL; /* a restricted call is approved per call */
     free(restricted);
-    if (str_eq(name, "bash")) {
+    if (str_eq(name, "bash") || str_eq(name, "powershell")) {
         approval_ctx_t ctx;
         approval_ctx_from_settings(&ctx, app->opts.auto_approve, app->session ? session_id(app->session) : NULL, app->cwd);
         if (ctx.mode == AMODE_YOLO && !explicit_auto_approve(app)) ctx.mode = AMODE_ALWAYS_ASK;
@@ -1356,10 +1358,10 @@ static tool_gate_t gate_decide(asess_t *s, app_t *app, const json_t *call, const
     json_t *tc = json_obj();
     json_set_str(tc, "toolCallId", json_get_str(call, "id"));
     json_set_str(tc, "title", title);
-    if (str_eq(name, "bash")) json_set_str(tc, "kind", "execute");
+    if (str_eq(name, "bash") || str_eq(name, "powershell")) json_set_str(tc, "kind", "execute");
     json_set_str(tc, "status", "pending");
     json_set(tc, "rawInput", args ? json_clone(args) : json_obj());
-    const char *cmd = str_eq(name, "bash") ? json_get_str(args, "command") : NULL;
+    const char *cmd = str_eq(name, "bash") || str_eq(name, "powershell") ? json_get_str(args, "command") : NULL;
     if (cmd && *cmd) {
         char *t = xasprintf("$ %s", cmd);
         json_t *content = json_arr();
@@ -2601,7 +2603,7 @@ static char *find_stored(acp_t *a, const char *id, const char *cwd) {
 /* ---------- requests ---------- */
 
 static bool absolute_cwd(const json_t *id, const char *cwd) {
-    if (cwd && cwd[0] == '/') return true;
+    if (cwd && path_is_absolute(cwd)) return true;
     reply_internalf(id, "ACP cwd must be absolute: %s", cwd ? cwd : "undefined");
     return false;
 }

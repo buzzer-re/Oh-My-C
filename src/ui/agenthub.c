@@ -115,7 +115,11 @@ static char *local_datetime(int64_t ms) {
     time_t t = (time_t)(ms / 1000);
     struct tm tm;
     localtime_r(&t, &tm);
+#ifdef _WIN32
+    long off = (long)(_mkgmtime(&tm) - t) / 60; /* no tm_gmtoff: local wall time read as UTC, minus the instant */
+#else
     long off = tm.tm_gmtoff / 60;
+#endif
     char sign = off >= 0 ? '+' : '-';
     off = labs(off);
     return xasprintf("%04d-%02d-%02d %02d:%02d %c%02ld:%02ld", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
@@ -424,7 +428,7 @@ static char *activity_args_summary(const char *tool, const json_t *args) {
         return r;
     }
     if (str_eq(tool, "glob")) return (v = first_arg(args, PATH)) ? v : xstrdup("Map files");
-    if (str_eq(tool, "bash")) return (v = first_arg(args, CMD)) ? v : xstrdup("Run command");
+    if (str_eq(tool, "bash") || str_eq(tool, "powershell")) return (v = first_arg(args, CMD)) ? v : xstrdup("Run command");
     if (str_eq(tool, "write") || str_eq(tool, "edit"))
         return (v = first_arg(args, PATH)) ? v : xstrdup(str_eq(tool, "write") ? "Write files" : "Edit files");
     if (str_eq(tool, "wait")) return xstrdup("Waiting for background work or a peer");

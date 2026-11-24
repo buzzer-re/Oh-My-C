@@ -562,7 +562,7 @@ static json_t *load_images(const json_t *v, const char *cwd, char **err) {
             if (!*p) {
                 *err = xasprintf("invalid judgment image source: images[%zu] path must not be empty", i);
             } else {
-                char *abs = p[0] == '/' ? xstrdup(p) : p[0] == '~' ? xasprintf("%s%s", getenv("HOME") ? getenv("HOME") : "", p + 1)
+                char *abs = path_is_absolute(p) ? xstrdup(p) : p[0] == '~' ? xasprintf("%s%s", home_env() ? home_env() : "", p + 1)
                                                                    : xasprintf("%s/%s", cwd, p);
                 struct stat st;
                 if (stat(abs, &st) != 0 || !S_ISREG(st.st_mode)) {

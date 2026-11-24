@@ -1626,7 +1626,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         fresult_t *r = &results.v[hit_order.v[i]];
         const plan_t *pl = &files.v[r->f];
         const fentry_t *e = &entries.v[pl->node];
-        char *abs = strstr(e->rel, "://") || e->rel[0] == '/' ? xstrdup(e->rel) : path_join(root, e->rel);
+        char *abs = strstr(e->rel, "://") || path_is_absolute(e->rel) ? xstrdup(e->rel) : path_join(root, e->rel);
         char *rel = path_relative(env->cwd, abs);
         if (str_starts(rel, "..")) {
             free(rel);
@@ -1710,7 +1710,7 @@ static int find_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                 if (i >= per_file.v[f].n || added_total >= FIND_FALLBACK_ROWS) continue;
                 const fallback_row_t *r = &per_file.v[f].v[i];
                 const fentry_t *e = &entries.v[files.v[r->file].node];
-                char *abs = strstr(e->rel, "://") || e->rel[0] == '/' ? xstrdup(e->rel) : path_join(root, e->rel);
+                char *abs = strstr(e->rel, "://") || path_is_absolute(e->rel) ? xstrdup(e->rel) : path_join(root, e->rel);
                 char *rel = path_relative(env->cwd, abs);
                 if (str_starts(rel, "..")) {
                     free(rel);

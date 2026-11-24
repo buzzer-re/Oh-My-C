@@ -189,6 +189,17 @@ model, 120 columns unless noted):
 To refresh one: reproduce the screen with `compare.sh`, capture omp with `shot`, cut it with
 `mkgolden.py`, and confirm that omc's rendering matches before committing.
 
+## Windows (`tests/windows/`)
+
+`powershell -ExecutionPolicy Bypass -File tests/windows/run-tests.ps1 [-Build] [-Only names] [-Report file]` runs on
+Windows: every unit test executable, the CLI, print mode with the core tools against `tests/e2e/mock_openai.py`,
+sessions, parallel processes, both libomc builds, the TUI in a real console and through ConPTY
+(`tests/windows/conpty_drive.c`), the RPC driver and TLS (github.com and a self-signed `openssl s_server`). It prints
+PASS/FAIL/SKIP per check and writes a report file; everything runs in a throwaway HOME and agent dir. Needs Git for
+Windows and Python 3 (mock checks are skipped without it). Unit tests must not shell out to POSIX tools (`system("rm")`)
+or use positional printf arguments (`%1$s`, absent from MinGW printf); use `fs_rm_rf` and `str_replace`. See
+[windows.md](windows.md).
+
 ## Adding tests
 
 - **New module:** add `tests/test_<area>.c`, give it a `T_test_<area>` object list in the Makefile,

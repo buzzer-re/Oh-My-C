@@ -1,5 +1,6 @@
 /* tc_shell.c - bash tool card (port of omp tools/bash.ts createShellRenderer). */
 #include "ui/tools/tc.h"
+#include "core/fs.h"
 #include "tools/jobtext.h"
 #include "tui/symbols.h"
 #include "tui/markdown.h"
@@ -12,7 +13,7 @@
 /* `cd <dir> &&` prefix for a `cwd` arg outside/inside the project (formatToolWorkingDirectory) */
 static char *display_workdir(const char *workdir, const char *cwd) {
     if (!workdir || !*workdir) return NULL;
-    char *abs = workdir[0] == '/' || !cwd ? xstrdup(workdir) : xasprintf("%s/%s", cwd, workdir);
+    char *abs = path_is_absolute(workdir) || !cwd ? xstrdup(workdir) : xasprintf("%s/%s", cwd, workdir);
     size_t n = strlen(abs);
     while (n > 1 && abs[n - 1] == '/') abs[--n] = 0;
     if (cwd && !strcmp(abs, cwd)) {

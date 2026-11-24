@@ -29,7 +29,7 @@ static char *resolve_move_path(const char *input, const char *cwd) {
     char *r;
     if (!strcmp(t, "~")) r = xstrdup(home_dir());
     else if (str_starts(t, "~/")) r = path_join(home_dir(), t + 2);
-    else if (t[0] == '/') r = path_normalize(t);
+    else if (path_is_absolute(t)) r = path_normalize(t);
     else r = path_abs(t, cwd);
     free(t);
     return r;

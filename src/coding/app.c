@@ -1021,6 +1021,13 @@ static tool_gate_t hook_before_tool(void *ud, agent_t *ag, const json_t *call, c
         *reason = xstrdup("Plan mode is active: only the plan file (local://) may be edited.");
         return TOOL_BLOCK;
     }
+    /* the read-only check reads bash; a PowerShell command (the Windows powershell tool, or bash running PowerShell
+     * without a bash) cannot be vetted, so plan mode explores with the other tools */
+    if (str_eq(name, "powershell") || (str_eq(name, "bash") && proc_shell_is_powershell())) {
+        *reason = xstrdup("Plan mode is active: PowerShell commands cannot be checked for changes. Explore read-only with "
+                          "read, grep and glob.");
+        return TOOL_BLOCK;
+    }
     if (str_eq(name, "bash")) {
         const char *c = json_get_str(args, "command");
         if (c && cmd_mutates(c)) {

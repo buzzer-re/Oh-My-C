@@ -24,6 +24,9 @@ typedef struct {
     /* shell_run only: text run in the session shell right before the command file is sourced, on the wrapper line
      * (the command's own line numbers stay as written); the bash tool's tool-command functions */
     const char *shell_preamble;
+    /* shell_run / shell_exec_once only: the command is a PowerShell script, run in its own PowerShell process (the
+     * Windows `powershell` tool); implied when proc_shell_is_powershell() */
+    bool powershell;
 } proc_opts_t;
 
 typedef struct {
@@ -43,7 +46,18 @@ int proc_run(const char *const *argv, const proc_opts_t *opts, proc_result_t *re
 void proc_result_free(proc_result_t *r);
 /* convenience: run and return trimmed stdout or NULL on failure/non-zero */
 char *proc_capture(const char *const *argv, const char *cwd, int64_t timeout_ms);
-const char *proc_shell_path(void); /* bash if available, else /bin/sh */
+const char *proc_shell_path(void); /* bash if available, else /bin/sh (Windows: PowerShell) */
+/* Windows without a bash: proc_shell_path() is PowerShell (pwsh.exe, else Windows PowerShell 5.1) and commands are
+ * PowerShell scripts. Always false elsewhere. */
+bool proc_shell_is_powershell(void);
+/* PowerShell for proc_ps_argv: pwsh.exe when installed, else Windows PowerShell 5.1 (Windows; "pwsh" elsewhere) */
+const char *proc_powershell_path(void);
+/* The PowerShell script for `cmd`: the command, then an exit status like a shell's (`exit N` passes through; else 0
+ * when its last statement succeeded, the last native exit code or 1 when it failed). */
+char *proc_ps_script(const char *cmd);
+/* NULL-terminated argv running `script` (from proc_ps_script) in PowerShell with UTF-8 output and no progress bars.
+ * `file` names a .ps1 to write the script to (long scripts, true line numbers); NULL passes it on the command line. */
+strvec_t proc_ps_argv(const char *script, const char *file);
 const char *proc_shell_name(void); /* its name in the shell's own messages: `bash` (argv[0] when run through this path) */
 int proc_shell(const char *cmd, const proc_opts_t *opts, proc_result_t *res); /* bash -c / sh -c */
 /* run a shell command, return trimmed stdout if exit 0 (owned) else NULL */

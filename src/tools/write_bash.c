@@ -995,6 +995,10 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         tool_result_error(out, "command is required");
         return 0;
     }
+    /* the Windows `powershell` tool runs here too: one PowerShell process per call, in the foreground, without the
+     * bash-only parts (tool commands, shellCommandPrefix, client terminals, services, jobs); its schema has none of
+     * those arguments */
+    bool ps = str_eq(self->name, "powershell");
     bool launch = settings_bool("launch.enabled", true);
     bool async_on = settings_bool("async.enabled", true);
     const char *name = blank_null(json_get_str(args, "name"));
@@ -1002,6 +1006,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
      * background as `async` does */
     const char *notify = blank_null(json_get_str(args, "notify"));
     bool async_req = json_get_bool(args, "async", false) || (notify && !name);
+    if (ps) name = notify = NULL, async_req = false;
     strvec_t notices = {0};
     if (name) {
         if (!launch) {
@@ -1039,7 +1044,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
 
     /* models trained on Codex call the apply_patch tool as a shell command; omc ships no such program, so a patch given
      * that way goes to the tool (through its own approval) */
-    if (!name && ctx && ctx->agent && str_eq(env->edit_mode, "apply_patch")) {
+    if (!ps && !name && ctx && ctx->agent && str_eq(env->edit_mode, "apply_patch")) {
         bool is_call = false;
         char *patch = apply_patch_shell_input(command, &is_call);
         char *found = is_call ? which("apply_patch") : NULL;
@@ -1126,14 +1131,14 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         tool_result_error(out, "Working directory does not exist: %s", cwd);
         goto done;
     }
-    const char *prefix = settings_str("shellCommandPrefix", "");
+    const char *prefix = ps ? "" : settings_str("shellCommandPrefix", "");
     full = (prefix && *prefix) ? xasprintf("%s\n%s", prefix, cmd) : xstrdup(cmd);
     if (name) {
         bash_service(env, ctx, name, full, cwd, args, &notices, out);
         goto done;
     }
     /* tool commands exist only in the session shell: a line naming one never leaves it */
-    toolcmd_names(ctx ? ctx->agent : NULL, &tc_names);
+    if (!ps) toolcmd_names(ctx ? ctx->agent : NULL, &tc_names);
     {
         char *invoked = toolcmd_invoked(cmd, &tc_names);
         if (invoked && json_get_bool(args, "pty", false)) {
@@ -1177,7 +1182,7 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     bash_stream_t bs = {.ctx = ctx, .sink = out_sink_new(&so), .mu = PTHREAD_MUTEX_INITIALIZER};
     /* the client terminal (an ACP client advertising `terminal`) shows a live terminal card in the editor; it wins
      * over auto-backgrounding. PTY runs need the local terminal UI. */
-    if (!pty && env->bridge && env->bridge->run_terminal) {
+    if (!ps && !pty && env->bridge && env->bridge->run_terminal) {
         strvec_t targs = {0};
         const char *nologin = env_get("PI_BASH_NO_LOGIN");
         if (!nologin || !*nologin) nologin = env_get("CLAUDE_BASH_NO_LOGIN");
@@ -1191,7 +1196,16 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         const char *ushell = env_get("SHELL");
         if (sp && *sp) shell = xstrdup(sp);
         else if (ushell && (strstr(ushell, "bash") || strstr(ushell, "zsh")) && fs_is_exec(ushell)) shell = xstrdup(ushell);
-        else shell = xstrdup(proc_shell_path());
+        else if (proc_shell_is_powershell()) {
+            /* Windows without a bash: the client terminal runs the PowerShell command line */
+            char *script = proc_ps_script(full);
+            strvec_t pa = proc_ps_argv(script, NULL);
+            strvec_free(&targs);
+            shell = xstrdup(pa.v[0]);
+            for (size_t i = 1; i < pa.n && pa.v[i]; i++) strvec_push(&targs, pa.v[i]);
+            strvec_free(&pa);
+            free(script);
+        } else shell = xstrdup(proc_shell_path());
         tool_terminal_req_t req = {.command = shell, .args = &targs, .cwd = cwd, .timeout_ms = timeout_ms, .output_limit = 51200};
         tool_terminal_res_t tr = {.exit_code = -1};
         char *terr = NULL;
@@ -1222,14 +1236,14 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         proc_result_free(&r);
         goto done;
     }
-    bool persistent = settings_bool("bash.persistent", true);
+    bool persistent = !ps && settings_bool("bash.persistent", true);
     if (!pty && persistent) {
         pthread_mutex_lock(&env->mu);
         if (!env->shell) env->shell = shell_new();
         pthread_mutex_unlock(&env->mu);
     }
     int64_t cap = MIN(100, settings_int("async.maxJobs", 100));
-    bool auto_bg = !pty && env->jobs && async_on && settings_bool("bash.autoBackground.enabled", true) &&
+    bool auto_bg = !ps && !pty && env->jobs && async_on && settings_bool("bash.autoBackground.enabled", true) &&
                    (int64_t)jobs_running(env->jobs) < cap;
     if (tc_names.n && !pty) tc_run = toolcmd_run_begin(ctx, env);
     if (tc_run) {
@@ -1294,7 +1308,8 @@ static int bash_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
                          .use_pty = pty,
                          .cancel = ctx->cancel,
                          .on_output = bash_on_output,
-                         .ud = &bs};
+                         .ud = &bs,
+                         .powershell = ps};
         char *pre = tc_run ? toolcmd_run_preamble(tc_run) : NULL;
         o.shell_preamble = pre;
         int rc = (!pty && persistent) ? shell_run(env->shell, full, cwd, &o, &r) : shell_exec_once(full, &o, &r);
@@ -1400,7 +1415,21 @@ char *bash_tool_description(bool has_eval, bool pty_ok) {
     free(desc);
     /* "Persistent bash 5.3." names omp's engine; the real bash may be another release (macOS ships 3.2) */
     const char *ver = real_bash_version();
-    if (ver && !str_eq(ver, "5.3")) {
+    if (proc_shell_is_powershell()) {
+        /* Windows without a bash: the tool keeps its name and runs PowerShell, so the model must write PowerShell */
+        const char *sh = proc_shell_path(), *base = strrchr(sh, '/');
+        base = base ? base + 1 : sh;
+        bool pwsh = !strncasecmp(base, "pwsh", 4);
+        char *want = xasprintf("No bash on this system: commands run in %s (`%s`), a new process per call, so variables, "
+                               "functions and aliases do not carry over. Use PowerShell syntax and cmdlets; Unix tools are "
+                               "not installed.%s",
+                               pwsh ? "PowerShell 7" : "Windows PowerShell 5.1", pwsh ? "pwsh.exe" : "powershell.exe",
+                               pwsh ? "" : " No `&&`/`||` (use `A; if ($?) { B }`), no ternary, `??` or `?.`.");
+        char *v = str_replace(r, "Persistent bash 5.3.", want);
+        free(want);
+        free(r);
+        r = v;
+    } else if (ver && !str_eq(ver, "5.3")) {
         char *want = xasprintf("Persistent bash %s.", ver);
         char *v = str_replace(r, "Persistent bash 5.3.", want);
         free(want);
@@ -1437,8 +1466,45 @@ json_t *bash_tool_schema(bool pty_ok) {
     return s;
 }
 
+/* Windows next to Git Bash: PowerShell for what only it reaches. Not an omp tool; omc's addition for Windows. NULL when
+ * the bash tool runs PowerShell itself (no bash) or off Windows. */
+agent_tool_t *tool_powershell_new(tool_env_t *env) {
+#ifdef _WIN32
+    if (proc_shell_is_powershell()) return NULL;
+    const char *sh = proc_powershell_path(), *base = strrchr(sh, '/');
+    base = base ? base + 1 : sh;
+    bool pwsh = !strncasecmp(base, "pwsh", 4);
+    char *desc = xasprintf(
+        "%s (`%s`) for Windows-specific work: the registry, services, scheduled tasks, WMI/CIM, .NET, ACLs and file "
+        "attributes, Windows-only programs and installers. Use `bash` for everything else and whenever either would do.\n"
+        "A new process per call: variables, functions and `cd` do not carry over; pass `cwd` instead.\n%s",
+        pwsh ? "PowerShell 7" : "Windows PowerShell 5.1", pwsh ? "pwsh.exe" : "powershell.exe",
+        pwsh ? "" : "No `&&`/`||` (use `A; if ($?) { B }`), no ternary, `??` or `?.`; `>` writes UTF-16, so use "
+                    "`Out-File -Encoding utf8` or `Set-Content` for text files.\n");
+    json_t *schema = json_parse_str("{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},"
+                                    "\"timeout\":{\"type\":\"number\",\"description\":\"" BASH_TIMEOUT_DESC "\"},"
+                                    "\"cwd\":{\"type\":\"string\"}},\"required\":[\"command\"],\"additionalProperties\":false}");
+    agent_tool_t *t = agent_tool_new("powershell", "PowerShell", desc, schema, bash_execute);
+    t->exclusive = true;
+    free(desc);
+    t->ud = env;
+    return t;
+#else
+    (void)env;
+    return NULL;
+#endif
+}
+
 agent_tool_t *tool_bash_new(tool_env_t *env) {
     char *desc = bash_tool_description(python_available(), pty_available(env));
+#ifdef _WIN32
+    /* both shells on Windows: bash first, PowerShell for what only it does */
+    if (!proc_shell_is_powershell()) {
+        char *d2 = xasprintf("%s\nWindows: this is Git Bash; prefer it, and use `powershell` only for Windows-specific work.\n", desc);
+        free(desc);
+        desc = d2;
+    }
+#endif
     agent_tool_t *t = agent_tool_new("bash", "Bash", desc, bash_tool_schema(pty_available(env)), bash_execute);
     t->exclusive = true;
     free(desc);

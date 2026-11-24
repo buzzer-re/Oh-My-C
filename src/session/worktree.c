@@ -26,7 +26,7 @@ static char *abs_dir(const char *v) {
     }
     char *e = path_expand_home(t);
     free(t);
-    if (e[0] != '/') {
+    if (!path_is_absolute(e)) {
         free(e);
         return NULL;
     }

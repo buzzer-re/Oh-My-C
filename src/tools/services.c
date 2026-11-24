@@ -254,6 +254,7 @@ char *services_logs(const char *project, const char *name) {
 
 /* ---------- supervisor ---------- */
 
+#ifndef _WIN32
 static void put_num(char *buf, size_t *n, long long v) {
     char tmp[24];
     int k = 0;
@@ -266,6 +267,7 @@ static void put_num(char *buf, size_t *n, long long v) {
     if (neg) buf[(*n)++] = '-';
     while (k) buf[(*n)++] = tmp[--k];
 }
+#endif
 
 static void write_full(int fd, const char *p, size_t n) {
     while (n) {
@@ -285,6 +287,7 @@ static void write_full(int fd, const char *p, size_t n) {
 }
 
 /* runs in the forked supervisor: async-signal-safe calls only */
+#ifndef _WIN32
 static void supervise(pid_t child, int master, int fifofd, int logfd, const char *exit_path) {
     int status = 0;
     bool reaped = false;
@@ -325,6 +328,7 @@ static void supervise(pid_t child, int master, int fifofd, int logfd, const char
         close(fd);
     }
 }
+#endif
 
 static char **service_env(bool pty) {
     static const char *extra_pty[] = {"TERM=xterm-256color", "OMC=1", "PAGER=cat", "GIT_PAGER=cat", NULL};
@@ -347,6 +351,168 @@ static char **service_env(bool pty) {
     return env;
 }
 
+#ifdef _WIN32
+/* Windows: no fork, no fifo. The supervisor is omc itself (`omc __omc_service_supervisor <dir>`), started detached so it
+ * outlives this session. It runs the command (bash -c) in a job that ends with the supervisor, appends its output to
+ * <dir>/output.log (through a pseudo console when pty), feeds it what is appended to <dir>/stdin (a plain file here),
+ * and records "<child> <supervisor>" in <dir>/pids and "<code> <exitedAtMs>" in <dir>/exit. */
+char *su_self_exe(void);
+
+static int launch(const char *dir, const char *command, const char *cwd, bool pty, int64_t *child_pid, int64_t *sup_pid,
+                  char **err) {
+    char *logp = path_join(dir, "output.log"), *inp = path_join(dir, "stdin"), *exitp = path_join(dir, "exit"),
+         *pidp = path_join(dir, "pids"), *lp = path_join(dir, "launch.json");
+    unlink(exitp);
+    unlink(pidp);
+    int rc = -1;
+    json_t *l = json_obj();
+    json_set_str(l, "command", command);
+    if (cwd) json_set_str(l, "cwd", cwd);
+    json_set_bool(l, "pty", pty);
+    char *lt = json_dump(l, 0);
+    json_free(l);
+    char *self = su_self_exe();
+    if (fs_write(lp, lt, strlen(lt)) != 0 || fs_write(logp, "", 0) != 0 || fs_write(inp, "", 0) != 0) {
+        *err = xasprintf("cannot open service files: %s", strerror(errno));
+    } else if (!self) {
+        *err = xstrdup("failed to start the service supervisor");
+    } else {
+        char *argv[] = {self, "__omc_service_supervisor", (char *)dir, NULL};
+        omc_win_spawn_opts_t so = {.fd_in = -1, .fd_out = -1, .fd_err = -1, .detached = true};
+        if (omc_win_spawn(argv, &so) < 0) {
+            *err = xasprintf("spawn: %s", strerror(errno));
+        } else {
+            int64_t deadline = mono_ms() + 10000;
+            while (mono_ms() < deadline) {
+                char *t = fs_read(pidp, NULL);
+                long long c = 0, s = 0;
+                if (t && sscanf(t, "%lld %lld", &c, &s) == 2 && c > 0) {
+                    *child_pid = c;
+                    *sup_pid = s;
+                    rc = 0;
+                }
+                free(t);
+                if (rc == 0) break;
+                sleep_ms(20);
+            }
+            if (rc != 0) *err = xstrdup("failed to start the service supervisor");
+        }
+    }
+    free(self);
+    free(lt);
+    free(logp);
+    free(inp);
+    free(exitp);
+    free(pidp);
+    free(lp);
+    return rc;
+}
+
+int services_supervisor_main(const char *dir) {
+    char *lp = path_join(dir, "launch.json");
+    char *lt = fs_read(lp, NULL);
+    free(lp);
+    json_t *l = lt ? json_parse_str(lt) : NULL;
+    free(lt);
+    if (!l) return 1;
+    const char *command = json_get_str(l, "command");
+    if (!command) command = "";
+    const char *cwd = json_get_str(l, "cwd");
+    bool pty = json_get_bool(l, "pty", false);
+    char *logp = path_join(dir, "output.log"), *inp = path_join(dir, "stdin"), *exitp = path_join(dir, "exit"),
+         *pidp = path_join(dir, "pids");
+    int logfd = open(logp, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    const char *sh = proc_shell_path();
+    const char *name = proc_shell_name();
+    char *bargv[] = {(char *)name, "-c", (char *)command, NULL};
+    char *pbargv[] = {(char *)sh, "-c", (char *)command, NULL};
+    char **argv = bargv, **pargv = pbargv;
+    /* no bash: the service is a PowerShell command line */
+    strvec_t psv = {0};
+    char *script = NULL;
+    if (proc_shell_is_powershell()) {
+        script = proc_ps_script(command);
+        psv = proc_ps_argv(script, NULL);
+        argv = pargv = psv.v;
+    }
+    char **envp = service_env(pty);
+    int child = -1, in_w = -1, out_r = -1;
+    if (pty) {
+        child = omc_win_pty_spawn(pargv, cwd, envp, 160, 40, &in_w, &out_r);
+    } else {
+        int p[2];
+        if (pipe2(p, O_CLOEXEC) == 0) {
+            omc_win_spawn_opts_t so = {.exe = sh, .cwd = cwd, .envp = envp, .fd_in = p[0], .fd_out = logfd, .fd_err = logfd};
+            child = omc_win_spawn(argv, &so);
+            close(p[0]);
+            in_w = p[1];
+        }
+    }
+    free(envp);
+    strvec_free(&psv);
+    free(script);
+    if (child > 0) omc_win_job_kill_on_close(child);
+    char ids[64];
+    snprintf(ids, sizeof ids, "%d %d\n", child, (int)getpid());
+    fs_write_atomic(pidp, ids, strlen(ids), 0600);
+    int status = 127 << 8;
+    if (child > 0) {
+        if (out_r >= 0) fcntl(out_r, F_SETFL, O_NONBLOCK);
+        long long in_off = 0;
+        char buf[16384];
+        bool reaped = false;
+        while (!reaped) {
+            bool busy = false;
+            /* input appended to <dir>/stdin since the last look */
+            int fd = open(inp, O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                if (lseek(fd, in_off, SEEK_SET) == in_off) {
+                    ssize_t r;
+                    while ((r = read(fd, buf, sizeof buf)) > 0) {
+                        if (in_w >= 0) write_full(in_w, buf, (size_t)r);
+                        in_off += r;
+                        busy = true;
+                    }
+                }
+                close(fd);
+            }
+            if (out_r >= 0) {
+                ssize_t r;
+                while ((r = read(out_r, buf, sizeof buf)) > 0) {
+                    if (logfd >= 0) write_full(logfd, buf, (size_t)r);
+                    busy = true;
+                }
+            }
+            if (waitpid(child, &status, WNOHANG) == child) reaped = true;
+            else if (!busy) sleep_ms(50);
+        }
+        if (out_r >= 0) {
+            /* the pseudo console flushes what it still holds once it closes */
+            fcntl(out_r, F_SETFL, 0);
+            int64_t until = mono_ms() + 2000;
+            struct pollfd pf = {out_r, POLLIN, 0};
+            while (mono_ms() < until && poll(&pf, 1, 100) > 0) {
+                ssize_t r = read(out_r, buf, sizeof buf);
+                if (r <= 0) break;
+                if (logfd >= 0) write_full(logfd, buf, (size_t)r);
+            }
+        }
+    }
+    if (in_w >= 0) close(in_w);
+    if (out_r >= 0) close(out_r);
+    if (logfd >= 0) close(logfd);
+    char line[64];
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1;
+    snprintf(line, sizeof line, "%d %lld\n", code, (long long)now_ms());
+    fs_write(exitp, line, strlen(line));
+    free(logp);
+    free(inp);
+    free(exitp);
+    free(pidp);
+    json_free(l);
+    return 0;
+}
+#else
 static int launch(const char *dir, const char *command, const char *cwd, bool pty, int64_t *child_pid, int64_t *sup_pid,
                   char **err) {
     char *logp = path_join(dir, "output.log"), *fifop = path_join(dir, "stdin"), *exitp = path_join(dir, "exit");
@@ -459,6 +625,7 @@ out:
     free(exitp);
     return rc;
 }
+#endif
 
 static bool port_open(const char *host, int port) {
     struct addrinfo hints = {0}, *res = NULL;
@@ -811,7 +978,11 @@ int services_send(const char *project, const char *name, const char *content, js
     bool nl = n && (content[n - 1] == '\n' || content[n - 1] == '\r');
     char *data = nl ? xstrdup(content) : xasprintf("%s%s", content, json_get_bool(spec, "pty", true) ? "\r" : "\n");
     char *fifo = path_join(dir, "stdin");
+#ifdef _WIN32
+    int fd = open(fifo, O_WRONLY | O_APPEND | O_CLOEXEC); /* a plain file the supervisor reads on (see launch) */
+#else
     int fd = open(fifo, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+#endif
     int rc = 0;
     if (fd < 0) {
         *err = xasprintf("Cannot reach %s's stdin: %s", name, strerror(errno));

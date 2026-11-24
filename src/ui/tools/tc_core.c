@@ -349,7 +349,7 @@ char *tc_shorten_path(const char *p) {
 
 char *tc_rel_path(const char *p, const char *cwd) {
     if (!p) return xstrdup("");
-    if (cwd && p[0] == '/') {
+    if (cwd && path_is_absolute(p)) {
         size_t cl = strlen(cwd);
         if (!strncmp(p, cwd, cl) && p[cl] == '/') return xstrdup(p + cl + 1);
         if (!strcmp(p, cwd)) return xstrdup(".");

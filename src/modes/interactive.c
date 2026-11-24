@@ -1118,7 +1118,7 @@ static void plan_status(ui_t *u, const char *text) { add_notice(u, "info", text)
 
 /* $VISUAL / $EDITOR on a temp file with the TUI stopped (utils/external-editor.ts openInEditor); owned
  * result, NULL when unchanged / failed */
-/* getEditorCommand: $VISUAL, else $EDITOR (trimmed); owned, NULL when neither is set */
+/* getEditorCommand: $VISUAL, else $EDITOR (trimmed), else notepad on Windows; owned, NULL when none */
 char *ui_editor_command(void) {
     static const char *const names[] = {"VISUAL", "EDITOR"};
     for (size_t i = 0; i < ARRAY_LEN(names); i++) {
@@ -1128,7 +1128,11 @@ char *ui_editor_command(void) {
         if (*t) return t;
         free(t);
     }
+#ifdef _WIN32
+    return xstrdup("notepad"); /* always present in %SystemRoot%\System32 */
+#else
     return NULL;
+#endif
 }
 
 char *ui_external_edit(ui_t *u, const char *text, const char *ext, bool *no_editor) {
@@ -1171,6 +1175,19 @@ int ui_editor_on_path(ui_t *u, const char *ed, const char *path) {
     if (page) tui_alt_screen(u->tui, false);
     tui_term_stop(tui_term(u->tui));
     tui_term_set_loop_active(false);
+#ifdef _WIN32
+    /* resolveEditorSpawnCommand (win32): cmd.exe /d /s /c "<editor> "<file>"", the quotes passed verbatim (cmd strips the
+     * outer pair); the path with Windows separators, as path.join gives it there */
+    char *wpath = xstrdup(path);
+    for (char *c = wpath; *c; c++)
+        if (*c == '/') *c = '\\';
+    char *cmd = xasprintf("\"%s \"%s\"\"", ed, wpath);
+    free(wpath);
+    char *wargv[] = {"cmd.exe", "/d", "/s", "/c", cmd, NULL};
+    omc_win_spawn_opts_t so = {.fd_in = OMC_WIN_INHERIT, .fd_out = OMC_WIN_INHERIT, .fd_err = OMC_WIN_INHERIT, .verbatim = true};
+    pid_t pid = omc_win_spawn(wargv, &so);
+    int status = -1;
+#else
     /* resolveEditorSpawnCommand: sh -c '<editor> "$1"' sh <file>, stdio inherited from the pane */
     char *cmd = xasprintf("%s \"$1\"", ed);
     const char *argv[] = {"/bin/sh", "-c", cmd, "sh", path, NULL};
@@ -1180,6 +1197,7 @@ int ui_editor_on_path(ui_t *u, const char *ed, const char *path) {
         execv("/bin/sh", (char *const *)argv);
         _exit(127);
     }
+#endif
     if (pid > 0)
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
         }

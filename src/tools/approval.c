@@ -1221,7 +1221,7 @@ static void tool_decision_depth(const approval_call_t *c, approval_decision_t *o
         else strictest(ds, n, out);
         for (size_t i = 0; i < n; i++) approval_decision_free(&ds[i]);
         free(ds);
-    } else if (!strcmp(t, "bash")) {
+    } else if (!strcmp(t, "bash") || !strcmp(t, "powershell")) { /* the Windows powershell tool: bash.patterns apply */
         bash_decision(c, args, out);
     } else if (!strcmp(t, "glob")) { /* approved for where a `pattern` actually searches */
         json_t *g = json_obj();
@@ -1365,7 +1365,7 @@ static void push_tr(strvec_t *out, const char *label, const char *v) {
 static void details_raw(const approval_call_t *c, strvec_t *out) {
     const char *t = c->tool ? c->tool : "";
     const json_t *args = c->args;
-    if (!strcmp(t, "bash")) {
+    if (!strcmp(t, "bash") || !strcmp(t, "powershell")) {
         const char *cmd = json_get_str(args, "command");
         push_tr(out, "Command: ", cmd ? cmd : "(missing)");
     } else if (!strcmp(t, "write")) {
@@ -1452,7 +1452,7 @@ static void cache_targets_raw(const approval_call_t *c, strvec_t *out) {
         free(sel_less);
         if (!key) return;
         /* a directory read keys as the folder grant */
-        if (key[0] == '/' && !target_names_file(key)) {
+        if (path_is_absolute(key) && !target_names_file(key)) {
             char *dk = dir_key(key);
             free(key);
             key = dk;
@@ -1676,7 +1676,7 @@ void approval_ctx_from_settings(approval_ctx_t *ctx, bool auto_approve, const ch
 
 /* coveringFolderKey: a directory key is its own folder, an absolute file key its parent's */
 static char *covering_folder(const char *target) {
-    if (target[0] != '/') return NULL;
+    if (!path_is_absolute(target)) return NULL;
     if (str_ends(target, "/")) return xstrdup(target);
     char *parent = path_dirname(target);
     if (str_ends(parent, "/")) return parent;
@@ -1839,7 +1839,7 @@ char *approval_restricted_reason(const approval_call_t *c, const json_t *restric
             for (size_t i = 0; i < targets.n; i++) {
                 const char *tf = tree_folder_key(targets.v[i]);
                 const char *s = tf ? tf : targets.v[i];
-                if (s[0] != '/') continue;
+                if (!path_is_absolute(s)) continue;
                 strvec_push_own(&subj, cache_key_for_path(s));
                 vec_push(&rec, tf != NULL);
             }
@@ -2181,13 +2181,14 @@ approval_answer_t approval_answer_for_choice(const approval_prompt_t *p, const c
 /* ---------- ACP permission gate ---------- */
 
 bool approval_acp_tool_gated(const char *tool) {
-    return str_eq(tool, "bash") || str_eq(tool, "edit") || str_eq(tool, "delete") || str_eq(tool, "move");
+    return str_eq(tool, "bash") || str_eq(tool, "powershell") || str_eq(tool, "edit") || str_eq(tool, "delete") ||
+           str_eq(tool, "move");
 }
 
 bool approval_acp_intent(tool_env_t *env, const char *tool, const json_t *args, char **title, char **cache_key,
                          strvec_t *paths) {
     *title = *cache_key = NULL;
-    if (str_eq(tool, "bash")) {
+    if (str_eq(tool, "bash") || str_eq(tool, "powershell")) {
         const char *cmd = json_get_str(args, "command");
         if (cmd && *cmd) {
             /* .slice(0, 80): UTF-16 units approximated by code points */

@@ -1,0 +1,33 @@
+/* omc.rc - the Windows executable's manifest and version information (windres; OMC_VMAJOR/OMC_VMINOR/OMC_VPATCH come
+ * from the Makefile, which reads them from OMC_VERSION in src/core/core.h) */
+#include <winver.h>
+
+#define OMC_STR2(x) #x
+#define OMC_STR(x) OMC_STR2(x)
+#define OMC_VERSION_STR OMC_STR(OMC_VMAJOR) "." OMC_STR(OMC_VMINOR) "." OMC_STR(OMC_VPATCH)
+
+1 24 "omc.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION OMC_VMAJOR,OMC_VMINOR,OMC_VPATCH,0
+PRODUCTVERSION OMC_VMAJOR,OMC_VMINOR,OMC_VPATCH,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "omc - oh-my-c coding agent"
+            VALUE "ProductName", "omc"
+            VALUE "OriginalFilename", "omc.exe"
+            VALUE "InternalName", "omc"
+            VALUE "FileVersion", OMC_VERSION_STR
+            VALUE "ProductVersion", OMC_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

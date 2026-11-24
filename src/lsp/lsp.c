@@ -2884,7 +2884,7 @@ static void notify_watched(lsp_manager_t *m, const strvec_t *uris, const int *ty
         for (size_t i = 0; i < uris->n; i++) {
             char *p = uri_to_path(uris->v[i]);
             char *rel = rel_to_cwd(p, c->root);
-            bool inside = rel[0] != '/' && strncmp(rel, "..", 2) != 0;
+            bool inside = !path_is_absolute(rel) && strncmp(rel, "..", 2) != 0;
             free(rel);
             free(p);
             if (!inside) continue;
@@ -3527,7 +3527,7 @@ static int collect_files(const char *dir, const char *rel, strvec_t *out, int de
 
 static char *rename_stat_path(const char *p, const char *cwd) {
     char *r = rel_to_cwd(p, cwd);
-    if (r[0] == '/') {
+    if (path_is_absolute(r)) {
         const char *h = home_dir();
         size_t hl = h ? strlen(h) : 0;
         if (hl && !strncmp(p, h, hl) && (p[hl] == '/' || !p[hl])) {

@@ -9,6 +9,7 @@
 #include "config/settings.h"
 
 #include "core/fs.h"
+#include "core/proc.h"
 #include <unistd.h>
 #include "prompt/template.h"
 #include "shell.h"
@@ -326,7 +327,7 @@ void format_hashline_header(sb_t *b, const char *display_path, const char *tag) 
 /* Built-in tool order (upstream tools/index.ts BUILTIN_TOOLS key order); the request's tool list and the
  * tool-command catalog follow it. Names omc does not implement are kept so the order stays canonical. */
 static const char *const BUILTIN_ORDER[] = {
-    "read",     "security_scan", "bash",       "edit",    "ast_grep",  "ast_edit", "ask",    "debug",
+    "read",     "security_scan", "bash",       "powershell", "edit",  "ast_grep",  "ast_edit", "ask",    "debug",
     "ida",      "eval",          "github",     "glob",    "grep",      "find",     "lsp",    "checkpoint",
     "rewind",   "context_notes", "new_context", "task",   "wait",      "todo",     "web_search", "write",
     "memory_edit", "retain",     "recall",     "reflect", "learn",     "manage_skill", NULL};
@@ -353,7 +354,7 @@ static bool builtin_allowed(tool_env_t *env, const char *name) {
     /* without an edit tool, bash is the remaining way to modify existing files */
     bool no_edit = str_eq(tool_edit_mode_setting(), "none");
     if (!strcmp(name, "edit")) return !no_edit;
-    if (!strcmp(name, "bash")) return no_edit || setting_on("bash.enabled", true);
+    if (!strcmp(name, "bash") || !strcmp(name, "powershell")) return no_edit || setting_on("bash.enabled", true);
     if (!strcmp(name, "todo")) return setting_on("todo.enabled", true);
     if (!strcmp(name, "glob")) return setting_on("glob.enabled", true);
     if (!strcmp(name, "grep")) return setting_on("grep.enabled", true);
@@ -386,7 +387,7 @@ static const struct {
     const char *name;
     tool_ctor ctor;
 } CTORS[] = {
-    {"read", tool_read_new},       {"bash", tool_bash_new},   {"edit", tool_edit_new},
+    {"read", tool_read_new},       {"bash", tool_bash_new},   {"powershell", tool_powershell_new}, {"edit", tool_edit_new},
     {"ast_grep", tool_ast_grep_new}, {"ast_edit", tool_ast_edit_new}, {"ask", tool_ask_new},
     {"eval", tool_eval_new},       {"glob", tool_glob_new},   {"grep", tool_grep_new},
     {"find", tool_find_new},       {"task", tool_task_new},   {"wait", tool_wait_new},
@@ -414,7 +415,10 @@ void tools_register_builtin(agent_t *a, tool_env_t *env, const strvec_t *enabled
     }
     env->find_enabled = (!enabled || strvec_contains(enabled, "find")) && builtin_allowed(env, "find");
     for (size_t i = 0; i < ARRAY_LEN(CTORS); i++) {
-        if (enabled && !strvec_contains(enabled, CTORS[i].name)) continue;
+        /* the Windows powershell tool comes with bash */
+        if (enabled && !strvec_contains(enabled, CTORS[i].name) &&
+            !(str_eq(CTORS[i].name, "powershell") && strvec_contains(enabled, "bash")))
+            continue;
         if (!builtin_allowed(env, CTORS[i].name)) continue;
         agent_tool_t *t = CTORS[i].ctor(env);
         if (t) {
@@ -430,6 +434,7 @@ static const struct {
 } TOOL_META[] = {
     {"read", "Read", NULL},
     {"bash", "Bash", NULL},
+    {"powershell", "PowerShell", NULL},
     {"edit", "Edit", NULL},
     {"ast_grep", "AST Grep", "Search code with AST patterns (SHOULD be preferred for structural search)"},
     {"ast_edit", "AST Edit", "Perform AST-aware code edits (SHOULD be preferred for codemods)"},
@@ -488,7 +493,8 @@ void tools_finalize(agent_t *a, const strvec_t *requested) {
         if (t->hidden && !t->mounted) continue;
         if (!strcmp(t->name, "bash")) have_bash = true;
     }
-    bool commands = settings_bool("tools.commands", true) && have_bash;
+    /* they are bash functions: a PowerShell fallback (Windows without a bash) presents them all top-level */
+    bool commands = settings_bool("tools.commands", true) && have_bash && !proc_shell_is_powershell();
     a->tool_commands = commands;
     bool deferrable = false;
     for (size_t i = 0; i < a->all_tools.n; i++) {

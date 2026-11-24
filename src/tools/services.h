@@ -30,5 +30,9 @@ int services_stop(jobs_t *owner, const char *project, const char *name, json_t *
 int services_mode(jobs_t *owner, const char *project, const char *name, const char *mode, json_t **snap, char **err);
 bool services_state_terminal(const char *state);
 void services_stop_owned(jobs_t *j); /* session end: stop owned non-persistent services */
+#ifdef _WIN32
+/* `omc __omc_service_supervisor <dir>`: the detached supervisor of one service (Windows has no fork) */
+int services_supervisor_main(const char *dir);
+#endif
 
 #endif

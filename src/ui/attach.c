@@ -47,7 +47,7 @@ char *ui_chip_label(int n) { return xasprintf("%s #%d", tui_sym("chip.image"), n
 static bool is_sep(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
 static bool abs_prefix(const char *p) {
-    if (p[0] == '/') return true;
+    if (path_is_absolute(p)) return true;
     if (p[0] == '~' && p[1] == '/') return true;
     if (!strncasecmp(p, "file://", 7)) return true;
     if (p[0] == '\\' && p[1] == '\\') return true;

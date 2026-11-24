@@ -323,9 +323,55 @@ static void request(ui_login_t *l) {
     if (l->u && l->u->tui) tui_request_render(l->u->tui);
 }
 
+#ifdef _WIN32
+/* open.ts windowsOpenerCommand: PowerShell's Start-Process, anchored to %SystemRoot%\System32, with the target in a
+ * single-quoted literal inside an -EncodedCommand (UTF-16LE, base64) so no cmd/PowerShell parsing sees its `&`s;
+ * spawned hidden with stdio ignored */
+static void win_open(const char *target) {
+    const char *sr = env_get("SystemRoot");
+    if (!sr) sr = env_get("SYSTEMROOT");
+    char *abs = xasprintf("%s\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", sr ? sr : "C:\\Windows");
+    char *ps = fs_is_file(abs) ? abs : xstrdup("powershell.exe");
+    if (ps != abs) free(abs);
+    sb_t q = SB_INIT;
+    for (const char *p = target; *p; p++) {
+        if (*p == '\'') sb_putc(&q, '\'');
+        sb_putc(&q, *p);
+    }
+    char *script = xasprintf("$ErrorActionPreference='Stop';Start-Process '%s'", sb_cstr(&q));
+    sb_free(&q);
+    /* UTF-8 -> UTF-16LE bytes */
+    sb_t u16 = SB_INIT;
+    for (size_t i = 0; script[i];) {
+        uint32_t cp;
+        int k = utf8_decode(script + i, strlen(script + i), &cp);
+        i += (size_t)(k > 0 ? k : 1);
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            uint16_t hi = (uint16_t)(0xD800 + (cp >> 10)), lo = (uint16_t)(0xDC00 + (cp & 0x3FF));
+            sb_putc(&u16, (char)(hi & 0xff)), sb_putc(&u16, (char)(hi >> 8));
+            sb_putc(&u16, (char)(lo & 0xff)), sb_putc(&u16, (char)(lo >> 8));
+        } else {
+            sb_putc(&u16, (char)(cp & 0xff)), sb_putc(&u16, (char)(cp >> 8));
+        }
+    }
+    char *enc = base64_encode(u16.s ? u16.s : "", u16.len);
+    char *argv[] = {ps, "-NoProfile", "-NonInteractive", "-EncodedCommand", enc, NULL};
+    omc_win_spawn_opts_t so = {.fd_in = -1, .fd_out = -1, .fd_err = -1, .hidden = true};
+    omc_win_spawn(argv, &so);
+    free(enc);
+    sb_free(&u16);
+    free(script);
+    free(ps);
+}
+#endif
+
 /* best-effort browser launch (omp ctx.openInBrowser / utils/open.ts openPath) */
 void ui_open_in_browser(const char *url) {
     if (env_truthy("OMC_NO_BROWSER")) return;
+#ifdef _WIN32
+    win_open(url);
+#else
     const char *opener = which("xdg-open") ? "xdg-open" : which("open") ? "open" : NULL;
     if (!opener) return;
     pid_t pid = fork();
@@ -342,6 +388,7 @@ void ui_open_in_browser(const char *url) {
         _exit(127);
     }
     if (pid > 0) waitpid(pid, NULL, 0);
+#endif
 }
 
 /* LoginDialogComponent.showAuth */

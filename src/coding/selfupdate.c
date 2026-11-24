@@ -25,6 +25,8 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize); /* <mach-o/dyld.h> */
 #define SU_OS "macos"
 #elif defined(__linux__)
 #define SU_OS "linux"
+#elif defined(_WIN32)
+#define SU_OS "windows"
 #else
 #define SU_OS "unknown"
 #endif
@@ -173,8 +175,15 @@ char *su_download_base(void) {
 }
 
 char *su_installer_command(bool build) {
+#ifdef _WIN32
+    /* install.ps1, the Windows twin of install.sh */
+    if (build)
+        return xasprintf("& ([scriptblock]::Create((irm https://raw.githubusercontent.com/%s/main/install.ps1))) -Build", su_repo());
+    return xasprintf("irm https://raw.githubusercontent.com/%s/main/install.ps1 | iex", su_repo());
+#else
     return xasprintf("curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh%s", su_repo(),
                      build ? " -s -- --build" : "");
+#endif
 }
 
 const char *su_platform(bool *prebuilt) {

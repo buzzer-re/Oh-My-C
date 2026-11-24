@@ -267,8 +267,8 @@ static void loop_guard_turn(app_t *a, const json_t *msg, const json_t *results) 
 /* ---------- todo tracker ---------- */
 
 static bool mutating_tool(const char *name) {
-    return str_eq(name, "bash") || str_eq(name, "eval") || str_eq(name, "edit") || str_eq(name, "write") ||
-           str_eq(name, "ast_edit");
+    return str_eq(name, "bash") || str_eq(name, "powershell") || str_eq(name, "eval") || str_eq(name, "edit") ||
+           str_eq(name, "write") || str_eq(name, "ast_edit");
 }
 
 static bool todo_active(app_t *a) {

@@ -31,6 +31,13 @@ curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh |
 ./install.sh --build                # the same, from a clone
 ```
 
+On Windows 10/11 (x64), `install.ps1` does the same from PowerShell. Until the releases carry a Windows binary, build from source with `-Build` (it needs MinGW-w64 in WSL or MSYS2); omc's bash tool runs Git for Windows' bash. See [docs/windows.md](docs/windows.md).
+
+```powershell
+.\install.ps1 -Build -Source .      # from a clone
+.\install.ps1 -Build -Ref main      # a branch, downloaded (without -Ref/-Source: the latest release's source)
+```
+
 ### Updating
 
 `omc update` installs the latest release's binary over the one you run, checked against `SHA256SUMS` like the installer does; `omc update --check` only tells you whether there is a newer one. Interactive sessions also check on startup and show a notice when a release is out (turn it off with `startup.checkUpdate: false`, or set `update.auto: true` to install it in the background). A build from a clone updates with `git pull && make` instead.
@@ -88,6 +95,9 @@ never clash with your app. A session speaks the same JSON protocol as `omc --mod
 commands with `omc_send()` and receive the responses and agent events through one callback.
 `omc_prompt()` runs a turn synchronously, `omc_register_tool()` adds native tools implemented by your
 app, and `omc_main()` runs the whole CLI/TUI in-process. You can check `examples/embed.c` for an example.
+
+On Windows, `make WINDOWS=1 lib` (or `install.ps1 -Lib`) gives `libomc.dll` with its import library, a static
+`libomc.a`, a `.def` for MSVC and `omc.h`; link with `-lomc`. See [docs/windows.md](docs/windows.md#libomc-on-windows).
 
 ## Documentation
 

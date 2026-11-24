@@ -1959,9 +1959,8 @@ static void test_wp6_editor(void) {
     CHECK(tui_ac_at_prefix_start("x=@a") == 2);
     CHECK(tui_ac_at_prefix_start("mail@host") == -1);
     CHECK(tui_ac_at_prefix_start("see @\"docs/my no") == 4);
-    char *rm = xasprintf("rm -rf '%s'", root);
-    CHECK(system(rm) == 0);
-    free(rm), free(root);
+    CHECK(fs_rm_rf(root) == 0);
+    free(root);
 
     /* large paste: the host hook takes a marker-sized paste and stages a text attachment chip */
     ed = tui_editor_new();

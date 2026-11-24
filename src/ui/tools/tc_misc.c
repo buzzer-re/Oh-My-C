@@ -613,7 +613,7 @@ void tc_render(const tc_call_t *c, int width, strvec_t *out) {
         }
         return;
     }
-    if (!strcmp(n, "bash")) {
+    if (!strcmp(n, "bash") || !strcmp(n, "powershell")) { /* the Windows powershell tool draws as a command card */
         tc_bash(c, width, out);
         /* replies the command wrote to out:// draw as prose blocks after the call */
         const json_t *r;

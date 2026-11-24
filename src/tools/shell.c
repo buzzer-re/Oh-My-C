@@ -33,6 +33,7 @@ shell_t *shell_new(void) {
     return s;
 }
 
+#ifndef _WIN32
 /* output pipes a background job still holds: read and dropped, so the job never blocks or dies writing to one. The job can
  * outlive its shell (a one-shot command's), so this outlives them all. */
 static pthread_mutex_t g_drain_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -78,6 +79,7 @@ static void drain_add(int fd) {
     }
     pthread_mutex_unlock(&g_drain_mu);
 }
+#endif
 
 static void stop(shell_t *s) {
     if (!s->started) return;
@@ -319,8 +321,38 @@ int shell_run_try(shell_t *s, const char *cmd, const char *cwd, const proc_opts_
     return run_locked(s, cmd, cwd, o, res);
 }
 
+/* Windows without a bash (proc_shell_is_powershell): every command is its own PowerShell process, as Claude Code's
+ * PowerShell tool runs them. The directory is the call's (it is per call with bash too); variables, functions and
+ * aliases do not carry over. Runs with s->mu held; releases it. */
+static int ps_run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res) {
+    int rc = -1;
+    if (!s->dir) {
+        const char *tmp = env_get("TMPDIR");
+        char *t = xasprintf("%s/omc-sh-XXXXXX", tmp && *tmp ? tmp : "/tmp");
+        if (mkdtemp(t)) s->dir = t;
+        else free(t);
+    }
+    if (s->dir) {
+        char *file = xasprintf("%s/c%llu.ps1", s->dir, (unsigned long long)++s->seq);
+        char *script = proc_ps_script(cmd);
+        strvec_t argv = proc_ps_argv(script, file);
+        proc_opts_t po = o ? *o : (proc_opts_t){0};
+        po.cwd = cwd;
+        po.merge_stderr = true;
+        po.shell_preamble = NULL;
+        rc = proc_run((const char **)argv.v, &po, res);
+        strvec_free(&argv);
+        free(script);
+        unlink(file);
+        free(file);
+    }
+    pthread_mutex_unlock(&s->mu);
+    return rc;
+}
+
 /* runs with s->mu held; releases it */
 static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_opts_t *o, proc_result_t *res) {
+    if (proc_shell_is_powershell() || (o && o->powershell)) return ps_run_locked(s, cmd, cwd, o, res);
     if (!s->started && start(s, o) != 0) {
         pthread_mutex_unlock(&s->mu);
         return -1;
@@ -330,7 +362,14 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
      * keeps a pipe nobody shows. The shell's real stdout carries only the status line. */
     char *fifo = xasprintf("%s/f%llu", s->dir, (unsigned long long)++s->seq);
     int ofd = -1;
+#ifdef _WIN32
+    /* no fifo a native process and Git Bash can share: the group writes a plain file, read here as it grows. A read at
+     * its current end returns 0 (ofd_eof), which only slows the poll below to the status pipe; whatever the command
+     * wrote before its status line is read after it. */
+    if (fs_write(fifo, "", 0) == 0) ofd = open(fifo, O_RDONLY | O_CLOEXEC);
+#else
     if (mkfifo(fifo, 0600) == 0) ofd = open(fifo, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+#endif
     if (ofd < 0 || fs_write(s->script, cmd, strlen(cmd)) != 0) {
         if (ofd >= 0) close(ofd);
         unlink(fifo);
@@ -446,8 +485,12 @@ static int run_locked(shell_t *s, const char *cmd, const char *cwd, const proc_o
         if (!res->timed_out && !res->cancelled && res->exit_code == 0) res->exit_code = -1;
     }
     /* a job still holding the pipe keeps running; whatever it writes from here on is nobody's output */
+#ifdef _WIN32
+    close(ofd); /* a file: nothing blocks a job writing on, and the name goes below */
+#else
     if (done && !ofd_eof) drain_add(ofd);
     else close(ofd);
+#endif
     unlink(fifo);
     free(fifo);
     if (out.len > cap) {

@@ -150,11 +150,21 @@ int main(void) {
         port = 30000 + rand() % 20000;
         char ports[16];
         snprintf(ports, sizeof ports, "%d", port);
+#ifdef _WIN32
+        {
+            /* python3 if the install has one, else the py launcher / python.exe */
+            const char *py = getenv("OMC_TEST_PYTHON");
+            char *pargv[] = {(char *)(py && *py ? py : "python3"), "-I", "tests/e2e/mock_auth.py", ports, NULL};
+            omc_win_spawn_opts_t so = {.fd_in = -1, .fd_out = OMC_WIN_INHERIT, .fd_err = OMC_WIN_INHERIT};
+            mock = omc_win_spawn(pargv, &so);
+        }
+#else
         mock = fork();
         if (mock == 0) {
             execlp("python3", "python3", "-I", "tests/e2e/mock_auth.py", ports, (char *)NULL);
             _exit(127);
         }
+#endif
         free(base);
         base = xasprintf("http://127.0.0.1:%d", port);
         bool ready = false;
@@ -175,14 +185,15 @@ int main(void) {
         waitpid(mock, NULL, 0);
         mock = -1;
     }
-    char *rw = xasprintf("https://github.com=%1$s/gh,https://api.github.com=%1$s/ghapi,https://api.individual.githubcopilot.com=%1$s/capi,"
-                         "https://ghe.example.com=%1$s/ghe,https://auth.x.ai=%1$s/xauth,https://api.x.ai=%1$s/xaiapi,"
-                         "https://api2.cursor.sh=%1$s/cursor,https://auth.openai.com=%1$s/oai,https://api.kilo.ai=%1$s/kilo,"
-                         "https://auth.meta.com=%1$s/meta,https://api.meta.ai=%1$s/metaapi,https://api.workos.com=%1$s/workos,"
-                         "https://api.factory.ai=%1$s/factory,https://api.z.ai=%1$s/zaiapi,https://api.code.umans.ai=%1$s/umans,"
-                         "https://api.commandcode.ai=%1$s/cmdcode,https://api.inference.wandb.ai=%1$s/coreweave,"
-                         "https://token-plan.ap-southeast-1.maas.aliyuncs.com=%1$s/tp,https://console.mistral.ai=%1$s/mistral",
-                         base);
+    /* every rewrite target is the mock (no positional printf arguments: MinGW printf lacks them) */
+    char *rw = str_replace("https://github.com=@B/gh,https://api.github.com=@B/ghapi,https://api.individual.githubcopilot.com=@B/capi,"
+                           "https://ghe.example.com=@B/ghe,https://auth.x.ai=@B/xauth,https://api.x.ai=@B/xaiapi,"
+                           "https://api2.cursor.sh=@B/cursor,https://auth.openai.com=@B/oai,https://api.kilo.ai=@B/kilo,"
+                           "https://auth.meta.com=@B/meta,https://api.meta.ai=@B/metaapi,https://api.workos.com=@B/workos,"
+                           "https://api.factory.ai=@B/factory,https://api.z.ai=@B/zaiapi,https://api.code.umans.ai=@B/umans,"
+                           "https://api.commandcode.ai=@B/cmdcode,https://api.inference.wandb.ai=@B/coreweave,"
+                           "https://token-plan.ap-southeast-1.maas.aliyuncs.com=@B/tp,https://console.mistral.ai=@B/mistral",
+                           "@B", base);
     setenv("OMC_AUTH_URL_REWRITE", rw, 1);
     auth_init();
     char *err = NULL;

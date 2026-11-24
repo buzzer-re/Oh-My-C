@@ -308,9 +308,16 @@ static void test_managed_skills(const char *agent) {
     /* refuse a symlinked skill dir */
     char *root = autolearn_managed_dir();
     char *ld = path_join(root, "linked");
-    CHECK(symlink(agent, ld) == 0);
-    CHECK(autolearn_delete_skill("linked", &err) != 0 && has(err, "symlink"));
-    free(err);
+    int sl = symlink(agent, ld);
+#ifdef _WIN32
+    if (sl != 0 && errno == EPERM) fprintf(stderr, "  symlink check skipped (symlinks need Developer Mode or admin on Windows)\n");
+    else
+#endif
+    {
+        CHECK(sl == 0);
+        CHECK(autolearn_delete_skill("linked", &err) != 0 && has(err, "symlink"));
+        free(err);
+    }
     CHECK(autolearn_delete_skill("demo", &err) == 0);
     CHECK(autolearn_delete_skill("demo", &err) != 0 && has(err, "does not exist"));
     free(err);

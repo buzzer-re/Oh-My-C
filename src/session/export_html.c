@@ -701,7 +701,7 @@ static int write_export(const char *path, json_t *session_data, const char *them
 static char *resolve_out(const char *output_path, const char *session_file) {
     char *p = output_path && *output_path ? xstrdup(output_path) : export_default_name(session_file);
     char *r;
-    if (p[0] == '/') r = path_normalize(p);
+    if (path_is_absolute(p)) r = path_normalize(p);
     else {
         char *cwd = get_cwd(), *j = path_join(cwd ? cwd : ".", p);
         r = path_normalize(j);

@@ -489,9 +489,9 @@ static uint8_t *read_source(media_job_t *j, size_t *n, char **err) {
         char *dec = url_decode(p);
         path = dec;
     } else if (!strcmp(src, "~") || !strncmp(src, "~/", 2)) {
-        const char *home = getenv("HOME");
+        const char *home = home_env();
         path = xasprintf("%s%s", home ? home : "", src + 1);
-    } else if (src[0] == '/') path = xstrdup(src);
+    } else if (path_is_absolute(src)) path = xstrdup(src);
     else path = xasprintf("%s/%s", j->cwd && *j->cwd ? j->cwd : ".", src);
     struct stat st;
     if (stat(path, &st) == 0 && st.st_size > MAX_FORM_IMAGE_BYTES) {

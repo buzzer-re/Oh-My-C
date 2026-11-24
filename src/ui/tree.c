@@ -367,13 +367,13 @@ static char *format_tool_call(const char *name, const json_t *args) {
         free(path);
         return r;
     }
-    if (str_eq(name, "bash")) {
+    if (str_eq(name, "bash") || str_eq(name, "powershell")) {
         const char *raw = json_get_str(args, "command") ? json_get_str(args, "command") : "";
         char *n = normalize(raw);
         char *cmd = slice_cps(n, 50, NULL);
         bool longer;
         free(slice_cps(raw, 50, &longer));
-        char *r = xasprintf("[bash: %s%s]", cmd, longer ? "..." : "");
+        char *r = xasprintf("[%s: %s%s]", name, cmd, longer ? "..." : "");
         free(n), free(cmd);
         return r;
     }

@@ -1658,7 +1658,7 @@ char *glob_search_path(const json_t *args) {
                 const char *sep = strstr(pt, "://");
                 bool url = sep && sep > pt && isalpha((unsigned char)pt[0]);
                 for (const char *q = pt; url && q < sep; q++) url = isalnum((unsigned char)*q) || strchr("+.-", *q);
-                bool standalone = pt[0] == '/' || pt[0] == '~' || url;
+                bool standalone = path_is_absolute(pt) || pt[0] == '~' || url;
                 char *e = standalone ? xstrdup(pt) : xasprintf("%.*s/%s", (int)bl, bases.v[b], pt);
                 if (!strvec_contains(&scoped, e)) strvec_push_own(&scoped, e);
                 else free(e);

@@ -56,7 +56,11 @@ static char *encode_rel(const char *prefix, const char *rel) {
 static bool rel_within(const char *root, const char *path, const char **rel) {
     size_t n = strlen(root);
     while (n > 1 && root[n - 1] == '/') n--;
+#ifdef _WIN32
+    if (strncasecmp(path, root, n) != 0) return false; /* path.win32.relative: names compare without case */
+#else
     if (strncmp(path, root, n) != 0) return false;
+#endif
     if (path[n] == 0) {
         *rel = "";
         return true;

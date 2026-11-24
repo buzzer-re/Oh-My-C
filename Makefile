@@ -1,9 +1,23 @@
-# omc - oh-my-c build (Linux and macOS)
+# omc - oh-my-c build (Linux and macOS; Windows: `make windows`, a MinGW-w64 cross build, see docs/windows.md)
 CC      ?= cc
 PKG     ?= pkg-config
 OPT     ?= -O2
+ifeq ($(WINDOWS),1)
+# Windows x64 cross build. MINGW is the toolchain prefix; the posix-threads gcc variant is preferred where the distro
+# ships both (Debian/Ubuntu's mingw-w64); MSYS2's plain gcc is the posix one already.
+MINGW   ?= x86_64-w64-mingw32-
+CC      := $(shell command -v $(MINGW)gcc-posix >/dev/null 2>&1 && echo $(MINGW)gcc-posix || echo $(MINGW)gcc)
+WINDRES ?= $(MINGW)windres
+HOSTCC  ?= cc
+UNAME_S := Windows
+UNAME_M := x86_64
+EXE     := .exe
+else
+HOSTCC  ?= $(CC)
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
+EXE     :=
+endif
 # per-platform build tree: the source dir may be shared between machines (e.g. a macOS host and a
 # Linux VM), so objects and generated tools of one platform must never be picked up by the other
 O       := build/obj/$(UNAME_S)-$(UNAME_M)
@@ -16,7 +30,17 @@ ifneq ($(CC_IS_CLANG),1)
 CFLAGS  += -Wshadow=local
 endif
 
-ifeq ($(UNAME_S),Darwin)
+ifeq ($(UNAME_S),Windows)
+# MinGW-w64: POSIX headers omc needs and the CRT lacks come from src/plat/win/include (poll.h, sys/socket.h, termios.h,
+# zlib.h, openssl/*.h, ...), backed by src/plat/win/*.c over Win32, Winsock, Schannel and CNG. Every TU sees
+# plat/win/posix.h first. Only system DLLs are imported: libgcc, libssp and winpthreads are linked statically.
+CFLAGS  := $(filter-out -fPIC,$(CFLAGS)) -Isrc/plat/win/include -include plat/win/posix.h \
+           -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -D__USE_MINGW_ANSI_STDIO=1 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -DNOGDI
+LDFLAGS += -static
+TEST_LDFLAGS := -static
+LIBS    += -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -ladvapi32 -lshell32 -lole32 -luserenv -ldbghelp -lssp
+SSL_LIBS :=
+else ifeq ($(UNAME_S),Darwin)
 # Apple ld: PIE is the default; no -z options. OpenSSL comes from Homebrew (keg-only) or pkg-config.
 LDFLAGS += -Wl,-export_dynamic
 # unit tests link a subset of the objects, leaving some __attribute__((weak)) references undefined; ELF resolves those
@@ -36,43 +60,84 @@ SSL_CFLAGS := $(shell $(PKG) --cflags openssl 2>/dev/null)
 SSL_LIBS   := $(shell $(PKG) --libs openssl 2>/dev/null || echo -lssl -lcrypto)
 endif
 CFLAGS  += $(SSL_CFLAGS)
+ifeq ($(UNAME_S),Windows)
+LIBS    := -lpthread -lm $(LIBS)
+else
 LIBS    += $(SSL_LIBS) -lz -lpthread -lm
+endif
 
 SRC  := $(sort $(wildcard src/*.c src/*/*.c src/ui/tools/*.c))
+ifeq ($(UNAME_S),Windows)
+SRC  += $(sort $(wildcard src/plat/win/*.c))
+endif
 OBJ  := $(patsubst src/%.c,$(O)/%.o,$(SRC)) $(O)/embedded.o
-BIN  := build/omc
+BIN  := build/omc$(EXE)
 
 all: $(BIN)
 
-$(O)/omc: $(OBJ)
+ifeq ($(UNAME_S),Windows)
+# application manifest (UTF-8 code page, long paths, Windows 10 compatibility) and version info
+OBJ  += $(O)/plat/win/omc_rc.o
+$(O)/plat/win/omc_rc.o: src/plat/win/omc.rc src/plat/win/omc.manifest src/core/core.h
+	@mkdir -p $(dir $@)
+	$(WINDRES) $(foreach v,1 2 3,-DOMC_V$(word $(v),MAJOR MINOR PATCH)=$(word $(v),$(subst ., ,$(VERSION)))) -Isrc/plat/win -i $< -o $@
+endif
+
+# `make windows [lib]`: the same targets cross-built for Windows x64 (build/omc.exe, build/libomc.dll)
+windows:
+	@$(MAKE) --no-print-directory WINDOWS=1 all
+
+$(O)/omc$(EXE): $(OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 # build/omc is always this platform's binary (refreshed on every make)
-$(BIN): $(O)/omc FORCE
+$(BIN): $(O)/omc$(EXE) FORCE
 	@cmp -s $< $@ || cp $< $@
 
 FORCE:
 
 # ---- optional library build: `make lib` -> libomc.a, libomc.so, omc.pc (public API: include/omc.h) ----
-LIB_OBJ    := $(filter-out $(O)/main.o,$(OBJ))
+LIB_OBJ    := $(filter-out $(O)/main.o $(O)/plat/win/omc_rc.o,$(OBJ))
 LIB_SOVER  := 0
 LIB_STATIC := build/libomc.a
 ifeq ($(UNAME_S),Darwin)
 LIB_SHARED := build/libomc.$(LIB_SOVER).dylib
+else ifeq ($(UNAME_S),Windows)
+# a tree of its own: the Windows build shares build/ with the Linux one it is cross-compiled beside
+LIB_STATIC := build/windows/libomc.a
+LIB_SHARED := build/windows/libomc.dll
 else
 LIB_SHARED := build/libomc.so.$(LIB_SOVER)
 endif
 OBJCOPY    ?= objcopy
+PC_FILE    := $(if $(filter Windows,$(UNAME_S)),build/windows/omc.pc,build/omc.pc)
+# Windows: relocatable, the root is the directory above the .pc (the release zip and install.ps1 -Lib keep it in lib\)
+PC_PREFIX  := $(if $(filter Windows,$(UNAME_S)),$${pcfiledir}/..,$(PREFIX))
 
-lib: $(LIB_STATIC) $(LIB_SHARED) build/omc.pc
+lib: $(LIB_STATIC) $(LIB_SHARED) $(PC_FILE)
 
 # static: prelink everything into one object, then keep only the public omc_* symbols global so
 # internal names (json_*, sb_*, ...) can never clash with the host application's symbols
 build/libomc.syms: include/omc.h
 	@mkdir -p build
-	@grep -o 'OMC_API [^(]*(' $< | sed -E 's/.*[ *]([a-z_0-9]+)\($$/\1/' | sort -u > $@
+	@grep -o 'OMC_API [^(]*(' $< | sed -E 's/.*[ *]([a-z_0-9]+)\($$/\1/' | grep '^omc_' | sort -u > $@
 
-ifeq ($(UNAME_S),Darwin)
+ifeq ($(UNAME_S),Windows)
+# COFF: the same prelink as ELF for the static library; the DLL exports exactly the omc_* API (a .def file) and comes
+# with its import library, build/libomc.dll.a. Both carry their own libgcc/winpthreads, so only system DLLs are needed.
+$(LIB_STATIC): $(LIB_OBJ) build/libomc.syms
+	@mkdir -p $(dir $@)
+	$(MINGW)ld -r -o $(O)/omc-prelink.o $(LIB_OBJ)
+	$(MINGW)objcopy --keep-global-symbols=build/libomc.syms $(O)/omc-prelink.o $(O)/omc-lib.o
+	rm -f $@ && $(MINGW)ar rcs $@ $(O)/omc-lib.o
+
+build/windows/libomc.def: build/libomc.syms
+	@mkdir -p $(dir $@)
+	@{ echo 'LIBRARY libomc.dll'; echo 'EXPORTS'; sed 's/^/    /' $<; } > $@
+
+$(LIB_SHARED): $(LIB_OBJ) build/windows/libomc.def
+	$(CC) -shared -static -o $@ $(LIB_OBJ) build/windows/libomc.def -Wl,--out-implib,build/windows/libomc.dll.a $(LIBS)
+else ifeq ($(UNAME_S),Darwin)
 # Mach-O symbols carry a leading underscore
 build/libomc.exports: build/libomc.syms
 	@sed 's/^/_/' $< > $@
@@ -100,9 +165,9 @@ $(LIB_SHARED): $(LIB_OBJ) build/libomc.map
 	ln -sf libomc.so.$(LIB_SOVER) build/libomc.so
 endif
 
-build/omc.pc: Makefile
+$(PC_FILE): Makefile
 	@printf 'prefix=%s\nlibdir=$${prefix}/lib\nincludedir=$${prefix}/include\n\nName: omc\nDescription: oh-my-c coding agent library\nVersion: %s\nLibs: -L$${libdir} -lomc\nLibs.private: %s\nCflags: -I$${includedir}\n' \
-	    '$(PREFIX)' '$(VERSION)' '$(LIBS)' > $@
+	    '$(PC_PREFIX)' '$(VERSION)' '$(LIBS)' > $@
 
 install-lib: lib
 	mkdir -p $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/lib/pkgconfig
@@ -113,9 +178,9 @@ install-lib: lib
 	install -m644 build/omc.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/omc.pc
 
 # embedding example + its check (links the static library only)
-build/examples/embed: examples/embed.c $(LIB_STATIC)
+build/examples/embed$(EXE): examples/embed.c $(LIB_STATIC)
 	@mkdir -p build/examples
-	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ $< $(LIB_STATIC) $(LIBS)
+	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ $< $(LIB_STATIC) $(LIBS) $(if $(filter Windows,$(UNAME_S)),-static)
 
 $(O)/%.o: src/%.c
 	@mkdir -p $(dir $@)
@@ -124,7 +189,7 @@ $(O)/%.o: src/%.c
 # Embedded assets (prompts, catalog) via a tiny in-tree generator: no external tools.
 $(O)/embedgen: build-tools/embedgen.c
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -o $@ $<
+	$(HOSTCC) -O2 -o $@ $<
 
 EMBED_FILES := $(shell find prompts assets -type f 2>/dev/null | LC_ALL=C sort) README.md $(sort $(wildcard docs/*.md))
 $(O)/embedded.c: $(O)/embedgen $(EMBED_FILES)
@@ -137,6 +202,10 @@ $(O)/embedded.o: $(O)/embedded.c
 # Unit tests link only the objects they exercise (several stub catalog/auth symbols).
 FUZZ_SRC := $(sort $(wildcard tests/fuzz/fuzz_*.c))
 CORE_OBJ := $(O)/core/core.o $(O)/core/json.o $(O)/core/fs.o $(O)/core/proc.o $(O)/core/embed.o $(O)/embedded.o
+ifeq ($(UNAME_S),Windows)
+# the platform layer under every test (its POSIX regex needs text/regex.o, which only the full object list has)
+CORE_OBJ += $(filter-out $(O)/plat/win/regex.o,$(patsubst src/%.c,$(O)/%.o,$(wildcard src/plat/win/*.c)))
+endif
 NET_OBJ  := $(O)/net/http.o
 CODEC_OBJ := $(patsubst src/%.c,$(O)/%.o,$(wildcard src/img/*.c))
 IMG_OBJ  := $(O)/ai/ai_images.o $(CODEC_OBJ)
@@ -209,7 +278,25 @@ $(O)/tests/%: tests/%.c $$(T_$$*)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $< $(T_$*) $(LIBS) $(TEST_LDFLAGS)
 
-build/examples/main_twice: tests/e2e/main_twice.c $(LIB_STATIC)
+ifeq ($(UNAME_S),Windows)
+$(O)/tests/%.exe: tests/%.c $$(T_$$*)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $< $(T_$*) $(LIBS) $(TEST_LDFLAGS)
+
+build/windows/conpty_drive.exe: tests/windows/conpty_drive.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -static -o $@ $<
+
+# linked as docs/windows.md tells users to: -lomc picks the import library (libomc.dll.a) over libomc.a
+build/windows/embed_dll.exe: examples/embed.c $(LIB_SHARED)
+	$(CC) -O2 -Wall -Wextra -Iinclude -DOMC_DLL -o $@ $< -Lbuild/windows -lomc
+
+# everything tests/windows/run-tests.ps1 runs: `make WINDOWS=1 test-build`
+test-build: $(BIN) $(addprefix $(O)/tests/,$(addsuffix .exe,$(UNIT_TESTS))) build/windows/conpty_drive.exe \
+            build/examples/embed.exe lib build/windows/embed_dll.exe
+endif
+
+build/examples/main_twice$(EXE): tests/e2e/main_twice.c $(LIB_STATIC)
 	@mkdir -p build/examples
 	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ $< $(LIB_STATIC) $(LIBS)
 
@@ -255,7 +342,7 @@ $(O)/tests/fuzz/%.o: tests/fuzz/%.c tests/fuzz/fuzz.h
 #   make dist      build/dist/omc-<version>-<os>-<arch>.tar.gz (+ .sha256): the binary, README and omp's license notice
 #   make dist-src  build/dist/omc-<version>.tar.gz (+ .sha256): `git archive` of HEAD (committed files, under omc-<version>/)
 VERSION   := $(shell sed -n 's/^\#define OMC_VERSION "\(.*\)"/\1/p' src/core/core.h)
-DIST_OS   := $(if $(filter Darwin,$(UNAME_S)),macos,linux)
+DIST_OS   := $(if $(filter Darwin,$(UNAME_S)),macos,$(if $(filter Windows,$(UNAME_S)),windows,linux))
 DIST_ARCH := $(if $(filter aarch64 arm64,$(UNAME_M)),arm64,$(UNAME_M))
 DIST_NAME := omc-$(VERSION)-$(DIST_OS)-$(DIST_ARCH)
 SRC_NAME  := omc-$(VERSION)
@@ -264,6 +351,19 @@ SHA256    := { command -v sha256sum >/dev/null && sha256sum "$$f" || shasum -a 2
 version:
 	@echo $(VERSION)
 
+ifeq ($(UNAME_S),Windows)
+# Windows: a zip, as install.ps1 downloads it: omc.exe, README, omp's license notice, lib\ (libomc.dll, its import
+# library libomc.dll.a, libomc.a, libomc.def for MSVC's lib.exe, a relocatable omc.pc) and include\omc.h
+dist: $(BIN) lib
+	@rm -rf build/dist/$(DIST_NAME) && mkdir -p build/dist/$(DIST_NAME)/lib build/dist/$(DIST_NAME)/include
+	cp $(BIN) README.md build/dist/$(DIST_NAME)/
+	cp prompts/UPSTREAM-LICENSE build/dist/$(DIST_NAME)/OMP-LICENSE
+	cp $(LIB_SHARED) build/windows/libomc.dll.a $(LIB_STATIC) build/windows/libomc.def $(PC_FILE) build/dist/$(DIST_NAME)/lib/
+	cp include/omc.h build/dist/$(DIST_NAME)/include/
+	rm -f build/dist/$(DIST_NAME).zip && python3 -I build-tools/zipdir.py build/dist/$(DIST_NAME).zip build/dist $(DIST_NAME)
+	cd build/dist && f=$(DIST_NAME).zip && $(SHA256) > $$f.sha256
+	@cat build/dist/$(DIST_NAME).zip.sha256
+else
 dist: $(BIN)
 	@rm -rf build/dist/$(DIST_NAME) && mkdir -p build/dist/$(DIST_NAME)
 	cp $(BIN) README.md build/dist/$(DIST_NAME)/
@@ -271,6 +371,7 @@ dist: $(BIN)
 	tar -C build/dist -czf build/dist/$(DIST_NAME).tar.gz $(DIST_NAME)
 	cd build/dist && f=$(DIST_NAME).tar.gz && $(SHA256) > $$f.sha256
 	@cat build/dist/$(DIST_NAME).tar.gz.sha256
+endif
 
 dist-src: FORCE
 	@git rev-parse --verify -q HEAD >/dev/null || { echo "make dist-src: needs a git checkout" >&2; exit 1; }
@@ -290,5 +391,5 @@ PREFIX ?= $(HOME)/.local
 clean:
 	rm -rf build
 
-.PHONY: all lib install-lib test test-unit fuzz fuzz-bins version dist dist-src clean install FORCE
+.PHONY: all lib install-lib test test-unit fuzz fuzz-bins version dist dist-src clean install FORCE windows test-build
 -include $(OBJ:.o=.d)

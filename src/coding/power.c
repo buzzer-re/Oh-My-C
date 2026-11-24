@@ -16,9 +16,13 @@
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_refs;
+#ifndef _WIN32
 static bool g_unavailable;
 static pid_t g_pid = -1; /* caffeinate */
 static int g_pipe = -1;  /* write end of systemd-inhibit's `cat` stdin */
+#else
+static bool g_unavailable; /* never set: SetThreadExecutionState is always there */
+#endif
 
 strvec_t power_command(const char *mode) {
     strvec_t v = {0};
@@ -46,7 +50,7 @@ strvec_t power_command(const char *mode) {
     return v;
 }
 
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
 /* start_login1's "no D-Bus at all" case: the system bus socket does not exist */
 static bool system_bus_present(void) {
     const char *addr = env_get("DBUS_SYSTEM_BUS_ADDRESS");
@@ -60,6 +64,44 @@ static bool system_bus_present(void) {
 }
 #endif
 
+#ifdef _WIN32
+/* natives power.rs (Windows): SetThreadExecutionState on a dedicated thread, which holds it until released (the state
+ * belongs to the thread that set it). Windows has no separate system-sleep assertion: ES_SYSTEM_REQUIRED stands for
+ * both idle and system; display adds ES_DISPLAY_REQUIRED. */
+#include <windows.h>
+
+static HANDLE g_power_thread, g_power_release;
+
+static DWORD WINAPI power_thread(void *arg) {
+    EXECUTION_STATE flags = (EXECUTION_STATE)(uintptr_t)arg;
+    if (!SetThreadExecutionState(flags)) return 1;
+    WaitForSingleObject(g_power_release, INFINITE);
+    SetThreadExecutionState(ES_CONTINUOUS);
+    return 0;
+}
+
+static void start_locked(void) {
+    const char *mode = settings_str("power.sleepPrevention", "idle");
+    if (!mode || str_eq(mode, "off")) return;
+    EXECUTION_STATE flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED;
+    if (str_eq(mode, "display") || str_eq(mode, "system")) flags |= ES_DISPLAY_REQUIRED;
+    g_power_release = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_power_thread = g_power_release ? CreateThread(NULL, 64 * 1024, power_thread, (void *)(uintptr_t)flags, 0, NULL) : NULL;
+    if (!g_power_thread && g_power_release) {
+        CloseHandle(g_power_release);
+        g_power_release = NULL;
+    }
+}
+
+static void stop_locked(void) {
+    if (!g_power_thread) return;
+    SetEvent(g_power_release);
+    WaitForSingleObject(g_power_thread, 5000);
+    CloseHandle(g_power_thread);
+    CloseHandle(g_power_release);
+    g_power_thread = g_power_release = NULL;
+}
+#else
 static void dev_null_stdio(int in_fd) {
     int fd = open("/dev/null", O_RDWR);
     if (fd < 0) return;
@@ -75,7 +117,7 @@ static void start_locked(void) {
     free(mode);
     if (!cmd.n) return;
     char *bin = which(cmd.v[0]);
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
     if (!bin || !system_bus_present()) {
         g_unavailable = true; /* the backend does not appear mid-process: stop retrying */
         free(bin);
@@ -137,6 +179,7 @@ static void stop_locked(void) {
     }
     g_pid = -1;
 }
+#endif
 
 void power_acquire(void) {
     pthread_mutex_lock(&g_mu);

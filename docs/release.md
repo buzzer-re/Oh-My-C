@@ -50,6 +50,23 @@ git push origin main v18.18.7
 
 `build-tools/ci.sh dist` and `build-tools/ci.sh dist-src` build the same archives locally into `build/dist/`.
 
+### Windows asset (by hand for now)
+
+The workflow does not build Windows yet. `make WINDOWS=1 dist` (MinGW-w64, in WSL or Linux) builds the asset
+`install.ps1` downloads, `build/dist/omc-<version>-windows-x86_64.zip` (+ `.sha256`), with everything under
+`omc-<version>-windows-x86_64/`: `omc.exe`, `README.md`, `OMP-LICENSE`, `lib\` (`libomc.dll`, `libomc.dll.a`,
+`libomc.a`, `libomc.def`, `omc.pc`) and `include\omc.h`. Run `tests/windows/run-tests.ps1` on Windows against that
+build first. Upload the zip to the release and add its line to `SHA256SUMS` (`install.ps1` refuses an asset that
+`SHA256SUMS` does not list):
+
+```sh
+make WINDOWS=1 -B dist
+cat build/dist/omc-<version>-windows-x86_64.zip.sha256 >> SHA256SUMS   # the release's SHA256SUMS, then re-upload it
+```
+
+`omc update` on Windows does not install from releases yet (it reads `.tar.gz` assets and replaces the running binary
+in place); it points to `install.ps1 -Build`, and re-running `install.ps1` updates a release install.
+
 ## Install script (`install.sh`)
 
 `curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh | sh` installs the latest release's
@@ -115,6 +132,9 @@ binary built on a CI runner.
 - **The macOS binary** targets macOS 15+ on Apple silicon (the runner's release: Homebrew's static OpenSSL is built for
   it) and has OpenSSL built in. It isn't signed or notarized: a copy downloaded with a browser needs
   `xattr -d com.apple.quarantine omc` once. There is no Intel macOS binary (`install.sh --build` covers it).
+- **The Windows binary** (x64, Windows 10 1809+ / 11) is cross-built with MinGW-w64 and imports only system DLLs
+  (TLS through Schannel, no OpenSSL). It is not code-signed, so SmartScreen may warn when it is run from a browser
+  download. See [windows.md](windows.md).
 - omc builds from source on Linux (glibc; checked on Ubuntu 22.04 with gcc 11 and bash 5.1, and newer) and macOS with
   Homebrew's OpenSSL 3.
 - **`ubuntu-22.04-arm`** runners are free only for public repositories. For a private repository, remove the

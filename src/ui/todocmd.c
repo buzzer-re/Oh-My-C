@@ -388,12 +388,12 @@ static char *todo_path(ui_t *u, const char *rest) {
 }
 
 static void edit_cmd(ui_t *u) {
-    const char *ed = getenv("VISUAL");
-    if (!ed || !*ed) ed = getenv("EDITOR");
-    if (!ed || !*ed) {
+    char *ed = ui_editor_command(); /* getEditorCommand (notepad on Windows) */
+    if (!ed) {
         add_notice(u, "warning", "No editor configured. Set $VISUAL or $EDITOR environment variable.");
         return;
     }
+    free(ed);
     json_t *cur = current_phases(u->app);
     char *initial = json_len(cur) ? todo_phases_to_markdown(cur) : xstrdup("# Todos\n- [ ] (replace this with your tasks)\n");
     json_free(cur);

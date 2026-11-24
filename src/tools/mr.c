@@ -233,7 +233,7 @@ static char *default_project(const char *cwd, char **err) {
 static char *glab_config_path(void) {
     const char *ov = getenv("GLAB_CONFIG_DIR");
     if (ov && *ov) return path_join(ov, "config.yml");
-    const char *home = getenv("HOME") ? getenv("HOME") : "";
+    const char *home = home_env() ? home_env() : "";
     char *first = path_join3(home, ".config/glab-cli", "config.yml");
     if (fs_exists(first)) return first;
     const char *xdg = getenv("XDG_CONFIG_HOME");

@@ -205,6 +205,7 @@ agent_tool_t *tool_read_new(tool_env_t *env);
 agent_tool_t *tool_write_new(tool_env_t *env);
 agent_tool_t *tool_edit_new(tool_env_t *env);
 agent_tool_t *tool_bash_new(tool_env_t *env);
+agent_tool_t *tool_powershell_new(tool_env_t *env); /* Windows with Git Bash: PowerShell beside bash; NULL otherwise */
 agent_tool_t *tool_wait_new(tool_env_t *env);
 const char *tool_edit_mode_setting(void); /* edit.mode / PI_EDIT_VARIANT: an edit mode, or "none" (no edit tool, bash stays) */
 /* render settled background jobs ([{jobId,label,result}]) as the async-result notice (owned) */

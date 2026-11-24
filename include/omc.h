@@ -27,7 +27,14 @@ extern "C" {
 #endif
 
 #if defined(_WIN32)
+/* Windows: libomc.dll exports exactly these functions (libomc.def). Linking through the import library needs nothing
+ * here; define OMC_DLL before including this header to declare them __declspec(dllimport) (a direct call instead of a
+ * thunk). Leave it undefined for the static libomc.a. */
+#if defined(OMC_DLL)
+#define OMC_API __declspec(dllimport)
+#else
 #define OMC_API
+#endif
 #else
 #define OMC_API __attribute__((visibility("default")))
 #endif

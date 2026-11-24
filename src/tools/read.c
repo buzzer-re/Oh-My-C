@@ -573,7 +573,7 @@ static void raw_note(json_t *details, const char *note) {
  * (in details.notes for a raw read) */
 static void conflict_footer(tool_env_t *env, const char *abs, const selector_t *sel, const strvec_t *all, int64_t first,
                             int64_t last, sb_t *b, json_t *details) {
-    if (sel->immutable || sel->no_anchor || sel->resource || (sel->loc && sel->loc->immutable) || !abs || abs[0] != '/' ||
+    if (sel->immutable || sel->no_anchor || sel->resource || (sel->loc && sel->loc->immutable) || !abs || !path_is_absolute(abs) ||
         first < 1 || last < first)
         return;
     strvec_t win = {.v = all->v + first - 1, .n = (size_t)(last - first + 1)};

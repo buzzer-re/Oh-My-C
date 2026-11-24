@@ -238,7 +238,7 @@ static void op_file_read(tool_env_t *env, const json_t *args, tool_result_t *out
         fail(out, xstrdup("path must not be empty"));
         goto done;
     }
-    if (path[0] == '/') {
+    if (path_is_absolute(path)) {
         fail(out, xstrdup("path must be repository-relative"));
         goto done;
     }

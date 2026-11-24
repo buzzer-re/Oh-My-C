@@ -129,7 +129,11 @@ static char *install_release(const upd_opts_t *o, const char *target, const char
     const char *plat = su_platform(&prebuilt);
     if (!prebuilt) {
         char *cmd = su_installer_command(true);
+#ifdef _WIN32
+        char *e = xasprintf("no prebuilt omc for %s; build it from source with install.ps1 -Build: %s", plat, cmd);
+#else
         char *e = xasprintf("no prebuilt omc for %s; build it from source with install.sh --build: %s", plat, cmd);
+#endif
         free(cmd);
         return e;
     }

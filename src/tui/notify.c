@@ -229,6 +229,16 @@ static bool spawn_detached(const strvec_t *argv) {
     if (!argv->n) return false;
     char *bin = strchr(argv->v[0], '/') ? xstrdup(argv->v[0]) : which(argv->v[0]);
     if (!bin) return false;
+#ifdef _WIN32
+    /* detached, stdio ignored, never our child to reap (a detached spawn is not tracked) */
+    char **wav = xcalloc(argv->n + 1, sizeof *wav);
+    for (size_t i = 0; i < argv->n; i++) wav[i] = argv->v[i];
+    omc_win_spawn_opts_t so = {.exe = bin, .fd_in = -1, .fd_out = -1, .fd_err = -1, .detached = true};
+    int wpid = omc_win_spawn(wav, &so);
+    free(wav);
+    free(bin);
+    return wpid > 0;
+#else
     pid_t pid = fork();
     if (pid < 0) {
         free(bin);
@@ -253,6 +263,7 @@ static bool spawn_detached(const strvec_t *argv) {
     while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
     free(bin);
     return true;
+#endif
 }
 
 static bool (*g_spawner)(const strvec_t *argv) = spawn_detached;

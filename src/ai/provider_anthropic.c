@@ -2,6 +2,7 @@
  * provider_anthropic.c - Anthropic Messages API streaming provider (api "anthropic-messages").
  * Port of packages/ai/src/providers/anthropic.ts (+ anthropic-identity.ts, claude-code-fingerprint.ts).
  */
+#include "core/fs.h"
 #include "ai/ai_images.h"
 #include "ai/provider_anthropic.h"
 #include "ai/anthropic_slow.h"
@@ -335,7 +336,7 @@ static const char *stainless_value(size_t i) {
 static const char *install_id(void) {
     static char cached[64];
     if (cached[0]) return cached;
-    const char *home = getenv("HOME");
+    const char *home = home_env();
     char *dir = xasprintf("%s/.omc", home && *home ? home : ".");
     char *path = xasprintf("%s/install-id", dir);
     FILE *f = fopen(path, "r");

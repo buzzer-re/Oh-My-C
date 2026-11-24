@@ -18,6 +18,7 @@ ports of a named omp file, and the docs below always say which one.
 | [tui.md](tui.md) | TUI framework (components, differential renderer, terminal), theme and symbols, UI modules, and how parity with omp is checked |
 | [modes.md](modes.md) | Interactive, print/json, RPC, ACP and library embedding |
 | [testing.md](testing.md) | Unit tests, e2e suite and mocks, side-by-side TUI harness, request parity diff, golden captures, adding tests |
+| [windows.md](windows.md) | Native Windows build: toolchain, `install.ps1`, the `src/plat/win/` POSIX layer, Git Bash, ConPTY and console behaviour, Windows tests |
 | [security.md](security.md) | Supply-chain stance, trust boundaries, untrusted-input parsers, subprocess and path guards, secret handling |
 | [status.md](status.md) | **Single source of truth for what is implemented** (feature tables with ✅ / 🟡 / ❌) |
 | [gaps.md](gaps.md) | Gap audit: omp's whole user-facing surface (slash commands, keys, settings, tools, overlays, RPC/ACP/CLI, background systems) checked against omc, with the prioritized **work packages** for what is missing |

@@ -372,7 +372,7 @@ static char *find_git_dir(const char *cwd, char **root) {
             return NULL;
         }
         free(g);
-        if (!strcmp(d, "/") || !*d) break;
+        if (path_is_root(d) || !*d) break;
         char *p = path_dirname(d);
         free(d);
         d = p;
@@ -789,12 +789,23 @@ static char *render_segment(const char *id, const segctx_t *c) {
         char *disp = xstrdup(cwd);
         const char *tmp = env_get("TMPDIR");
         char *home_tmp = path_join(home_dir(), "tmp");
+#ifdef _WIN32
+        /* NORMALIZED_SCRATCH_ROOTS on win32: os.tmpdir(), ~/tmp, %TEMP%, %TMP%, %SystemRoot%\Temp; names compare
+         * without case */
+        const char *sr = env_get("SystemRoot");
+        char *sys_tmp = sr ? path_join(sr, "Temp") : NULL;
+        const char *roots[] = {tmp && *tmp ? tmp : "/tmp", home_tmp, env_get("TEMP"), env_get("TMP"), sys_tmp};
+#define SCRATCH_NCMP strncasecmp
+#else
         const char *roots[] = {tmp && *tmp ? tmp : "/tmp", home_tmp, "/tmp", "/var/tmp"};
+#define SCRATCH_NCMP strncmp
+#endif
         for (size_t i = 0; i < ARRAY_LEN(roots) && !scratch; i++) {
+            if (!roots[i]) continue;
             char *r = path_normalize(roots[i]);
             size_t rl = strlen(r);
             while (rl > 1 && r[rl - 1] == '/') r[--rl] = 0;
-            if (!strcmp(cwd, r) || (str_starts(cwd, r) && cwd[rl] == '/')) {
+            if ((strlen(cwd) == rl && !SCRATCH_NCMP(cwd, r, rl)) || (!SCRATCH_NCMP(cwd, r, rl) && cwd[rl] == '/')) {
                 scratch = true;
                 free(disp);
                 disp = xstrdup(cwd[rl] == '/' && cwd[rl + 1] ? cwd + rl + 1 : cwd);
@@ -815,6 +826,10 @@ static char *render_segment(const char *id, const segctx_t *c) {
             free(pr), free(rp);
         }
         free(home_tmp);
+#ifdef _WIN32
+        free(sys_tmp);
+#endif
+#undef SCRATCH_NCMP
         char *pwd = xstrdup(strip ? disp : cwd);
         free(disp);
         /* a linked git worktree (/wt, PR checkouts): the project name, plus the worktree dir when it is not the

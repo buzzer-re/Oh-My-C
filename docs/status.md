@@ -4,6 +4,54 @@ Status of the port against upstream oh-my-pi (reference: omp v19.1.0, see [UPDAT
 This file is the single source of truth for what is implemented; it is updated with every change.
 [gaps.md](gaps.md) audits omp's full user-facing surface against omc and lists the missing pieces as prioritized work packages. Keep both in sync when a gap closes.
 
+## Native Windows port (2026-11-23)
+
+omc builds and runs natively on Windows 10 1809+ / 11 x64 (details: [windows.md](windows.md)). `make windows`
+cross-builds `build/omc.exe` with MinGW-w64 (WSL or MSYS2), `make WINDOWS=1 lib` builds `libomc.dll` (exports exactly
+the `omc_*` API, plus an import library) and `libomc.a`; only system DLLs are imported. Linux and macOS behaviour and
+output are unchanged (Windows code is behind `_WIN32`; shared helpers such as `path_is_absolute` and `path_is_root`
+are identical to the old checks there).
+
+**Ported:**
+- A POSIX layer in `src/plat/win/` (force-included `posix.h`, missing headers in `include/`): fds over the CRT with
+  sockets as fds, `poll` over sockets/pipes/the console, UTF-8 paths through the wide APIs with POSIX rename/delete
+  semantics and advisory locks, processes with job objects (tree kill), ConPTY, signals from console control events and
+  structured exceptions, termios over console modes; TLS over Schannel and SHA/HMAC/RSA/random over CNG behind the
+  OpenSSL calls omc makes (verify failures keep OpenSSL's codes, so messages match Linux); an in-tree zlib-compatible
+  inflate/deflate (checked against real zlib in both directions). No third-party code.
+- Call sites without a POSIX equivalent: process spawning (`proc.c`, `child_spawn`), the bash tool's per-command
+  output (a file instead of a FIFO), background services (omc itself as the detached supervisor), the external editor
+  (`cmd.exe /d /s /c`, Notepad default), URL opening (PowerShell `Start-Process`, omp's opener), sleep prevention
+  (`SetThreadExecutionState`), restart (spawn and wait), Git Bash discovery (omp's `resolveWindowsShell`), the home and
+  temp directories, drive-letter and UNC paths, the status line's Windows scratch roots, self-update's platform name
+  and install.ps1 commands.
+- omp's ConPTY behaviour: win32-input-mode (`CSI ? 9001 h`) with the record decoder of `windows-input-mode.ts`
+  (Shift+Enter, AltGr, dead keys), rows ending at column zero (#9783), 16 KiB writes.
+- PowerShell (omc's addition; omp runs its embedded shell instead): next to Git Bash a `powershell` tool for
+  Windows-specific work (bash stays preferred, both descriptions say so); without any bash the `bash` tool runs
+  PowerShell and says so. `pwsh.exe` else Windows PowerShell 5.1, a process per call, UTF-8, shell-like exit status;
+  approval and `bash.patterns` as for bash, refused in plan mode, tool commands off without bash.
+- `install.ps1` (release zip + SHA256SUMS, or `-Build` from a ref or checkout; PATH with consent; running binary
+  renamed aside) and `tests/windows/run-tests.ps1` with the ConPTY / console TUI driver `tests/windows/conpty_drive.c`.
+- Release packaging and libomc: `make WINDOWS=1 dist` packs `omc-<version>-windows-x86_64.zip` (+ `.sha256`) as
+  `install.ps1` expects it (`omc.exe`, `lib\` with `libomc.dll`, its import library, `libomc.a`, `libomc.def` for MSVC
+  and a relocatable `omc.pc`, `include\omc.h`); `omc.h` takes `OMC_DLL` for `__declspec(dllimport)`. Checked end to
+  end: the zip served locally, installed by `install.ps1 -Lib`, and host programs linked against the installed folder
+  through pkg-config (DLL and static) and `-DOMC_DLL -lomc`, each running a prompt with a native tool.
+
+**Verified:** 49 of 52 unit tests natively without Python and all 52 with it (`test_auth`, `test_dump`, `test_mcp` run
+mocks); print mode with bash (Git Bash), write/read/edit/glob/grep/todo, non-ASCII paths with spaces, sessions and
+`-c`, two processes at once, background job `notify`; the TUI on conhost, through ConPTY and in Windows Terminal 1.24
+(prompt, bash card, setup wizard arrows, Shift+Enter newline, Ctrl+C exit, the win32-input-mode records WT relays); RPC; libomc static and DLL embedding; TLS to github.com, a rejected self-signed
+server (`DEPTH_ZERO_SELF_SIGNED_CERT`) and an extra trusted CA; `omc update --check`; the `powershell` tool and the
+no-bash fallback. `tests/windows/run-tests.ps1`: 87 of 87 checks.
+
+**Not yet:** the CI job building and testing Windows (the release asset is built by hand with `make WINDOWS=1 dist`,
+see [release.md](release.md)), `omc update` installing a Windows release (it points to `install.ps1`), the Windows
+console title from run state, Windows toast notifications, PowerShell profile aliases, MSVC linking (documented, not
+checked here); the full Linux e2e suite is not
+run on Windows (it assumes POSIX tools), the Windows script covers the platform paths.
+
 ## omp v19.1.0 update (2026-11-23)
 
 Ported from v18.22.0 to v19.1.0 (1,159 non-merge upstream commits; 751 skipped by triage as changelog-only, upstream
@@ -215,6 +263,7 @@ Development is paused while the user tests omc day to day. Work resumes from use
 ## Runtime & infrastructure
 | Area | Status | Notes |
 |---|---|---|
+| Native Windows (`src/plat/win/`, [windows.md](windows.md)): POSIX layer, Schannel TLS, CNG crypto, in-tree zlib, Git Bash, ConPTY, win32-input-mode, `install.ps1`, `tests/windows/` | 🟡 | builds clean, unit tests and the Windows script pass; release assets and CI not yet |
 | HTTP/1.1 client (TLS, keep-alive pool, gzip, proxies, redirects) | ✅ | `src/net/http.c` |
 | SSE / NDJSON streaming, retry with backoff + Retry-After | ✅ | |
 | JSON (ordered, partial/streaming parse), YAML (parse + dump) | ✅ | |

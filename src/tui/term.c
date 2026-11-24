@@ -15,6 +15,9 @@ static volatile sig_atomic_t g_loop_active;
 static volatile sig_atomic_t g_restore_needed;
 static volatile sig_atomic_t g_kitty_pushed;
 static volatile sig_atomic_t g_mok;
+#ifdef _WIN32
+static volatile sig_atomic_t g_w32im; /* win32-input-mode requested (CSI ? 9001 h) */
+#endif
 static int g_restore_fd = -1;
 static int g_tty_fd = -1;
 static struct termios g_saved_tio;
@@ -46,6 +49,9 @@ static void emergency_restore(void) {
         static const char base[] = "\x1b[?2026l\x1b[?2004l\x1b[?1004l\x1b[0m\x1b[?25h\r\n";
         if (g_kitty_pushed) write_all_raw(g_restore_fd, "\x1b[<u", 4);
         if (g_mok) write_all_raw(g_restore_fd, "\x1b[>4;0m", 7);
+#ifdef _WIN32
+        if (g_w32im) write_all_raw(g_restore_fd, "\x1b[?9001l", 8);
+#endif
         write_all_raw(g_restore_fd, base, sizeof base - 1);
     }
     if (g_tty_fd >= 0) tcsetattr(g_tty_fd, TCSAFLUSH, &g_saved_tio);
@@ -211,6 +217,12 @@ void tui_term_stop(tui_term_t *t) {
         t->modify_other_keys = false;
         g_mok = 0;
     }
+#ifdef _WIN32
+    if (g_w32im) {
+        tui_term_puts(t, "\x1b[?9001l");
+        g_w32im = 0;
+    }
+#endif
     tui_term_bracketed_paste(t, false);
     if (t->focus_events) tui_term_focus_events(t, false);
     if (t->mouse_capture && t->is_tty) tui_term_puts(t, TUI_MOUSE_OFF);
@@ -267,6 +279,20 @@ bool tui_term_handle_response(tui_term_t *t, const char *seq, size_t n) {
         return true;
     }
     if (fin == 'c') {
+#ifdef _WIN32
+        /* terminal.ts #enableModifyOtherKeysFallback on a local ConPTY: the console host ignores modifyOtherKeys and
+         * folds Shift+Enter into a bare CR, so it is asked for win32-input-mode instead, which it answers itself (the
+         * records are decoded in plat/win/fd.c). Under sshd the console host is fed the remote terminal's VT and the
+         * mode splits keys apart, so a remote session keeps modifyOtherKeys. */
+        if (t->started && t->kitty_queried && !t->kitty_active && !g_w32im && !env_get("SSH_CONNECTION") &&
+            !env_get("SSH_CLIENT") && !env_get("SSH_TTY")) {
+            tui_term_puts(t, "\x1b[?9001h");
+            g_w32im = 1;
+            tui_term_flush(t);
+            t->kitty_queried = false;
+            return true;
+        }
+#endif
         /* DA1 sentinel: no kitty reply arrived first -> modifyOtherKeys fallback */
         if (t->started && t->kitty_queried && !t->kitty_active && !t->modify_other_keys) {
             tui_term_puts(t, "\x1b[>4;2m");
@@ -292,12 +318,36 @@ void tui_term_printf(tui_term_t *t, const char *fmt, ...) {
     va_end(ap);
 }
 
+#ifdef _WIN32
+/* terminal.ts chunkForConPTY: ConPTY ties viewport tracking to each WriteFile, and a write past ~32 KiB leaves the host's
+ * viewport parked where it started. Writes stay within 16 KiB, cut after the last line terminator in range (a `\n`, or
+ * a `\r` that does not open a `\r\n`, so rows and escape sequences stay whole), else at a UTF-8 boundary. */
+#define CONPTY_WRITE_CHUNK (16 * 1024)
+
+static size_t conpty_chunk(const char *s, size_t n) {
+    if (n <= CONPTY_WRITE_CHUNK) return n;
+    size_t cut = 0;
+    for (size_t i = 0; i < CONPTY_WRITE_CHUNK; i++) {
+        if (s[i] == '\n') cut = i + 1;
+        else if (s[i] == '\r' && s[i + 1] != '\n') cut = i + 1;
+    }
+    if (cut) return cut;
+    cut = CONPTY_WRITE_CHUNK;
+    while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) cut--;
+    return cut ? cut : CONPTY_WRITE_CHUNK;
+}
+#endif
+
 int tui_term_flush(tui_term_t *t) {
     const char *s = t->out.s;
     size_t n = t->out.len;
     int rc = 0;
     while (n > 0) {
+#ifdef _WIN32
+        ssize_t w = write(t->out_fd, s, conpty_chunk(s, n));
+#else
         ssize_t w = write(t->out_fd, s, n);
+#endif
         if (w < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN) {

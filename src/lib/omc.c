@@ -47,6 +47,9 @@ static void sink(void *ud, const json_t *msg) {
 }
 
 omc_session_t *omc_session_new(const omc_options_t *o, omc_event_fn on_event, void *ud, char **error) {
+#ifdef _WIN32
+    omc_win_init();
+#endif
     omc_options_t def = {.struct_size = sizeof(omc_options_t)};
     omc_options_t opt = def;
     if (o) memcpy(&opt, o, o->struct_size && o->struct_size < sizeof opt ? o->struct_size : sizeof opt);

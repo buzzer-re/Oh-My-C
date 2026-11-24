@@ -134,7 +134,7 @@ char *find_repo_root(const char *cwd) {
         bool found = fs_exists(g);
         free(g);
         if (found) return cur;
-        if (strcmp(cur, "/") == 0) break;
+        if (path_is_root(cur)) break;
         char *p = path_dirname(cur);
         free(cur);
         cur = p;
@@ -984,7 +984,7 @@ static const json_t *system_prompt_templates(void) {
         bool blank = !*t;
         free(t);
         const char *p = json_sv(v);
-        if (blank || !p || !(p[0] == '/' || !strncmp(p, "~/", 2))) {
+        if (blank || !p || !(path_is_absolute(p) || !strncmp(p, "~/", 2))) {
             LOGW("systemPromptTemplates: invalid entry \"%s\" (blank model pattern, or a template path that is not "
                  "absolute or ~/-relative); ignoring the setting", k);
             return NULL;

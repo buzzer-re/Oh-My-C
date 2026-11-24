@@ -4,10 +4,14 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <ftw.h>
+#endif
 #include <limits.h>
 #include <pwd.h>
 #include <unistd.h>
+
+static size_t root_len(const char *p);
 
 char *fs_read_limit(const char *path, size_t max, size_t *len, bool *truncated) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -123,9 +127,14 @@ int fs_append(const char *path, const void *data, size_t len) {
 int fs_mkdir_p(const char *path, mode_t mode) {
     if (!path || !*path) return 0;
     char *p = xstrdup(path);
+#ifdef _WIN32
+    for (char *c = p; *c; c++)
+        if (*c == '\\') *c = '/';
+#endif
     size_t n = strlen(p);
-    while (n > 1 && p[n - 1] == '/') p[--n] = 0;
-    for (char *s = p + 1; *s; s++) {
+    size_t rl = root_len(p);
+    while (n > rl && n > 1 && p[n - 1] == '/') p[--n] = 0;
+    for (char *s = p + (rl ? rl : 1); *s; s++) {
         if (*s == '/') {
             *s = 0;
             if (mkdir(p, mode) != 0 && errno != EEXIST) {
@@ -142,6 +151,29 @@ int fs_mkdir_p(const char *path, mode_t mode) {
     return rc;
 }
 
+#ifdef _WIN32
+/* depth-first, never following links (a directory link is removed, not its target's contents) */
+int fs_rm_rf(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return -1;
+    int rc = 0;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d))) {
+                if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+                char *c = path_join(path, de->d_name);
+                if (fs_rm_rf(c) != 0) rc = -1;
+                free(c);
+            }
+            closedir(d);
+        }
+    }
+    if (remove(path) != 0) rc = -1;
+    return rc;
+}
+#else
 static int rm_cb(const char *path, const struct stat *sb, int flag, struct FTW *ftw) {
     UNUSED(sb);
     UNUSED(flag);
@@ -150,6 +182,7 @@ static int rm_cb(const char *path, const struct stat *sb, int flag, struct FTW *
 }
 
 int fs_rm_rf(const char *path) { return nftw(path, rm_cb, 64, FTW_DEPTH | FTW_PHYS); }
+#endif
 
 bool fs_exists(const char *path) {
     struct stat st;
@@ -201,12 +234,51 @@ bool fs_is_binary(const char *data, size_t len) {
 
 /* ---------- paths ---------- */
 
+#ifdef _WIN32
+/* Windows roots, taking '\' as a separator too: "C:/" (3), "C:" (2, drive-relative), "//server/share/" (UNC), "/" (1,
+ * the current drive's root); 0 for a relative path */
+static size_t root_len(const char *p) {
+#define SEP(c) ((c) == '/' || (c) == '\\')
+    if (isalpha((unsigned char)p[0]) && p[1] == ':') return SEP(p[2]) ? 3 : 2;
+    if (SEP(p[0]) && SEP(p[1]) && p[2] && !SEP(p[2])) {
+        const char *s = p + 2;
+        while (*s && !SEP(*s)) s++;
+        if (*s) {
+            s++;
+            while (*s && !SEP(*s)) s++;
+            if (*s) s++;
+        }
+        return (size_t)(s - p);
+    }
+    return SEP(p[0]) ? 1 : 0;
+#undef SEP
+}
+
+static const char *last_sep(const char *p) {
+    const char *a = strrchr(p, '/'), *b = strrchr(p, '\\');
+    return a > b ? a : b;
+}
+#else
+static size_t root_len(const char *p) { return p[0] == '/' ? 1 : 0; }
+static const char *last_sep(const char *p) { return strrchr(p, '/'); }
+#endif
+
+bool path_is_absolute(const char *p) { return p && root_len(p) > 0; }
+
+bool path_is_root(const char *p) {
+    size_t rl = p ? root_len(p) : 0;
+    return rl > 0 && p[rl] == 0;
+}
+
 char *path_join(const char *a, const char *b) {
     if (!a || !*a) return xstrdup(b ? b : "");
     if (!b || !*b) return xstrdup(a);
-    if (b[0] == '/') return xstrdup(b);
+    if (path_is_absolute(b)) return xstrdup(b);
     size_t al = strlen(a);
     if (a[al - 1] == '/') return xasprintf("%s%s", a, b);
+#ifdef _WIN32
+    if (a[al - 1] == '\\') return xasprintf("%s%s", a, b);
+#endif
     return xasprintf("%s/%s", a, b);
 }
 
@@ -218,14 +290,16 @@ char *path_join3(const char *a, const char *b, const char *c) {
 }
 
 char *path_dirname(const char *p) {
-    const char *s = strrchr(p, '/');
-    if (!s) return xstrdup(".");
+    const char *s = last_sep(p);
+    size_t rl = root_len(p);
+    if (!s) return rl ? xstrndup(p, rl) : xstrdup(".");
+    if ((size_t)(s - p) < rl) return xstrndup(p, rl); /* "/" or "C:/" */
     if (s == p) return xstrdup("/");
     return xstrndup(p, (size_t)(s - p));
 }
 
 const char *path_basename(const char *p) {
-    const char *s = strrchr(p, '/');
+    const char *s = last_sep(p);
     return s ? s + 1 : p;
 }
 
@@ -236,6 +310,34 @@ const char *path_ext(const char *p) {
 }
 
 char *path_normalize(const char *p) {
+#ifdef _WIN32
+    /* the root kept as written (separators as '/'), the rest normalized like a POSIX absolute or relative path */
+    size_t rl = root_len(p);
+    if (rl > 1 || (rl == 1 && p[0] == '\\')) {
+        char *root = xstrndup(p, rl), *rest = xstrdup(p + rl);
+        for (char *c = root; *c; c++)
+            if (*c == '\\') *c = '/';
+        for (char *c = rest; *c; c++)
+            if (*c == '\\') *c = '/';
+        char *slashed = xasprintf("/%s", rest);
+        char *n = path_normalize(slashed);
+        free(slashed);
+        /* path_normalize("/x") is "/x": drop its leading slash under a root that ends in one */
+        char *r = root[rl - 1] == '/' ? xasprintf("%s%s", root, n + 1) : xasprintf("%s%s", root, n);
+        free(root);
+        free(rest);
+        free(n);
+        return r;
+    }
+    if (strchr(p, '\\')) {
+        char *q = xstrdup(p);
+        for (char *c = q; *c; c++)
+            if (*c == '\\') *c = '/';
+        char *r = path_normalize(q);
+        free(q);
+        return r;
+    }
+#endif
     bool abs = p[0] == '/';
     strvec_t parts = str_split(p, "/");
     strvec_t out = {0};
@@ -259,21 +361,42 @@ char *path_normalize(const char *p) {
     return r;
 }
 
+const char *home_env(void) {
+#ifdef _WIN32
+    return home_dir();
+#else
+    return getenv("HOME");
+#endif
+}
+
 const char *home_dir(void) {
     static char *home;
     if (home) return home;
     const char *h = env_get("HOME");
+#ifdef _WIN32
+    /* os.homedir(): USERPROFILE; HOME first, so tests and Git Bash sessions that set it are honored */
+    if (!h) h = env_get("USERPROFILE");
+#endif
     if (h) {
         home = xstrdup(h);
     } else {
         struct passwd *pw = getpwuid(getuid());
         home = xstrdup(pw && pw->pw_dir ? pw->pw_dir : "/");
     }
+#ifdef _WIN32
+    for (char *c = home; *c; c++)
+        if (*c == '\\') *c = '/';
+    size_t hl = strlen(home);
+    if (hl > 3 && home[hl - 1] == '/') home[hl - 1] = 0;
+#endif
     return home;
 }
 
 char *path_expand_home(const char *p) {
     if (p[0] == '~' && (p[1] == '/' || p[1] == 0)) return xasprintf("%s%s", home_dir(), p + 1);
+#ifdef _WIN32
+    if (p[0] == '~' && p[1] == '\\') return xasprintf("%s/%s", home_dir(), p + 2);
+#endif
     return xstrdup(p);
 }
 
@@ -287,8 +410,14 @@ char *get_cwd(void) {
 char *path_abs(const char *p, const char *cwd) {
     char *e = path_expand_home(p);
     char *j;
+#ifdef _WIN32
+    /* "C:/x", "//srv/share/x" and "/x" (the current drive's root; /tmp is %TEMP%, see plat/win) stay as written */
+    if (path_is_absolute(e)) {
+        j = e;
+#else
     if (e[0] == '/') {
         j = e;
+#endif
     } else {
         char *c = cwd ? xstrdup(cwd) : get_cwd();
         j = path_join(c, e);
@@ -307,6 +436,36 @@ char *path_real(const char *p) {
 }
 
 char *path_relative(const char *from, const char *to) {
+#ifdef _WIN32
+    /* path.win32.relative: names compare without case; another drive (or share) has no relative path */
+    {
+        size_t ra = root_len(from), rb = root_len(to);
+        if (ra != rb || strncasecmp(from, to, ra) != 0) return path_normalize(to);
+        char *ff = path_normalize(from), *tt = path_normalize(to);
+        char *r = NULL;
+        strvec_t a = str_split(ff + ra, "/"), b = str_split(tt + rb, "/");
+        strvec_t fa = {0}, fb = {0};
+        for (size_t k = 0; k < a.n; k++) if (*a.v[k]) strvec_push(&fa, a.v[k]);
+        for (size_t k = 0; k < b.n; k++) if (*b.v[k]) strvec_push(&fb, b.v[k]);
+        size_t i = 0;
+        while (i < fa.n && i < fb.n && strcasecmp(fa.v[i], fb.v[i]) == 0) i++;
+        sb_t s = SB_INIT;
+        for (size_t k = i; k < fa.n; k++) sb_append(&s, s.len ? "/.." : "..");
+        for (size_t k = i; k < fb.n; k++) {
+            if (s.len) sb_putc(&s, '/');
+            sb_append(&s, fb.v[k]);
+        }
+        r = s.len ? sb_detach(&s) : xstrdup(".");
+        sb_free(&s);
+        strvec_free(&a);
+        strvec_free(&b);
+        strvec_free(&fa);
+        strvec_free(&fb);
+        free(ff);
+        free(tt);
+        return r;
+    }
+#endif
     strvec_t a = str_split(from, "/"), b = str_split(to, "/");
     size_t i = 0;
     /* skip empty segments uniformly */
@@ -328,21 +487,31 @@ char *path_relative(const char *from, const char *to) {
     return sb_detach(&r);
 }
 
+#ifdef _WIN32
+#define PATH_NCMP strncasecmp
+#else
+#define PATH_NCMP strncmp
+#endif
+
 char *path_display(const char *p, const char *cwd) {
     if (cwd) {
         size_t cl = strlen(cwd);
-        if (strncmp(p, cwd, cl) == 0) {
+        if (PATH_NCMP(p, cwd, cl) == 0) {
             if (p[cl] == 0) return xstrdup(".");
             if (p[cl] == '/') return xstrdup(p + cl + 1);
         }
     }
     const char *h = home_dir();
     size_t hl = strlen(h);
-    if (hl > 1 && strncmp(p, h, hl) == 0 && (p[hl] == '/' || p[hl] == 0)) return xasprintf("~%s", p + hl);
+    if (hl > 1 && PATH_NCMP(p, h, hl) == 0 && (p[hl] == '/' || p[hl] == 0)) return xasprintf("~%s", p + hl);
     return xstrdup(p);
 }
 
 char *which(const char *prog) {
+#ifdef _WIN32
+    /* PATH is ';'-separated and names run with any PATHEXT extension */
+    return omc_win_find_exe(prog);
+#endif
     if (strchr(prog, '/')) return fs_is_exec(prog) ? xstrdup(prog) : NULL;
     const char *path = env_get("PATH");
     if (!path) path = "/usr/local/bin:/usr/bin:/bin";
