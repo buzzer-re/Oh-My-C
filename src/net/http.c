@@ -819,10 +819,12 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
 
     /* read headers (skip 1xx) */
     size_t hdr_end = 0;
+    bool http10 = false;
     for (;;) {
         char *e = c->rlen > c->rpos ? memmem(c->rbuf + c->rpos, c->rlen - c->rpos, "\r\n\r\n", 4) : NULL;
         if (e) {
             hdr_end = (size_t)(e - c->rbuf) + 4;
+            http10 = (size_t)(e - (c->rbuf + c->rpos)) >= 8 && !memcmp(c->rbuf + c->rpos, "HTTP/1.0", 8);
             if (parse_status_headers(c->rbuf + c->rpos, (size_t)(e - (c->rbuf + c->rpos)), resp) != 0) {
                 net_close(c);
                 resp->error = xstrdup("malformed HTTP response");
@@ -845,7 +847,8 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
                 resp->error = xstrdup("request aborted");
                 return RR_FAIL;
             }
-            if (reused && !got_any && fr == 0) return RR_RETRYABLE;
+            /* a pooled connection the server closed meanwhile: EOF, or a reset where Windows answers the request with RST */
+            if (reused && !got_any && fr != -2) return RR_RETRYABLE;
             resp->error = xstrdup(fr == -2 ? "timed out waiting for response" : "connection closed before response");
             /* a peer close reads as node's "socket hang up" (ECONNRESET); a timeout stays a timeout */
             if (fr != -2) note_lost(resp, started, body_len, true, fr == 0 ? "ECONNRESET" : sock_errno_code(rerr));
@@ -935,7 +938,9 @@ static rr_t do_once(const http_req_t *req, const char *url_s, const char *method
             if (remaining > 0) remaining -= (int64_t)k;
         }
     }
-    *keepalive_ok = ok && !until_close && !(conn_hdr && strcasecmp(conn_hdr, "close") == 0);
+    /* HTTP/1.0 closes after the response unless the server says keep-alive (node's shouldKeepAlive) */
+    *keepalive_ok = ok && !until_close && !(conn_hdr && strcasecmp(conn_hdr, "close") == 0) &&
+                    !(http10 && !(conn_hdr && strcasecmp(conn_hdr, "keep-alive") == 0));
 
 body_done:
 #undef AVAIL

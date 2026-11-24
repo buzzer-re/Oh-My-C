@@ -9,14 +9,15 @@ omc's version is the omp release it matches: `OMC_VERSION` in `src/core/core.h`,
 ## CI (`.github/workflows/ci.yml`)
 
 Every push to `main` and every pull request builds and tests on Linux x86_64 (`ubuntu-22.04`), Linux arm64
-(`ubuntu-22.04-arm`) and macOS arm64 (`macos-15`):
+(`ubuntu-22.04-arm`), macOS arm64 (`macos-15`) and Windows x86_64 (`windows-2025`, see [Windows](#windows)):
 
 1. `build-tools/ci.sh check-deps`: a C compiler, `python3`, OpenSSL 3 and zlib are present. Nothing is installed.
 2. `build-tools/ci.sh build`: a single compiler warning fails the build.
 3. `build-tools/ci.sh smoke`: `--version` and `--help` show the version, and the binary links nothing beyond libc,
-   OpenSSL, zlib, pthread and libm (on macOS: the system libraries and Homebrew's OpenSSL).
+   OpenSSL, zlib, pthread and libm (on macOS: the system libraries and Homebrew's OpenSSL; on Windows: only Windows'
+   own DLLs).
 4. `build-tools/ci.sh test`: `make test` on Linux; `make test-unit` on macOS, where the e2e suite hasn't been
-   verified yet. Tests that need Python's Pillow skip themselves on the runners (see [testing.md](testing.md)).
+   verified yet; `tests/windows/run-tests.ps1` on Windows. Tests that need Python's Pillow skip themselves on the runners (see [testing.md](testing.md)).
 
 `build-tools/ci.sh` runs the same way locally (`JOBS=3 build-tools/ci.sh build`).
 
@@ -29,7 +30,8 @@ and the source:
    `build-tools/release_notes.sh <version>`: `docs/releases/v<version>.md` when it exists (hand-written for readers,
    one line per paragraph since GitHub keeps line breaks in release text), otherwise install steps plus the
    `## omp v<version> update` section of [status.md](status.md), which must then exist. It refuses to overwrite an existing release.
-2. `build` runs on Linux x86_64 (`ubuntu-22.04`), Linux arm64 (`ubuntu-22.04-arm`) and macOS arm64 (`macos-15`): the CI
+2. `build` runs on Linux x86_64 (`ubuntu-22.04`), Linux arm64 (`ubuntu-22.04-arm`), macOS arm64 (`macos-15`) and
+   Windows x86_64 (`windows-2025`, a zip instead of a tarball: see [Windows](#windows)): the CI
    steps, then `build-tools/ci.sh dist` (`make dist`: the binary, README and omp's license notice in
    `omc-<version>-<os>-<arch>.tar.gz`, smoke-tested as packaged) and uploads the archive with its `.sha256`. The
    macOS binary links Homebrew's OpenSSL statically (`STATIC_OPENSSL=1`), so it needs no Homebrew on the target Mac;
@@ -50,22 +52,19 @@ git push origin main v18.18.7
 
 `build-tools/ci.sh dist` and `build-tools/ci.sh dist-src` build the same archives locally into `build/dist/`.
 
-### Windows asset (by hand for now)
+### Windows
 
-The workflow does not build Windows yet. `make WINDOWS=1 dist` (MinGW-w64, in WSL or Linux) builds the asset
-`install.ps1` downloads, `build/dist/omc-<version>-windows-x86_64.zip` (+ `.sha256`), with everything under
-`omc-<version>-windows-x86_64/`: `omc.exe`, `README.md`, `OMP-LICENSE`, `lib\` (`libomc.dll`, `libomc.dll.a`,
-`libomc.a`, `libomc.def`, `omc.pc`) and `include\omc.h`. Run `tests/windows/run-tests.ps1` on Windows against that
-build first. Upload the zip to the release and add its line to `SHA256SUMS` (`install.ps1` refuses an asset that
-`SHA256SUMS` does not list):
+The `windows-x86_64` job builds natively on GitHub's `windows-2025` runner: Git Bash runs `build-tools/ci.sh`, and the
+image's MinGW-w64 gcc (`C:\mingw64`), `make` and Python do the rest (`make WINDOWS=1 MINGW= HOSTCC=gcc`; nothing is
+installed). It runs `tests/windows/run-tests.ps1` (unit tests, tools, TUI on a console and through ConPTY, libomc,
+TLS, `omc update` and `install.ps1` via `irm | iex` against the release mock), then `make WINDOWS=1 dist` packs
+`build/dist/omc-<version>-windows-x86_64.zip` (+ `.sha256`) with everything under `omc-<version>-windows-x86_64/`:
+`omc.exe`, `README.md`, `OMP-LICENSE`, `lib\` (`libomc.dll`, `libomc.dll.a`, `libomc.a`, `libomc.def`, `omc.pc`) and
+`include\omc.h`. The smoke step checks that `omc.exe` and `libomc.dll` import only Windows' own DLLs. `install.ps1`
+and `omc update` on Windows install from that zip.
 
-```sh
-make WINDOWS=1 -B dist
-cat build/dist/omc-<version>-windows-x86_64.zip.sha256 >> SHA256SUMS   # the release's SHA256SUMS, then re-upload it
-```
-
-`omc update` on Windows does not install from releases yet (it reads `.tar.gz` assets and replaces the running binary
-in place); it points to `install.ps1 -Build`, and re-running `install.ps1` updates a release install.
+The same zip builds anywhere with MinGW-w64: `make WINDOWS=1 dist` (cross, in WSL or Linux) or `build-tools/ci.sh dist`
+from Git Bash / MSYS2.
 
 ## Install script (`install.sh`)
 
@@ -132,7 +131,7 @@ binary built on a CI runner.
 - **The macOS binary** targets macOS 15+ on Apple silicon (the runner's release: Homebrew's static OpenSSL is built for
   it) and has OpenSSL built in. It isn't signed or notarized: a copy downloaded with a browser needs
   `xattr -d com.apple.quarantine omc` once. There is no Intel macOS binary (`install.sh --build` covers it).
-- **The Windows binary** (x64, Windows 10 1809+ / 11) is cross-built with MinGW-w64 and imports only system DLLs
+- **The Windows binary** (x64, Windows 10 1809+ / 11) is built with MinGW-w64 on a Windows runner and imports only system DLLs
   (TLS through Schannel, no OpenSSL). It is not code-signed, so SmartScreen may warn when it is run from a browser
   download. See [windows.md](windows.md).
 - omc builds from source on Linux (glibc; checked on Ubuntu 22.04 with gcc 11 and bash 5.1, and newer) and macOS with

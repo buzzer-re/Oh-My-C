@@ -241,6 +241,123 @@ static void tar_reader(void) {
     sb_free(&t);
 }
 
+/* ---------- zip (the Windows release archive) ---------- */
+
+static void put16(sb_t *b, unsigned v) {
+    sb_putc(b, (char)(v & 0xff));
+    sb_putc(b, (char)(v >> 8 & 0xff));
+}
+static void put32(sb_t *b, uint32_t v) {
+    put16(b, v & 0xffff);
+    put16(b, v >> 16);
+}
+
+typedef struct {
+    const char *name, *data;
+    int method; /* 0 stored, 8 deflate */
+} zent_t;
+
+/* a zip of `ents` the way build-tools/zipdir.py writes one (sizes in the local header, no data descriptor) */
+static void mkzip(sb_t *z, const zent_t *ents, size_t n) {
+    sb_t cd = SB_INIT;
+    for (size_t i = 0; i < n; i++) {
+        size_t ul = strlen(ents[i].data), cl = ul;
+        char *comp = NULL;
+        if (ents[i].method == 8) {
+            z_stream s;
+            memset(&s, 0, sizeof s);
+            deflateInit2(&s, 9, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+            size_t cap = deflateBound(&s, ul) + 16;
+            comp = xmalloc(cap);
+            s.next_in = (Bytef *)ents[i].data;
+            s.avail_in = (uInt)ul;
+            s.next_out = (Bytef *)comp;
+            s.avail_out = (uInt)cap;
+            deflate(&s, Z_FINISH);
+            cl = cap - s.avail_out;
+            deflateEnd(&s);
+        }
+        uint32_t crc = (uint32_t)crc32(0L, (const Bytef *)ents[i].data, (uInt)ul);
+        size_t off = z->len, nl = strlen(ents[i].name);
+        put32(z, 0x04034b50), put16(z, 20), put16(z, 0), put16(z, ents[i].method), put32(z, 0), put32(z, crc);
+        put32(z, (uint32_t)cl), put32(z, (uint32_t)ul), put16(z, nl), put16(z, 0);
+        sb_appendn(z, ents[i].name, nl);
+        sb_appendn(z, comp ? comp : ents[i].data, cl);
+        put32(&cd, 0x02014b50), put16(&cd, 20), put16(&cd, 20), put16(&cd, 0), put16(&cd, ents[i].method);
+        put32(&cd, 0), put32(&cd, crc), put32(&cd, (uint32_t)cl), put32(&cd, (uint32_t)ul), put16(&cd, nl);
+        put16(&cd, 0), put16(&cd, 0), put16(&cd, 0), put16(&cd, 0), put32(&cd, 0), put32(&cd, (uint32_t)off);
+        sb_appendn(&cd, ents[i].name, nl);
+        free(comp);
+    }
+    size_t cd_off = z->len;
+    sb_appendn(z, cd.s, cd.len);
+    put32(z, 0x06054b50), put16(z, 0), put16(z, 0), put16(z, n), put16(z, n), put32(z, (uint32_t)cd.len);
+    put32(z, (uint32_t)cd_off), put16(z, 0);
+    sb_free(&cd);
+}
+
+static int unzip(const sb_t *z, const char *name, size_t max, char **out, size_t *len) {
+    char *err = NULL;
+    int rc = zipx_extract(z->s, z->len, name, max, out, len, &err);
+    CHECK((rc < 0) == (err != NULL));
+    CHECK((rc == 0) == (*out != NULL));
+    free(err);
+    return rc;
+}
+
+static void zip_reader(void) {
+    const char *want = "omc-9.9.9-windows-x86_64/omc.exe";
+    char big[3000];
+    for (size_t i = 0; i < sizeof big - 1; i++) big[i] = "MZomc"[i % 5];
+    big[sizeof big - 1] = 0;
+    zent_t ents[] = {{"omc-9.9.9-windows-x86_64/README.md", "hi\n", 0}, {want, big, 8},
+                     {"omc-9.9.9-windows-x86_64/lib/omc.pc", "prefix=x\n", 8}};
+    sb_t z = SB_INIT;
+    mkzip(&z, ents, 3);
+    char *o;
+    size_t len;
+    CHECK(unzip(&z, want, 1 << 20, &o, &len) == 0 && len == strlen(big) && !strcmp(o, big));
+    free(o);
+    CHECK(unzip(&z, "omc-9.9.9-windows-x86_64/README.md", 1 << 20, &o, &len) == 0 && !strcmp(o, "hi\n"));
+    free(o);
+    CHECK(unzip(&z, "omc.exe", 1 << 20, &o, &len) == 1);
+    CHECK(unzip(&z, want, 100, &o, &len) == -1); /* over the size cap */
+    /* a trailing archive comment is fine */
+    sb_t c = SB_INIT;
+    sb_appendn(&c, z.s, z.len);
+    c.s[c.len - 2] = 4;
+    sb_appendn(&c, "note", 4);
+    CHECK(unzip(&c, want, 1 << 20, &o, &len) == 0);
+    free(o);
+    sb_free(&c);
+    /* not a zip, truncated, a corrupt member or CRC, a duplicate name: refused */
+    sb_t t = SB_INIT;
+    sb_append(&t, "just text, no zip here at all.....");
+    CHECK(unzip(&t, want, 1 << 20, &o, &len) == -1);
+    sb_free(&t);
+    sb_t h = SB_INIT;
+    sb_appendn(&h, z.s, z.len / 2);
+    CHECK(unzip(&h, want, 1 << 20, &o, &len) == -1);
+    sb_free(&h);
+    sb_t bad = SB_INIT;
+    sb_appendn(&bad, z.s, z.len);
+    size_t data_at = 30 + strlen(ents[0].name) + 3 + 30 + strlen(want); /* the second member's data */
+    bad.s[data_at + 5] ^= 0x5a;
+    CHECK(unzip(&bad, want, 1 << 20, &o, &len) == -1);
+    bad.s[data_at + 5] ^= 0x5a;
+    bad.s[30 + strlen(ents[0].name)] ^= 1; /* README's stored data: its CRC no longer matches */
+    CHECK(unzip(&bad, "omc-9.9.9-windows-x86_64/README.md", 1 << 20, &o, &len) == -1);
+    CHECK(unzip(&bad, want, 1 << 20, &o, &len) == 0); /* the binary is still intact */
+    free(o);
+    sb_free(&bad);
+    zent_t dup[] = {{want, "a", 0}, {want, "b", 0}};
+    sb_t d = SB_INIT;
+    mkzip(&d, dup, 2);
+    CHECK(unzip(&d, want, 1 << 20, &o, &len) == -1);
+    sb_free(&d);
+    sb_free(&z);
+}
+
 static void checkout(void) {
     char *root = fs_mktempdir("omc-upd-test");
     char *bin = path_join(root, "build/obj/Linux-x/omc");
@@ -303,13 +420,18 @@ int main(void) {
     versions();
     sums();
     tar_reader();
+    zip_reader();
     checkout();
     state();
     bool prebuilt;
     const char *plat = su_platform(&prebuilt);
     CHECK(plat && strchr(plat, '-'));
     char *a = su_asset_name("1.2.3");
+#ifdef _WIN32
+    CHECK(str_starts(a, "omc-1.2.3-") && str_ends(a, ".zip") && prebuilt == !strcmp(plat, "windows-x86_64"));
+#else
     CHECK(str_starts(a, "omc-1.2.3-") && str_ends(a, ".tar.gz"));
+#endif
     free(a);
     if (failures) fprintf(stderr, "%d failure(s)\n", failures);
     else printf("test_update ok\n");

@@ -438,6 +438,7 @@ int omc_win_pause(void) {
 
 /* ---------- environment ---------- */
 
+char ***omc_win_environ_ptr(void) { return __p__environ(); }
 
 int omc_win_setenv(const char *name, const char *value, int overwrite) {
     if (!name || !*name || strchr(name, '=')) {

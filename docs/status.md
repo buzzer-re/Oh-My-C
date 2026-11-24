@@ -46,11 +46,17 @@ mocks); print mode with bash (Git Bash), write/read/edit/glob/grep/todo, non-ASC
 server (`DEPTH_ZERO_SELF_SIGNED_CERT`) and an extra trusted CA; `omc update --check`; the `powershell` tool and the
 no-bash fallback. `tests/windows/run-tests.ps1`: 87 of 87 checks.
 
-**Not yet:** the CI job building and testing Windows (the release asset is built by hand with `make WINDOWS=1 dist`,
-see [release.md](release.md)), `omc update` installing a Windows release (it points to `install.ps1`), the Windows
-console title from run state, Windows toast notifications, PowerShell profile aliases, MSVC linking (documented, not
-checked here); the full Linux e2e suite is not
-run on Windows (it assumes POSIX tools), the Windows script covers the platform paths.
+**Releases and CI:** the `windows-x86_64` job (CI and release) builds natively on GitHub's `windows-2025` runner with
+its preinstalled MinGW-w64 gcc 15 (Git Bash runs `build-tools/ci.sh`), runs `tests/windows/run-tests.ps1` and checks
+that `omc.exe` and `libomc.dll` import only Windows DLLs; the release carries `omc-<version>-windows-x86_64.zip` in
+`SHA256SUMS`. `omc update` installs from that zip (strict zip reader `zipx_extract` in `src/core/tarx.c`; the running
+`omc.exe` is renamed aside, then replaced). `install.ps1` runs as `irm <url> | iex` without changing the caller's
+session. The Windows script checks both against `tests/e2e/mock_release.py` (update of a running copy with
+`tests/windows/fake_omc.c` as release 99.0.0; install through `irm | iex` and through a script block with parameters).
+
+**Not yet:** the Windows console title from run state, Windows toast notifications, PowerShell profile aliases, MSVC
+linking (documented, not checked here); the full Linux e2e suite is not run on Windows (it assumes POSIX tools), the
+Windows script covers the platform paths.
 
 ## omp v19.1.0 update (2026-11-23)
 
@@ -263,7 +269,7 @@ Development is paused while the user tests omc day to day. Work resumes from use
 ## Runtime & infrastructure
 | Area | Status | Notes |
 |---|---|---|
-| Native Windows (`src/plat/win/`, [windows.md](windows.md)): POSIX layer, Schannel TLS, CNG crypto, in-tree zlib, Git Bash, ConPTY, win32-input-mode, `install.ps1`, `tests/windows/` | 🟡 | builds clean, unit tests and the Windows script pass; release assets and CI not yet |
+| Native Windows (`src/plat/win/`, [windows.md](windows.md)): POSIX layer, Schannel TLS, CNG crypto, in-tree zlib, Git Bash, ConPTY, win32-input-mode, `install.ps1`, `tests/windows/` | ✅ | builds clean, unit tests and the Windows script pass in CI; release zip, `install.ps1` (`irm \| iex`) and `omc update` |
 | HTTP/1.1 client (TLS, keep-alive pool, gzip, proxies, redirects) | ✅ | `src/net/http.c` |
 | SSE / NDJSON streaming, retry with backoff + Retry-After | ✅ | |
 | JSON (ordered, partial/streaming parse), YAML (parse + dump) | ✅ | |

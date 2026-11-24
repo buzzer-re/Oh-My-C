@@ -1,6 +1,7 @@
 # Release: pushing a tag v<OMC_VERSION> publishes a GitHub release with a prebuilt binary per platform (Linux x86_64,
-# Linux arm64, macOS arm64) and the source archive, with SHA256SUMS over all of them. install.sh installs the binary;
-# `install.sh --build` builds the source archive instead. The release stays a draft until every asset is uploaded.
+# Linux arm64, macOS arm64, and Windows x86_64 as a zip with omc.exe and libomc.dll) and the source archive, with
+# SHA256SUMS over all of them. install.sh / install.ps1 install the binary; `install.sh --build` builds the source
+# archive instead. The release stays a draft until every asset is uploaded.
 # Supply chain: no third-party actions. Checkout is plain git; publishing uses the gh CLI that GitHub's runners ship
 # with; build-tools/ci.sh installs nothing.
 name: Release
@@ -29,6 +30,7 @@ jobs:
       - name: Check out (git only)
         run: &checkout |
           git init -q .
+          git config core.autocrlf false # Windows runners default to CRLF checkouts
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch -q --depth=1 origin "$GITHUB_SHA"
@@ -49,6 +51,9 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false # every platform reports; publish still needs all of them
       matrix:
@@ -59,6 +64,8 @@ jobs:
             runner: ubuntu-22.04-arm
           - name: macos-arm64
             runner: macos-15
+          - name: windows-x86_64
+            runner: windows-2025 # Git Bash runs the steps; MinGW-w64 gcc, make and Python ship with the image
     steps:
       - name: Check out (git only)
         run: *checkout
@@ -73,7 +80,7 @@ jobs:
       - name: Package the binary
         run: build-tools/ci.sh dist
       - name: Upload to the draft release
-        run: gh release upload "$TAG" build/dist/omc-*-*-*.tar.gz build/dist/omc-*-*-*.tar.gz.sha256
+        run: gh release upload "$TAG" $(build-tools/ci.sh dist-assets)
 
   source:
     needs: prepare
@@ -97,8 +104,8 @@ jobs:
       - name: Checksums and publish
         run: |
           mkdir sums && cd sums
-          gh release download "$TAG" --pattern '*.tar.gz.sha256'
-          cat ./*.tar.gz.sha256 | sort -k2 > SHA256SUMS
+          gh release download "$TAG" --pattern '*.sha256'
+          cat ./*.sha256 | sed 's/ [*]/  /' | sort -k2 > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$TAG" SHA256SUMS
           gh release edit "$TAG" --draft=false --latest

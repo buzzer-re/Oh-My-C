@@ -189,11 +189,18 @@ char *su_installer_command(bool build) {
 const char *su_platform(bool *prebuilt) {
     static const char p[] = SU_OS "-" SU_ARCH;
     if (prebuilt)
-        *prebuilt = !strcmp(p, "linux-x86_64") || !strcmp(p, "linux-arm64") || !strcmp(p, "macos-arm64");
+        *prebuilt = !strcmp(p, "linux-x86_64") || !strcmp(p, "linux-arm64") || !strcmp(p, "macos-arm64") ||
+                    !strcmp(p, "windows-x86_64");
     return p;
 }
 
-char *su_asset_name(const char *version) { return xasprintf("omc-%s-%s.tar.gz", version, su_platform(NULL)); }
+char *su_asset_name(const char *version) {
+#ifdef _WIN32
+    return xasprintf("omc-%s-%s.zip", version, su_platform(NULL)); /* what install.ps1 installs from */
+#else
+    return xasprintf("omc-%s-%s.tar.gz", version, su_platform(NULL));
+#endif
+}
 
 /* ---------- latest release ---------- */
 

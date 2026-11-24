@@ -232,3 +232,143 @@ int tarx_find(const void *tar, size_t n, const char *name, size_t max_size, cons
     }
     return found ? 0 : 1;
 }
+
+/* ---------- zip ---------- */
+
+static uint32_t le16(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
+static uint32_t le32(const unsigned char *p) { return le16(p) | le16(p + 2) << 16; }
+
+/* one member's data: stored or raw deflate, exactly `usize` bytes, CRC-checked; owned or NULL with *err */
+static char *zip_member(const unsigned char *data, size_t csize, size_t usize, unsigned method, uint32_t crc,
+                        char **err) {
+    char *out = xmalloc(usize + 1);
+    if (method == 0) {
+        if (csize != usize) {
+            *err = xstrdup("a stored member's sizes disagree");
+            free(out);
+            return NULL;
+        }
+        memcpy(out, data, usize);
+    } else {
+        z_stream z;
+        memset(&z, 0, sizeof z);
+        if (inflateInit2(&z, -15) != Z_OK) {
+            *err = xstrdup("zlib initialization failed");
+            free(out);
+            return NULL;
+        }
+        /* one spare byte past the expected size catches a member that inflates longer (usize < 4 GiB: zip32) */
+        z.next_in = (Bytef *)data;
+        z.avail_in = (uInt)csize;
+        z.next_out = (Bytef *)out;
+        z.avail_out = (uInt)usize + 1;
+        int rc = inflate(&z, Z_FINISH);
+        size_t out_done = (size_t)usize + 1 - z.avail_out;
+        inflateEnd(&z);
+        if (rc != Z_STREAM_END || out_done != usize) {
+            *err = xstrdup(rc == Z_BUF_ERROR && out_done < usize ? "a member is truncated" : "a member is corrupt");
+            free(out);
+            return NULL;
+        }
+    }
+    if ((uint32_t)crc32(0L, (const Bytef *)out, (uInt)usize) != crc) {
+        *err = xstrdup("a member fails its CRC check");
+        free(out);
+        return NULL;
+    }
+    out[usize] = 0;
+    return out;
+}
+
+int zipx_extract(const void *zip, size_t n, const char *name, size_t max_size, char **out, size_t *len, char **err) {
+    const unsigned char *z = zip;
+    *out = NULL;
+    *len = 0;
+    *err = NULL;
+    /* the end-of-central-directory record: the last 22 bytes plus a comment of up to 64 KiB */
+    size_t eocd = SIZE_MAX;
+    for (size_t back = 22; back <= n && back <= 22 + 0xffff; back++) {
+        const unsigned char *p = z + n - back;
+        if (le32(p) == 0x06054b50 && le16(p + 20) == back - 22) {
+            eocd = n - back;
+            break;
+        }
+    }
+    if (eocd == SIZE_MAX) {
+        *err = xstrdup("not a zip file");
+        return -1;
+    }
+    const unsigned char *e = z + eocd;
+    size_t count = le16(e + 10), cd_size = le32(e + 12), cd_off = le32(e + 16);
+    if (le16(e + 4) || le16(e + 6) || le16(e + 8) != count) {
+        *err = xstrdup("multi-disk zip archives are not supported");
+        return -1;
+    }
+    if (count == 0xffff || cd_size == 0xffffffffu || cd_off == 0xffffffffu) {
+        *err = xstrdup("zip64 archives are not supported");
+        return -1;
+    }
+    if (cd_off > eocd || cd_size > eocd - cd_off) {
+        *err = xstrdup("the zip central directory is out of bounds");
+        return -1;
+    }
+    size_t want_len = strlen(name), pos = cd_off, end = cd_off + cd_size;
+    const unsigned char *hit = NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (end - pos < 46 || le32(z + pos) != 0x02014b50) {
+            *err = xstrdup("the zip central directory is malformed");
+            return -1;
+        }
+        const unsigned char *c = z + pos;
+        size_t nlen = le16(c + 28), xlen = le16(c + 30), clen = le16(c + 32);
+        if (end - pos - 46 < nlen + xlen + clen) {
+            *err = xstrdup("the zip central directory is malformed");
+            return -1;
+        }
+        if (nlen == want_len && !memcmp(c + 46, name, nlen)) {
+            if (hit) {
+                *err = xasprintf("%s is listed more than once", name);
+                return -1;
+            }
+            hit = c;
+        }
+        pos += 46 + nlen + xlen + clen;
+    }
+    if (!hit) return 1;
+    unsigned flags = le16(hit + 8), method = le16(hit + 10);
+    uint32_t crc = le32(hit + 16);
+    size_t csize = le32(hit + 20), usize = le32(hit + 24), loff = le32(hit + 42);
+    if (flags & 1) {
+        *err = xasprintf("%s is encrypted", name);
+        return -1;
+    }
+    if (method != 0 && method != 8) {
+        *err = xasprintf("%s uses an unsupported compression method (%u)", name, method);
+        return -1;
+    }
+    if (usize > max_size || usize >= 0xffffffffu) {
+        *err = xasprintf("%s is larger than the %zu-byte limit", name, max_size);
+        return -1;
+    }
+    if (loff > cd_off || cd_off - loff < 30 || le32(z + loff) != 0x04034b50) {
+        *err = xasprintf("the local header of %s is missing", name);
+        return -1;
+    }
+    const unsigned char *l = z + loff;
+    size_t lnlen = le16(l + 26), lxlen = le16(l + 28);
+    if (cd_off - loff - 30 < lnlen + lxlen || lnlen != want_len || memcmp(l + 30, name, lnlen) ||
+        le16(l + 8) != method) {
+        *err = xasprintf("the local header of %s disagrees with the central directory", name);
+        return -1;
+    }
+    size_t data = loff + 30 + lnlen + lxlen;
+    if (csize > cd_off - data) {
+        *err = xasprintf("%s runs past the end of the archive", name);
+        return -1;
+    }
+    char *m = zip_member(z + data, csize, usize, method, crc, err);
+    if (!m) return -1;
+    *out = m;
+    *len = usize;
+    return 0;
+}

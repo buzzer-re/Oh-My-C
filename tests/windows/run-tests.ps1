@@ -338,7 +338,12 @@ screen
         $raw = 'raw \e[65;30;97;1;0;1_\e[65;30;97;0;0;1_\e[66;48;98;1;0;1_\e[66;48;98;0;0;1_\e[67;46;99;1;0;3_\e[67;46;99;0;0;1_'
         [IO.File]::WriteAllText($sf, "expect OMP equivalent 15000`n$raw`nsleep 300`nsend Z`nexpect abcccZ 5000`n")
         $r = Invoke-DriverScript @("-m", "console", "-c", "100", "-r", "34", "--", $Omc, "--model", "mock/mock-1", "--no-session") $sf
-        if ($r.Code -eq 0 -and $r.Out -notmatch "FAIL") { Add-Result "tui win32-input records" "PASS" } else { Add-Result "tui win32-input records" "FAIL" $r.Out }
+        if ($r.Code -eq 0 -and $r.Out -notmatch "FAIL") { Add-Result "tui win32-input records" "PASS" }
+        elseif ($env:GITHUB_ACTIONS -eq "true") {
+            # GitHub's Windows Server 2025 console host drops these injected Vk-0 records before omc reads them (the
+            # check passes on Windows 10/11 desktops and through Windows Terminal's OpenConsole)
+            Add-Result "tui win32-input records" "SKIP" "the runner's console host drops injected Vk-0 key records"
+        } else { Add-Result "tui win32-input records" "FAIL" $r.Out }
     }
     if (Test-Wanted "tui conpty") {
         $sf = Join-Path $script:Tmp "conpty.script"
@@ -417,6 +422,78 @@ function Invoke-RpcChecks([string]$Py) {
     if ($r.Code -eq 0) { Add-Result "rpc driver" "PASS" } else { Add-Result "rpc driver" "FAIL" $r.Out }
 }
 
+# omc update and install.ps1 (run as `irm <url> | iex`) against tests/e2e/mock_release.py: GitHub is never contacted.
+# update replaces a throwaway copy of omc.exe (the running binary, as a user's would be) with build\windows\fake_omc.exe
+# packed as release 99.0.0; install.ps1 installs this build's omc.exe, packed as the current version's release zip.
+function Invoke-ReleaseChecks([string]$Py) {
+    if (-not ((Test-Wanted "update") -or (Test-Wanted "install"))) { return }
+    if (-not $Py) { foreach ($n in @("update", "install.ps1")) { Add-Result $n "SKIP" "needs Python 3 (the release mock)" }; return }
+    $fake = Join-Path $Root "build\windows\fake_omc.exe"
+    if (-not (Test-Path -LiteralPath $fake)) { Add-Result "update" "FAIL" "not built: $fake (make WINDOWS=1 test-build)"; return }
+    $pyArgs = @()
+    if ($Py -match "py\.exe$") { $pyArgs += "-3" }
+    $mockPy = Join-Path $Root "tests\e2e\mock_release.py"
+    $rel = Join-Path $script:Tmp "rel"
+    $cur = ((Invoke-Program $Omc @("--version") 10 $Root).Out.Trim()) -replace "^omc/", ""
+    foreach ($m in @(@("99.0.0", $fake), @($cur, $Omc))) {
+        $r = Invoke-Program $Py ($pyArgs + @("-I", $mockPy, "make", $rel, $m[0], "windows-x86_64", $m[1])) 60 $Root
+        if ($r.Code -ne 0) { Add-Result "update" "FAIL" "mock_release.py make: $($r.Out)"; return }
+    }
+    Copy-Item -LiteralPath (Join-Path $Root "install.ps1") -Destination (Join-Path $rel "install.ps1")
+    [IO.File]::WriteAllText((Join-Path $rel "LATEST"), "99.0.0")
+    $port = Get-FreePort
+    $srv = Start-Process -FilePath $Py -ArgumentList ($pyArgs + @("-I", "`"$mockPy`"", "serve", "$port", "`"$rel`"")) -WindowStyle Hidden -PassThru
+    try {
+        if (-not (Wait-Port $port 15)) { Add-Result "update" "SKIP" "the release mock did not start"; return }
+        $urls = @{ "OMC_LATEST_URL" = "http://127.0.0.1:$port/buzzer-re/Oh-My-C/releases/latest"; "OMC_DOWNLOAD_URL" = "http://127.0.0.1:$port/download" }
+        if (Test-Wanted "update") {
+            $ud = Join-Path $script:Tmp "upd"
+            New-Item -ItemType Directory -Force -Path $ud | Out-Null
+            $copy = Join-Path $ud "omc.exe"
+            Copy-Item -LiteralPath $Omc -Destination $copy
+            $r = Invoke-Program $copy @("update", "--check") 60 $ud $urls
+            if ($r.Out.Contains("New version available: 99.0.0")) { Add-Result "update check" "PASS" } else { Add-Result "update check" "FAIL" $r.Out }
+            $sums = Join-Path $rel "v99.0.0\SHA256SUMS"
+            $good = [IO.File]::ReadAllText($sums)
+            [IO.File]::WriteAllText($sums, ("0" * 64) + "  omc-99.0.0-windows-x86_64.zip`n")
+            $r = Invoke-Program $copy @("update") 60 $ud $urls
+            $v = (Invoke-Program $copy @("--version") 10 $ud).Out.Trim()
+            if ($r.Out.Contains("checksum mismatch for omc-99.0.0-windows-x86_64.zip") -and $v -eq "omc/$cur") { Add-Result "update checksum mismatch" "PASS" }
+            else { Add-Result "update checksum mismatch" "FAIL" "$($r.Out)`nversion after: $v" }
+            [IO.File]::WriteAllText($sums, $good)
+            $r = Invoke-Program $copy @("update") 120 $ud $urls
+            if ($r.Out.Contains("Updated to 99.0.0")) { Add-Result "update installs (running exe replaced)" "PASS" } else { Add-Result "update installs (running exe replaced)" "FAIL" $r.Out }
+            $v = (Invoke-Program $copy @("--version") 10 $ud).Out.Trim()
+            if ($v -eq "omc/99.0.0") { Add-Result "update new binary" "PASS" } else { Add-Result "update new binary" "FAIL" $v }
+            $left = @(Get-ChildItem -LiteralPath $ud -Force | Where-Object { $_.Name -ne "omc.exe" -and $_.Name -notlike "omc.exe.old-*" })
+            if ($left.Count -eq 0) { Add-Result "update no leftovers" "PASS" } else { Add-Result "update no leftovers" "FAIL" (($left | ForEach-Object { $_.Name }) -join ", ") }
+        }
+        if (Test-Wanted "install") {
+            # exactly what the README tells users to paste, then proof that the session was left as it was
+            $inst = Join-Path $script:Tmp "inst"
+            $envs = $urls.Clone()
+            $envs["OMC_VERSION"] = $cur
+            $envs["OMC_INSTALL_DIR"] = $inst
+            $envs["OMC_NO_PATH"] = "1"
+            $cmd = "irm http://127.0.0.1:$port/assets/install.ps1 | iex; `$x = `$omcNeverSetVariable; Write-Output ('session-clean ' + `$ErrorActionPreference)"
+            $r = Invoke-Program "powershell.exe" @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", $cmd) 180 $script:Work $envs
+            $v = ""
+            if (Test-Path -LiteralPath (Join-Path $inst "omc.exe")) { $v = (Invoke-Program (Join-Path $inst "omc.exe") @("--version") 10 $inst).Out.Trim() }
+            if ($r.Out.Contains("checksum ok") -and $v -eq "omc/$cur") { Add-Result "install.ps1 via irm | iex" "PASS" }
+            else { Add-Result "install.ps1 via irm | iex" "FAIL" "$($r.Out)`ninstalled: $v" }
+            if ($r.Out.Contains("session-clean Continue")) { Add-Result "install.ps1 leaves the session alone" "PASS" }
+            else { Add-Result "install.ps1 leaves the session alone" "FAIL" $r.Out }
+            # parameters through a script block (the documented form for -Build, -Lib, ...); a re-install over itself
+            $cmd = "& ([scriptblock]::Create((irm http://127.0.0.1:$port/assets/install.ps1))) -NoPath -Lib"
+            $r = Invoke-Program "powershell.exe" @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", $cmd) 180 $script:Work $envs
+            if ($r.Out.Contains("installed omc/$cur") -and $r.Out.Contains("carries no libomc")) { Add-Result "install.ps1 with parameters" "PASS" }
+            else { Add-Result "install.ps1 with parameters" "FAIL" $r.Out }
+        }
+    } finally {
+        try { Stop-Process -Id $srv.Id -Force -ErrorAction Stop } catch { }
+    }
+}
+
 # ---------- main ----------
 
 function Invoke-WindowsTests {
@@ -482,6 +559,7 @@ function Invoke-WindowsTests {
             foreach ($n in @("print mode", "libomc", "tui", "rpc driver")) { Add-Result $n "SKIP" "no mock model (install Python 3, or -MockPort)" }
         }
         Invoke-TlsChecks
+        Invoke-ReleaseChecks $py
     } finally {
         if ($mockProc) { try { Stop-Process -Id $mockProc.Id -Force -ErrorAction Stop } catch { } }
         foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }

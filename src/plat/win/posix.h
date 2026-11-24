@@ -352,7 +352,11 @@ int omc_win_umask(int mask);
 #define unsetenv omc_win_unsetenv
 int omc_win_setenv(const char *name, const char *value, int overwrite);
 int omc_win_unsetenv(const char *name);
-extern char **environ;
+/* mingw-w64 defines environ as a macro over the CRT's dllimport __p__environ(), so a file's own `extern char **environ;`
+ * would redeclare that import; route it through a plain function instead (that declaration then declares it again) */
+#undef environ
+#define environ (*omc_win_environ_ptr())
+char ***omc_win_environ_ptr(void);
 #define getuid() 1000u
 #define geteuid() 1000u
 #define getgid() 1000u

@@ -4,7 +4,8 @@
 
   mock_release.py make <dir> <version> <os-arch> [<binary>]   write <dir>/v<version>/omc-<v>-<os-arch>.tar.gz and
       SHA256SUMS (like .github/workflows/release.yml). The archive's omc-<v>-<os-arch>/omc is <binary>, or a small sh
-      script that prints `omc/<version>` for --version.
+      script that prints `omc/<version>` for --version. For windows-* it is omc-<v>-<os-arch>.zip with omc.exe
+      (<binary> is required: tests/windows/fake_omc.c), as `make WINDOWS=1 dist` packs it.
   mock_release.py serve <port> <dir>                           serve it:
       GET /<owner>/<repo>/releases/latest   302 to /<owner>/<repo>/releases/tag/v<version in <dir>/LATEST>
                                             (302 to /<owner>/<repo>/releases when LATEST is absent or empty: no release),
@@ -12,7 +13,7 @@
       GET /download/v<v>/<asset>            302 to /assets/v<v>/<asset> (the CDN hop GitHub makes)
       GET /assets/v<v>/<asset>              the file under <dir>, else 404
   Every request is appended to <dir>/requests.log as "<method> <path>"."""
-import hashlib, io, os, sys, tarfile, time
+import hashlib, io, os, sys, tarfile, time, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -23,6 +24,17 @@ def make(d, version, plat, binary=None):
     data = open(binary, "rb").read() if binary else (
         "#!/bin/sh\ncase \"$1\" in --version|-v) echo omc/%s ;; *) echo fake omc %s ;; esac\n" % (version, version)).encode()
     buf = io.BytesIO()
+    if plat.startswith("windows-"):
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(zipfile.ZipInfo(top + "/README.md", (2023, 11, 14, 22, 13, 20)), b"readme\n")
+            info = zipfile.ZipInfo(top + "/omc.exe", (2023, 11, 14, 22, 13, 20))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, data)
+        asset = top + ".zip"
+        with open(os.path.join(rel, asset), "wb") as f:
+            f.write(buf.getvalue())
+        write_sums(rel)
+        return
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.USTAR_FORMAT) as t:
         for name, body, mode in ((top, None, 0o755), (top + "/omc", data, 0o755), (top + "/README.md", b"readme\n", 0o644)):
             info = tarfile.TarInfo(name)
@@ -37,9 +49,13 @@ def make(d, version, plat, binary=None):
     asset = top + ".tar.gz"
     with open(os.path.join(rel, asset), "wb") as f:
         f.write(buf.getvalue())
+    write_sums(rel)
+
+
+def write_sums(rel):
     sums = ["%s  %s" % (hashlib.sha256(open(os.path.join(rel, n), "rb").read()).hexdigest(), n)
             for n in sorted(os.listdir(rel)) if n != "SHA256SUMS"]
-    with open(os.path.join(rel, "SHA256SUMS"), "w") as f:
+    with open(os.path.join(rel, "SHA256SUMS"), "w", newline="\n") as f:
         f.write("\n".join(sums) + "\n")
 
 

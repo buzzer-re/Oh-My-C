@@ -674,7 +674,7 @@ script:;
             if (n && buf[n - 1] == '\r' && n + 3 < sizeof buf) memcpy(buf + n, "\x1b[I", 3), n += 3;
             DWORD w;
             if (getenv("CONPTY_DRIVE_DEBUG")) {
-                fprintf(stderr, "send %zu:", n);
+                fprintf(stderr, "send %lu:", (unsigned long)n);
                 for (size_t q = 0; q < n; q++) fprintf(stderr, " %02x", (unsigned char)buf[q]);
                 fprintf(stderr, "\n");
             }

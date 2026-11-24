@@ -1,4 +1,4 @@
-# Build and test every push to main and every pull request.
+# Build and test every push to main and every pull request: Linux x86_64 and arm64, macOS arm64, Windows x86_64.
 # Supply chain: no third-party actions at all. The code is checked out with plain git and every step runs
 # build-tools/ci.sh, which installs nothing.
 name: CI
@@ -20,6 +20,9 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -30,12 +33,15 @@ jobs:
             runner: ubuntu-22.04-arm
           - name: macos-arm64
             runner: macos-15
+          - name: windows-x86_64
+            runner: windows-2025 # Git Bash runs the steps; MinGW-w64 gcc, make and Python ship with the image
     steps:
       - name: Check out (git only)
         env:
           TOKEN: ${{ github.token }}
         run: |
           git init -q .
+          git config core.autocrlf false # Windows runners default to CRLF checkouts
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch -q --depth=1 origin "$GITHUB_SHA"
@@ -48,3 +54,5 @@ jobs:
         run: build-tools/ci.sh smoke
       - name: Tests
         run: build-tools/ci.sh test
+      - name: Package (as the release does)
+        run: build-tools/ci.sh dist

@@ -9,6 +9,9 @@
 #include "core/tarx.h"
 #include "tui/symbols.h"
 
+#ifdef _WIN32
+#include <dirent.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -84,7 +87,11 @@ static void dl_progress(void *ud, const su_progress_t *p) {
 /* write `data` next to `target` (same directory, so the rename is atomic), executable; owned temp path or NULL */
 static char *write_temp(const char *target, const char *data, size_t len, char **err) {
     char *dir = path_dirname(target);
+#ifdef _WIN32
+    char *tmp = xasprintf("%s/.%s.%ld.%lld.new.exe", dir, path_basename(target), (long)getpid(), (long long)mono_ms());
+#else
     char *tmp = xasprintf("%s/.%s.%ld.%lld.new", dir, path_basename(target), (long)getpid(), (long long)mono_ms());
+#endif
     free(dir);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0700);
     if (fd < 0) {
@@ -121,6 +128,55 @@ static void fsync_dir(const char *path) {
         close(fd);
     }
     free(dir);
+}
+
+#ifdef _WIN32
+/* copies of omc.exe an earlier update moved aside while they were running ("<name>.old-*", as install.ps1 names them) */
+static void remove_stale_copies(const char *target) {
+    char *dir = path_dirname(target);
+    DIR *d = opendir(dir);
+    if (d) {
+        char *prefix = xasprintf("%s.old-", path_basename(target));
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strncmp(e->d_name, prefix, strlen(prefix))) continue;
+            char *p = path_join(dir, e->d_name);
+            unlink(p); /* still running: stays until a later update */
+            free(p);
+        }
+        free(prefix);
+        closedir(d);
+    }
+    free(dir);
+}
+#endif
+
+/* put `tmp` in place of `target`. Windows cannot replace a running executable, but it can rename one: the old binary
+ * is moved aside first and removed when nothing runs it any more (now, or at the next update). */
+static int replace_binary(const char *tmp, const char *target) {
+#ifdef _WIN32
+    remove_stale_copies(target);
+    char *aside = NULL;
+    if (fs_exists(target)) {
+        aside = xasprintf("%s.old-%ld%lld", target, (long)getpid(), (long long)mono_ms());
+        if (rename(target, aside) != 0) {
+            free(aside);
+            return -1;
+        }
+    }
+    if (rename(tmp, target) != 0) {
+        int e = errno;
+        if (aside) rename(aside, target);
+        free(aside);
+        errno = e;
+        return -1;
+    }
+    if (aside) unlink(aside);
+    free(aside);
+    return 0;
+#else
+    return rename(tmp, target);
+#endif
 }
 
 /* download, verify and install `version` over `target` (updateViaBinaryAt); NULL or the failure (owned) */
@@ -170,6 +226,15 @@ static char *install_release(const upd_opts_t *o, const char *target, const char
     }
     sayf(cli_dim, "Verified sha256:%s", got);
     char *zerr = NULL;
+    const char *bin;
+    size_t blen;
+#ifdef _WIN32
+    /* the Windows release is the zip install.ps1 installs from */
+    char *member = xasprintf("omc-%s-%s/omc.exe", version, plat);
+    int fr = zipx_extract(archive, alen, member, BINARY_CAP, &tar, &tlen, &zerr);
+    bin = tar;
+    blen = tlen;
+#else
     tar = tarx_gunzip(archive, alen, TAR_CAP, &tlen, &zerr);
     if (!tar) {
         err = xasprintf("could not read %s: %s", asset, zerr);
@@ -179,9 +244,8 @@ static char *install_release(const upd_opts_t *o, const char *target, const char
     free(archive);
     archive = NULL;
     char *member = xasprintf("omc-%s-%s/omc", version, plat);
-    const char *bin;
-    size_t blen;
     int fr = tarx_find(tar, tlen, member, BINARY_CAP, &bin, &blen, &zerr);
+#endif
     if (fr != 0) {
         err = fr > 0 ? xasprintf("%s has no %s", asset, member) : xasprintf("could not read %s: %s", asset, zerr);
         free(zerr);
@@ -189,6 +253,8 @@ static char *install_release(const upd_opts_t *o, const char *target, const char
         goto out;
     }
     free(member);
+    free(archive);
+    archive = NULL;
     if (o->progress) o->progress(o->ud, SU_PH_INSTALLING, version, 0, 0);
     say(cli_dim, "Installing update...");
     tmp = write_temp(target, bin, blen, &err);
@@ -205,7 +271,7 @@ static char *install_release(const upd_opts_t *o, const char *target, const char
         free(cmd);
         goto out;
     }
-    if (rename(tmp, target) != 0) {
+    if (replace_binary(tmp, target) != 0) {
         err = xasprintf("could not replace %s: %s", target, strerror(errno));
         goto out;
     }

@@ -36,7 +36,11 @@ UPDATE.md) when done.
 make -B -j8        # -B: the shared filesystem has clock skew; must build with zero warnings
 make test          # unit tests + tests/e2e/run.sh (mock servers, no network)
 make lib           # optional: build/libomc.a, build/libomc.so.0, build/omc.pc
+make windows       # optional: build/omc.exe with MinGW-w64 (WINDOWS=1 lib/test-build/dist), see docs/windows.md
 ```
+
+Windows code lives behind `_WIN32` (mostly in `src/plat/win/`); a change must keep `make windows` building with zero
+warnings too. CI builds and tests Windows natively (`tests/windows/run-tests.ps1`).
 
 Parity harnesses (both run the installed `omp` next to `build/omc` against the same scripted mock model):
 

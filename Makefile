@@ -38,7 +38,10 @@ CFLAGS  := $(filter-out -fPIC,$(CFLAGS)) -Isrc/plat/win/include -include plat/wi
            -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -D__USE_MINGW_ANSI_STDIO=1 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -DNOGDI
 LDFLAGS += -static
 TEST_LDFLAGS := -static
-LIBS    += -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -ladvapi32 -lshell32 -lole32 -luserenv -ldbghelp -lssp
+# libssp only where the toolchain ships it: newer mingw-w64 runtimes carry the stack protector themselves (MinGW-Builds
+# gcc 15, GitHub's Windows runners)
+SSP_LIB := $(if $(filter libssp.a,$(shell $(CC) -print-file-name=libssp.a 2>/dev/null)),,-lssp)
+LIBS    += -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -ladvapi32 -lshell32 -lole32 -luserenv -ldbghelp $(SSP_LIB)
 SSL_LIBS :=
 else ifeq ($(UNAME_S),Darwin)
 # Apple ld: PIE is the default; no -z options. OpenSSL comes from Homebrew (keg-only) or pkg-config.
@@ -110,6 +113,7 @@ else
 LIB_SHARED := build/libomc.so.$(LIB_SOVER)
 endif
 OBJCOPY    ?= objcopy
+PYTHON     ?= python3
 PC_FILE    := $(if $(filter Windows,$(UNAME_S)),build/windows/omc.pc,build/omc.pc)
 # Windows: relocatable, the root is the directory above the .pc (the release zip and install.ps1 -Lib keep it in lib\)
 PC_PREFIX  := $(if $(filter Windows,$(UNAME_S)),$${pcfiledir}/..,$(PREFIX))
@@ -287,12 +291,16 @@ build/windows/conpty_drive.exe: tests/windows/conpty_drive.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -static -o $@ $<
 
+build/windows/fake_omc.exe: tests/windows/fake_omc.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -Wall -Wextra -static -o $@ $<
+
 # linked as docs/windows.md tells users to: -lomc picks the import library (libomc.dll.a) over libomc.a
 build/windows/embed_dll.exe: examples/embed.c $(LIB_SHARED)
 	$(CC) -O2 -Wall -Wextra -Iinclude -DOMC_DLL -o $@ $< -Lbuild/windows -lomc
 
 # everything tests/windows/run-tests.ps1 runs: `make WINDOWS=1 test-build`
-test-build: $(BIN) $(addprefix $(O)/tests/,$(addsuffix .exe,$(UNIT_TESTS))) build/windows/conpty_drive.exe \
+test-build: $(BIN) $(addprefix $(O)/tests/,$(addsuffix .exe,$(UNIT_TESTS))) build/windows/conpty_drive.exe build/windows/fake_omc.exe \
             build/examples/embed.exe lib build/windows/embed_dll.exe
 endif
 
@@ -360,8 +368,8 @@ dist: $(BIN) lib
 	cp prompts/UPSTREAM-LICENSE build/dist/$(DIST_NAME)/OMP-LICENSE
 	cp $(LIB_SHARED) build/windows/libomc.dll.a $(LIB_STATIC) build/windows/libomc.def $(PC_FILE) build/dist/$(DIST_NAME)/lib/
 	cp include/omc.h build/dist/$(DIST_NAME)/include/
-	rm -f build/dist/$(DIST_NAME).zip && python3 -I build-tools/zipdir.py build/dist/$(DIST_NAME).zip build/dist $(DIST_NAME)
-	cd build/dist && f=$(DIST_NAME).zip && $(SHA256) > $$f.sha256
+	rm -f build/dist/$(DIST_NAME).zip && $(PYTHON) -I build-tools/zipdir.py build/dist/$(DIST_NAME).zip build/dist $(DIST_NAME)
+	cd build/dist && f=$(DIST_NAME).zip && $(SHA256) | sed 's/ [*]/  /' > $$f.sha256  # MSYS's sha256sum marks binary mode
 	@cat build/dist/$(DIST_NAME).zip.sha256
 else
 dist: $(BIN)

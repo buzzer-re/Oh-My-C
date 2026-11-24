@@ -31,11 +31,17 @@ curl -fsSL https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.sh |
 ./install.sh --build                # the same, from a clone
 ```
 
-On Windows 10/11 (x64), `install.ps1` does the same from PowerShell. Until the releases carry a Windows binary, build from source with `-Build` (it needs MinGW-w64 in WSL or MSYS2); omc's bash tool runs Git for Windows' bash. See [docs/windows.md](docs/windows.md).
+On Windows 10/11 (x64), paste this into PowerShell. It installs the release's `omc.exe` the same way, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\Programs\omc`, and offers to add it to your PATH. omc's bash tool runs Git for Windows' bash when it's installed, PowerShell otherwise. See [docs/windows.md](docs/windows.md).
 
 ```powershell
+irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1 | iex
+```
+
+To pass options, run it as a script block: `-Lib` also installs `libomc.dll`, and `-Build` compiles it from source (it needs MinGW-w64 in WSL or MSYS2):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1))) -Lib
 .\install.ps1 -Build -Source .      # from a clone
-.\install.ps1 -Build -Ref main      # a branch, downloaded (without -Ref/-Source: the latest release's source)
 ```
 
 ### Updating

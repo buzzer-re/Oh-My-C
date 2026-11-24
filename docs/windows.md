@@ -8,14 +8,17 @@ sources by a MinGW-w64 cross build. Only system DLLs are imported (`KERNEL32`, `
 ## Install and build
 
 ```powershell
-irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1 | iex     # a release (when one carries Windows)
+irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1 | iex     # the latest release
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1))) -Lib   # with options
 .\install.ps1 -Build -Ref main                                                      # build a branch from source
 .\install.ps1 -Build -Source C:\src\Oh-My-C -Lib                                    # a local checkout, plus libomc
 ```
 
 `install.ps1` (Windows PowerShell 5.1 and PowerShell 7) installs `omc.exe` into `%LOCALAPPDATA%\Programs\omc`
 (`-InstallDir`), adds it to the user PATH after asking (`-AddToPath`, `-Yes`, `-NoPath`), and renames a running
-`omc.exe` aside before replacing it. A release install checks the zip against the release's `SHA256SUMS`. `-Build`
+`omc.exe` aside before replacing it. A release install checks the zip against the release's `SHA256SUMS`. Run through
+`irm ... | iex` it leaves the PowerShell session as it was (strict mode and the error preference are set inside its
+function); `$env:OMC_VERSION`, `OMC_INSTALL_DIR`, `OMC_BUILD=1` and `OMC_NO_PATH=1` stand in for the parameters there. `-Build`
 needs a MinGW-w64 toolchain and installs none: either WSL (`sudo apt install mingw-w64 make gcc`, the build runs
 there and produces the Windows binary) or MSYS2 UCRT64 (`pacman -S mingw-w64-ucrt-x86_64-gcc make`).
 
@@ -30,7 +33,8 @@ make WINDOWS=1 MINGW= HOSTCC=gcc  # native MSYS2 build (no tool prefix)
 
 The Windows objects live in `build/obj/Windows-x86_64`, the libraries in `build/windows/`, so a Linux build and a
 Windows cross build share one checkout without clobbering each other. `make WINDOWS=1 dist` packs the release zip
-(see [release.md](release.md#windows-asset-by-hand-for-now)).
+(see [release.md](release.md#windows)). On a toolchain without `libssp` (newer mingw-w64 runtimes carry the stack
+protector themselves, e.g. MinGW-Builds gcc 15 on GitHub's runners) it is left out of the link.
 
 ## libomc on Windows
 
@@ -162,7 +166,8 @@ status line in conhost; Windows Terminal does not have this problem. omp has the
 `tests/windows/run-tests.ps1` runs everything natively: the unit tests, the CLI, print mode with every core tool
 against `tests/e2e/mock_openai.py`, sessions, two processes at once, both libomc builds, the TUI on a real console
 and through ConPTY (Shift+Enter, Ctrl+C), the RPC driver, TLS against github.com and a rejected self-signed server
-(Git's `openssl`). It prints PASS/FAIL/SKIP per check and writes a report file. It needs a build
+(Git's `openssl`), `omc update` replacing a running copy of itself, and `install.ps1` run exactly as
+`irm <url> | iex` (both against `tests/e2e/mock_release.py`, so GitHub is not contacted). It prints PASS/FAIL/SKIP per check and writes a report file. It needs a build
 (`make WINDOWS=1 test-build` or `-Build`), Git for Windows and Python 3 for the mocks (checks that need a mock are
 skipped without it; `-MockPort` uses a mock already running elsewhere). Everything runs in a throwaway HOME and agent
 dir.
@@ -178,12 +183,18 @@ The Linux suite (`make test`, `tests/e2e/run.sh`) is unchanged and stays the ref
 platform-specific paths rather than re-running all 970 e2e checks, many of which assume a POSIX environment
 (`/tmp` paths, `kill -STOP`, ptys from Python's `pty` module).
 
+## Updating
+
+`omc update` installs from the release zip (`omc-<version>-windows-x86_64.zip`, checked against `SHA256SUMS`, read by
+a strict zip reader in `src/core/tarx.c`). Windows cannot replace a running executable but can rename one, so the
+running `omc.exe` is renamed to `omc.exe.old-<id>` first and the new one put in its place; the old copy is removed
+when nothing runs it any more (at the next update, or by `install.ps1`). The startup notice and `update.auto` work as
+on Linux. Re-running `install.ps1` also updates a release install.
+
 ## Known differences
 
 - No `omc zsh`/`bash`/`sh` integration (not ported anywhere) and no PowerShell aliases (`profile-alias.ts`).
 - Desktop notifications on BEL terminals use the Linux D-Bus path only; Windows toasts are not sent.
 - The console window title is not set from the run state beyond what VT title sequences do.
-- Releases carry no Windows asset yet: `omc update --check` works (it only reads the latest release), while
-  `omc update` says there is no prebuilt omc for `windows-x86_64` and gives the `install.ps1 -Build` command.
 - Symlink checks in the unit tests are skipped without Developer Mode; Windows directories have no write bit, so the
   read-only-directory session test is skipped.

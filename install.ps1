@@ -13,6 +13,7 @@
 
     Works in Windows PowerShell 5.1 and PowerShell 7:
         irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1 | iex
+        & ([scriptblock]::Create((irm https://raw.githubusercontent.com/buzzer-re/Oh-My-C/main/install.ps1))) -Lib
         .\install.ps1 -Build -Ref main
         .\install.ps1 -Build -Source C:\src\Oh-My-C -Lib
 
@@ -34,7 +35,7 @@
 .PARAMETER AddToPath
     Add the install directory to the user PATH without asking.
 .PARAMETER NoPath
-    Leave the user PATH alone.
+    Leave the user PATH alone. Also $env:OMC_NO_PATH=1.
 .PARAMETER Yes
     Never ask: implies -AddToPath.
 #>
@@ -52,8 +53,8 @@ param(
     [switch]$NoPath
 )
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
+# `irm ... | iex` runs this script in the caller's own scope: everything that changes the session (strict mode, error
+# preference) is set inside Invoke-OmcInstall, so the user's PowerShell is left as it was.
 
 function Write-Step([string]$Message) { Write-Host "omc-install: $Message" }
 
@@ -226,6 +227,8 @@ function Test-GitBash {
 # ---------- main ----------
 
 function Invoke-OmcInstall {
+    $ErrorActionPreference = "Stop"
+    Set-StrictMode -Version 2.0
     Initialize-Tls
     $repo = Get-Setting "" "OMC_REPO" "buzzer-re/Oh-My-C"
     $base = Get-Setting "" "OMC_DOWNLOAD_URL" "https://github.com/$repo/releases/download"
@@ -317,7 +320,7 @@ function Invoke-OmcInstall {
         $installed = & (Join-Path $dest "omc.exe") --version 2>$null
         Write-Step "installed $installed to $(Join-Path $dest 'omc.exe')"
 
-        if (-not $NoPath) { Add-UserPath $dest (-not ($AddToPath -or $Yes)) }
+        if (-not ($NoPath -or $env:OMC_NO_PATH -eq "1")) { Add-UserPath $dest (-not ($AddToPath -or $Yes)) }
         if (-not (Test-GitBash)) {
             Write-Step "note: no Git Bash found, so omc's bash tool will run PowerShell; for bash, install Git for Windows: https://git-scm.com/download/win"
         }
