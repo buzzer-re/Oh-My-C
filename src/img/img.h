@@ -53,6 +53,9 @@ int img_gif_decode(const uint8_t *d, size_t n, img_t *out, char **err);
 int img_webp_decode(const uint8_t *d, size_t n, img_t *out, char **err);
 /* Sniff + dispatch. *fmt (optional) receives the detected container. */
 int img_decode(const uint8_t *d, size_t n, img_t *out, img_fmt_t *fmt, char **err);
+/* A Windows packed DIB (the CF_DIB clipboard format) as PNG bytes (BI_PNG passes its PNG through); NULL and *err on
+ * malformed or unsupported input. Untrusted input: every offset is checked. */
+uint8_t *img_dib_to_png(const uint8_t *d, size_t n, size_t *len, char **err);
 
 /* ---- encoders ---- */
 /* PNG: zlib level 0..9 (-1 = default 6); 8-bit RGB when every pixel is opaque, else RGBA. */

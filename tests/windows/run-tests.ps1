@@ -157,7 +157,8 @@ function Wait-Port([int]$Port, [int]$TimeoutSec = 10) {
 
 function Write-ModelsYml([string]$Dir, [string]$BaseUrl) {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-    $yml = "providers:`n  mock:`n    baseUrl: $BaseUrl`n    apiKey: MOCK_KEY`n    api: openai-completions`n    models:`n      - id: mock-1`n        contextWindow: 100000`n        maxTokens: 4096`n"
+    $yml = "providers:`n  mock:`n    baseUrl: $BaseUrl`n    apiKey: MOCK_KEY`n    api: openai-completions`n    models:`n      - id: mock-1`n        contextWindow: 100000`n        maxTokens: 4096`n" +
+           "      - id: mock-vision`n        input: [text, image]`n        contextWindow: 100000`n        maxTokens: 4096`n"
     [IO.File]::WriteAllText((Join-Path $Dir "models.yml"), $yml)
 }
 
@@ -345,6 +346,7 @@ screen
             Add-Result "tui win32-input records" "SKIP" "the runner's console host drops injected Vk-0 key records"
         } else { Add-Result "tui win32-input records" "FAIL" $r.Out }
     }
+    if (Test-Wanted "clipboard") { Invoke-ClipboardChecks }
     if (Test-Wanted "tui conpty") {
         $sf = Join-Path $script:Tmp "conpty.script"
         [IO.File]::WriteAllText($sf, "expect OMP equivalent 15000`nsend say:through conpty`nsleep 300`nsend \r`nexpect through conpty 20000`n")
@@ -352,6 +354,86 @@ screen
         if ($r.Code -eq 0 -and $r.Out -notmatch "FAIL") { Add-Result "tui conpty" "PASS" } else { Add-Result "tui conpty" "FAIL" $r.Out }
     }
     Remove-Item Env:OMC_SKIP_SETUP, Env:PI_NO_DESKTOP_NOTIFY -ErrorAction SilentlyContinue
+}
+
+# The Windows clipboard: Alt+V pastes an image (a bitmap, read as CF_DIB, and the registered PNG format) or text, and
+# copies reach the native clipboard. These checks replace the clipboard and put the previous contents back afterwards.
+function New-TestBitmap([int]$W, [int]$H) {
+    $bmp = New-Object System.Drawing.Bitmap $W, $H
+    for ($y = 0; $y -lt $H; $y++) { for ($x = 0; $x -lt $W; $x++) {
+        $bmp.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(255, (40 * $x) % 256, (90 * $y) % 256, 200))
+    } }
+    return $bmp
+}
+
+function Get-MockLogLines {
+    if ($env:MOCK_LOG -and (Test-Path -LiteralPath $env:MOCK_LOG)) { return @(Get-Content -LiteralPath $env:MOCK_LOG -Encoding UTF8) }
+    return @()
+}
+
+function Get-RequestImage([int]$Skip) {
+    # the image a request after the first $Skip carried: its `[Image #1, WxH]` marker (the image pipeline scales tiny
+    # images up, keeping the aspect ratio) when an image part came with it; $null when none did
+    foreach ($l in (Get-MockLogLines | Select-Object -Skip $Skip)) {
+        $m = [regex]::Match($l, '\[Image #1, (\d+)x(\d+)\]')
+        if ($m.Success -and $l.Contains('"type": "image_url"') -and $l -match 'data:image/') { return @([int]$m.Groups[1].Value, [int]$m.Groups[2].Value) }
+    }
+    return $null
+}
+
+function Invoke-ClipboardChecks {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne "STA") { Add-Result "clipboard" "SKIP" "needs an STA PowerShell"; return }
+    $saved = $null
+    try {
+        $d = [Windows.Forms.Clipboard]::GetDataObject()
+        if ($d) {
+            $saved = New-Object Windows.Forms.DataObject
+            foreach ($f in $d.GetFormats($false)) { try { $v = $d.GetData($f); if ($null -ne $v) { $saved.SetData($f, $v) } } catch { } }
+        }
+    } catch { }
+    $omcArgs = @("-m", "console", "-c", "100", "-r", "34", "--", $Omc, "--model", "mock/mock-vision", "--no-session")
+    try {
+        # a bitmap (CF_BITMAP; omc reads the CF_DIB Windows synthesizes) and the registered PNG format alone
+        foreach ($case in @(@{ Name = "clipboard bitmap"; W = 3; H = 2; Png = $false }, @{ Name = "clipboard png"; W = 5; H = 4; Png = $true })) {
+            if (-not (Test-Wanted $case.Name)) { continue }
+            $bmp = New-TestBitmap $case.W $case.H
+            if ($case.Png) {
+                $ms = New-Object System.IO.MemoryStream
+                $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+                $do = New-Object Windows.Forms.DataObject
+                $do.SetData("PNG", $false, $ms)
+                [Windows.Forms.Clipboard]::SetDataObject($do, $true)
+            } else { [Windows.Forms.Clipboard]::SetImage($bmp) }
+            $bmp.Dispose()
+            $sf = Join-Path $script:Tmp "clip.script"
+            [IO.File]::WriteAllText($sf, "expect OMP equivalent 15000`nkey v alt`nexpect #1 8000`nsend  what is this`nkey enter`nexpect plain answer 20000`n")
+            $before = @(Get-MockLogLines).Count
+            $r = Invoke-DriverScript $omcArgs $sf
+            $img = Get-RequestImage $before
+            $ok = $img -and [Math]::Abs($img[0] * $case.H - $img[1] * $case.W) -le [Math]::Max($img[0], $img[1]) / 50
+            if ($r.Code -eq 0 -and $r.Out -notmatch "FAIL" -and $ok) { Add-Result $case.Name "PASS" }
+            else { Add-Result $case.Name "FAIL" "request image: $($img -join 'x') (want the aspect of $($case.W)x$($case.H))`n$($r.Out)" }
+        }
+        if (Test-Wanted "clipboard text") {
+            [Windows.Forms.Clipboard]::SetText("pasted from the clipboard ñ")
+            $sf = Join-Path $script:Tmp "cliptext.script"
+            [IO.File]::WriteAllText($sf, "expect OMP equivalent 15000`nkey v alt`nexpect pasted from the clipboard ñ 8000`n")
+            $r = Invoke-DriverScript $omcArgs $sf
+            if ($r.Code -eq 0 -and $r.Out -notmatch "FAIL") { Add-Result "clipboard text" "PASS" } else { Add-Result "clipboard text" "FAIL" $r.Out }
+        }
+        if (Test-Wanted "clipboard copy") {
+            # /copy cmd copies the last bash command through OSC 52 and the native clipboard (the console ignores OSC 52)
+            [Windows.Forms.Clipboard]::SetText("before the copy")
+            $sf = Join-Path $script:Tmp "clipcopy.script"
+            [IO.File]::WriteAllText($sf, "expect OMP equivalent 15000`nsend bash:echo copy-me`nsleep 300`nkey enter`nexpect Tool said: copy-me 20000`nsend /copy cmd`nsleep 300`nkey enter`nexpect to clipboard 8000`n")
+            $r = Invoke-DriverScript $omcArgs $sf
+            $got = [Windows.Forms.Clipboard]::GetText()
+            if ($got -eq "echo copy-me") { Add-Result "clipboard copy" "PASS" } else { Add-Result "clipboard copy" "FAIL" "clipboard: '$got'`n$($r.Out)" }
+        }
+    } finally {
+        try { if ($saved -and $saved.GetFormats().Count) { [Windows.Forms.Clipboard]::SetDataObject($saved, $true) } else { [Windows.Forms.Clipboard]::Clear() } } catch { }
+    }
 }
 
 function Invoke-DriverScript([string[]]$DriverArgs, [string]$ScriptFile) {

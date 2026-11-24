@@ -438,7 +438,15 @@ int omc_win_pause(void) {
 
 /* ---------- environment ---------- */
 
-char ***omc_win_environ_ptr(void) { return __p__environ(); }
+/* the CRT's environment table: UCRT headers (newer mingw-w64, GitHub's gcc 15) declare __p__environ(); msvcrt
+ * headers (Ubuntu's mingw-w64, the WSL build) only give the _environ macro */
+char ***omc_win_environ_ptr(void) {
+#ifdef _UCRT
+    return __p__environ();
+#else
+    return &_environ;
+#endif
+}
 
 int omc_win_setenv(const char *name, const char *value, int overwrite) {
     if (!name || !*name || strchr(name, '=')) {

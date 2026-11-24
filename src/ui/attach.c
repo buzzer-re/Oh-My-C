@@ -262,7 +262,7 @@ static bool attach_bytes(ui_t *u, const uint8_t *bytes, size_t n, const char *so
 
 /* ---------- clipboard ---------- */
 
-#ifndef __APPLE__ /* only the Linux clipboard readers below use it */
+#if !defined(__APPLE__) && !defined(_WIN32) /* only the Linux clipboard readers below use it */
 static bool have_cmd(const char *name) {
     const char *argv[] = {"sh", "-c", "command -v \"$0\" >/dev/null 2>&1", name, NULL};
     proc_opts_t o = {.timeout_ms = 3000};
@@ -274,6 +274,7 @@ static bool have_cmd(const char *name) {
 }
 #endif
 
+#ifndef _WIN32 /* Windows reads its clipboard natively */
 static bool run_capture(const char *const *argv, char **out, size_t *len) {
     proc_opts_t o = {.timeout_ms = 5000, .max_output = IMG_MAX_INPUT_BYTES + 1};
     proc_result_t r;
@@ -287,11 +288,81 @@ static bool run_capture(const char *const *argv, char **out, size_t *len) {
     proc_result_free(&r);
     return ok;
 }
+#endif
 
-/* readImageFromClipboard: wl-paste (Wayland), xclip (X11), osascript (macOS) */
+#ifdef _WIN32
+/* clipboard.ts readImageViaPowerShell / readTextViaPowerShell: Windows PowerShell reads the clipboard when the native
+ * read cannot (an undecodable bitmap, or the clipboard held by another program) */
+static char *powershell_capture(const char *script, size_t max) {
+    const char *argv[] = {"powershell.exe", "-NoProfile", "-NonInteractive", "-Sta", "-Command", script, NULL};
+    proc_opts_t o = {.timeout_ms = 8000, .max_output = max}; /* POWERSHELL_TIMEOUT_MS */
+    proc_result_t r;
+    if (proc_run(argv, &o, &r) != 0) return NULL;
+    char *out = NULL;
+    if (r.exit_code == 0 && !r.truncated && !r.timed_out) {
+        out = r.out;
+        r.out = NULL;
+    }
+    proc_result_free(&r);
+    return out;
+}
+
+static bool powershell_image(char **data, size_t *len) {
+    static const char script[] = "$ErrorActionPreference = 'Stop'\n"
+                                 "Add-Type -AssemblyName System.Windows.Forms\n"
+                                 "Add-Type -AssemblyName System.Drawing\n"
+                                 "$img = [System.Windows.Forms.Clipboard]::GetImage()\n"
+                                 "if ($img -ne $null) {\n"
+                                 "\t$ms = New-Object System.IO.MemoryStream\n"
+                                 "\t$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)\n"
+                                 "\t[Console]::Out.Write([Convert]::ToBase64String($ms.ToArray()))\n"
+                                 "}\n";
+    char *b64 = powershell_capture(script, IMG_MAX_INPUT_BYTES / 3 * 4 + 16);
+    if (!b64) return false;
+    char *t = str_trim(b64);
+    size_t n = 0;
+    unsigned char *bytes = *t ? base64_decode(t, strlen(t), &n) : NULL;
+    free(b64);
+    if (!bytes || !n || n > IMG_MAX_INPUT_BYTES) {
+        free(bytes);
+        return false;
+    }
+    *data = (char *)bytes;
+    *len = n;
+    return true;
+}
+#endif
+
+/* readImageFromClipboard: wl-paste (Wayland), xclip (X11), osascript (macOS), the native clipboard (Windows) */
 static bool clipboard_image(char **data, size_t *len) {
     if (getenv("TERMUX_VERSION")) return false;
-#ifdef __APPLE__
+#if defined(_WIN32)
+    /* the registered PNG format first, else the bitmap Windows synthesizes as CF_DIB, decoded here (clipboard.rs
+     * read_image_from_clipboard); PowerShell only for a bitmap that cannot be read or decoded, so a clipboard without
+     * a bitmap never waits on a cold PowerShell start */
+    char *b = NULL;
+    size_t n = 0;
+    if (omc_win_clipboard_read(OMC_CLIP_PNG, &b, &n) == 1 && n > 0 && n <= IMG_MAX_INPUT_BYTES) {
+        *data = b;
+        *len = n;
+        return true;
+    }
+    free(b);
+    b = NULL;
+    if (!omc_win_clipboard_has(OMC_CLIP_DIB)) return false;
+    if (omc_win_clipboard_read(OMC_CLIP_DIB, &b, &n) == 1) {
+        size_t pl = 0;
+        uint8_t *png = img_dib_to_png((const uint8_t *)b, n, &pl, NULL);
+        free(b);
+        if (png && pl <= IMG_MAX_INPUT_BYTES) {
+            *data = (char *)png;
+            *len = pl;
+            return true;
+        }
+        free(png);
+    }
+    return powershell_image(data, len);
+#elif defined(__APPLE__)
     char *tmp = xasprintf("%s/omc-clip-%d.png", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
     char *script = xasprintf("set f to (open for access POSIX file \"%s\" with write permission)\n"
                              "try\nwrite (the clipboard as «class PNGf») to f\nend try\nclose access f",
@@ -346,7 +417,21 @@ static bool clipboard_image(char **data, size_t *len) {
 static char *clipboard_text(void) {
     char *out = NULL;
     size_t n = 0;
-#ifdef __APPLE__
+#if defined(_WIN32)
+    /* readTextFromClipboard on win32: the native read, PowerShell only when the clipboard could not be opened */
+    int rc = omc_win_clipboard_read(OMC_CLIP_TEXT, &out, &n);
+    if (rc < 0) {
+        out = powershell_capture("$ErrorActionPreference = 'Stop'\n"
+                                 "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
+                                 "[Console]::Out.Write([string](Get-Clipboard -Raw))\n",
+                                 (size_t)64 << 20);
+    }
+    if (out) {
+        char *lf = str_replace(out, "\r\n", "\n");
+        free(out);
+        return lf;
+    }
+#elif defined(__APPLE__)
     const char *argv[] = {"pbpaste", NULL};
     if (run_capture(argv, &out, &n)) return out;
 #else

@@ -842,6 +842,9 @@ static const struct {
     {"app.btw.inject", {"alt+i"}},
 #ifdef __APPLE__
     {"app.clipboard.pasteImage", {"ctrl+v", "super+v"}}, /* getDefaultPasteImageKeys("darwin") */
+#elif defined(_WIN32)
+    /* getDefaultPasteImageKeys("win32"): Windows Terminal keeps ctrl+v for its own paste */
+    {"app.clipboard.pasteImage", {"ctrl+v", "alt+v"}},
 #else
     {"app.clipboard.pasteImage", {"ctrl+v"}},
 #endif

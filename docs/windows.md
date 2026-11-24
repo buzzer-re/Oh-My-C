@@ -115,6 +115,7 @@ cl /I include app.c omc.lib
 | Editor | `$VISUAL`, `$EDITOR`, else Notepad, run as `cmd.exe /d /s /c "<editor> "<file>""` (omp's `resolveEditorSpawnCommand`) |
 | Opening URLs | `powershell.exe -NoProfile -NonInteractive -EncodedCommand` with `Start-Process` (omp's `windowsOpenerCommand`) |
 | Sleep prevention | `SetThreadExecutionState` on a dedicated thread (omp's natives power.rs) |
+| Clipboard | read natively like omp's natives clipboard.rs: an image from the registered `PNG` format, else the `CF_DIB` bitmap decoded to PNG (`src/img/dib.c`), PowerShell (`Clipboard.GetImage()`) only for a bitmap that cannot be decoded; text from `CF_UNICODETEXT`. Copies go out as OSC 52 and to the native clipboard (the classic console ignores OSC 52) |
 | Paths | `C:/x`, `C:\x`, `//server/share/x` and `/x` are absolute; omc keeps `/` internally and accepts `\` everywhere |
 
 ## How it works
@@ -136,6 +137,7 @@ branches at its call sites.
 | `crypto.c` | SHA-1/256/512, HMAC, random bytes and RSA-SHA256 signing (PKCS#8 / PKCS#1 PEM keys) over CNG |
 | `zlib.c` | inflate (streaming, any input/output split), deflate (LZ77 + stored/fixed/dynamic blocks), zlib/gzip/raw framing, crc32/adler32, gz files; written for omc, checked against real zlib both ways |
 | `regex.c` | POSIX `regcomp`/`regexec` over omc's own regex engine |
+| `clip.c` | the clipboard: UTF-16 text, the registered `PNG` format, `CF_DIB` (decoded by `src/img/dib.c`), text writes |
 | `util.c` | UTF-8/UTF-16 conversion, errno mapping, the libc pieces the CRT lacks, start-up (`omc_win_init`, `omc_win_init_exe`) |
 
 **Bash tool.** The persistent session shell is Git Bash. On Linux each command's output group goes through a FIFO;
@@ -153,7 +155,8 @@ the supervisor forwards.
 win32-input-mode (`CSI ? 9001 h`) when the terminal does not answer the kitty keyboard query, and decodes the key
 records into the bytes a legacy terminal sends, with kitty CSI-u for the chords legacy encoding loses (port of
 omp's `windows-input-mode.ts`): Shift+Enter inserts a newline, AltGr text and dead keys compose. Over SSH it keeps
-modifyOtherKeys.
+modifyOtherKeys. Pasting an image (screenshot, copied picture) is `Ctrl+V` or `Alt+V`, as in omp on Windows; with text
+on the clipboard Windows Terminal pastes it itself on `Ctrl+V`, and `Alt+V` reads it through omc.
 
 **Rendering.** omp's ConPTY rules are followed: every row rewrite ends at column zero (ConPTY materializes a pending
 wrap before the next cursor move, which would scroll the status line into the transcript), and writes are cut into
@@ -165,7 +168,8 @@ status line in conhost; Windows Terminal does not have this problem. omp has the
 
 `tests/windows/run-tests.ps1` runs everything natively: the unit tests, the CLI, print mode with every core tool
 against `tests/e2e/mock_openai.py`, sessions, two processes at once, both libomc builds, the TUI on a real console
-and through ConPTY (Shift+Enter, Ctrl+C), the RPC driver, TLS against github.com and a rejected self-signed server
+and through ConPTY (Shift+Enter, Ctrl+C), clipboard paste (a bitmap, a PNG, text) and copy (the clipboard is
+saved and put back), the RPC driver, TLS against github.com and a rejected self-signed server
 (Git's `openssl`), `omc update` replacing a running copy of itself, and `install.ps1` run exactly as
 `irm <url> | iex` (both against `tests/e2e/mock_release.py`, so GitHub is not contacted). It prints PASS/FAIL/SKIP per check and writes a report file. It needs a build
 (`make WINDOWS=1 test-build` or `-Build`), Git for Windows and Python 3 for the mocks (checks that need a mock are

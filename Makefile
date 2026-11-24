@@ -41,7 +41,7 @@ TEST_LDFLAGS := -static
 # libssp only where the toolchain ships it: newer mingw-w64 runtimes carry the stack protector themselves (MinGW-Builds
 # gcc 15, GitHub's Windows runners)
 SSP_LIB := $(if $(filter libssp.a,$(shell $(CC) -print-file-name=libssp.a 2>/dev/null)),,-lssp)
-LIBS    += -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -ladvapi32 -lshell32 -lole32 -luserenv -ldbghelp $(SSP_LIB)
+LIBS    += -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -ladvapi32 -luser32 -lshell32 -lole32 -luserenv -ldbghelp $(SSP_LIB)
 SSL_LIBS :=
 else ifeq ($(UNAME_S),Darwin)
 # Apple ld: PIE is the default; no -z options. OpenSSL comes from Homebrew (keg-only) or pkg-config.

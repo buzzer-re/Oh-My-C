@@ -422,6 +422,10 @@ void tui_term_copy_osc52(tui_term_t *t, const char *text, size_t n) {
     tui_term_puts(t, b64);
     tui_term_puts(t, "\a");
     free(b64);
+#ifdef _WIN32
+    /* copyToClipboard: OSC 52, then the native clipboard (best effort); the classic console ignores OSC 52 */
+    (void)omc_win_clipboard_set_text(text, n);
+#endif
 }
 
 void tui_term_clear_screen(tui_term_t *t, bool scrollback) {

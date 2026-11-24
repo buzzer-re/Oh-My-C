@@ -25,6 +25,9 @@ are identical to the old checks there).
   (`SetThreadExecutionState`), restart (spawn and wait), Git Bash discovery (omp's `resolveWindowsShell`), the home and
   temp directories, drive-letter and UNC paths, the status line's Windows scratch roots, self-update's platform name
   and install.ps1 commands.
+- Clipboard (`src/plat/win/clip.c`, `src/img/dib.c`; omp clipboard.ts / natives clipboard.rs): image paste from the `PNG`
+  format or the `CF_DIB` bitmap (PowerShell fallback for an undecodable one), text paste, native copy next to OSC 52;
+  paste-image keys `ctrl+v` and `alt+v` (getDefaultPasteImageKeys("win32")). Checked in conhost and Windows Terminal.
 - omp's ConPTY behaviour: win32-input-mode (`CSI ? 9001 h`) with the record decoder of `windows-input-mode.ts`
   (Shift+Enter, AltGr, dead keys), rows ending at column zero (#9783), 16 KiB writes.
 - PowerShell (omc's addition; omp runs its embedded shell instead): next to Git Bash a `powershell` tool for
@@ -44,7 +47,7 @@ mocks); print mode with bash (Git Bash), write/read/edit/glob/grep/todo, non-ASC
 `-c`, two processes at once, background job `notify`; the TUI on conhost, through ConPTY and in Windows Terminal 1.24
 (prompt, bash card, setup wizard arrows, Shift+Enter newline, Ctrl+C exit, the win32-input-mode records WT relays); RPC; libomc static and DLL embedding; TLS to github.com, a rejected self-signed
 server (`DEPTH_ZERO_SELF_SIGNED_CERT`) and an extra trusted CA; `omc update --check`; the `powershell` tool and the
-no-bash fallback. `tests/windows/run-tests.ps1`: 87 of 87 checks.
+no-bash fallback; clipboard image and text paste and copy. `tests/windows/run-tests.ps1`: 99 of 99 checks.
 
 **Releases and CI:** the `windows-x86_64` job (CI and release) builds natively on GitHub's `windows-2025` runner with
 its preinstalled MinGW-w64 gcc 15 (Git Bash runs `build-tools/ci.sh`), runs `tests/windows/run-tests.ps1` and checks

@@ -570,6 +570,14 @@ void omc_win_pty_close(int pid);
 /* the executable a command name runs (PATH + PATHEXT), '/' separators; owned, NULL if none */
 char *omc_win_find_exe(const char *name);
 
+/* clipboard (clip.c): text as UTF-8, the registered "PNG" format, or the CF_DIB bitmap (decode with img_dib_to_png) */
+enum { OMC_CLIP_TEXT = 0, OMC_CLIP_PNG = 1, OMC_CLIP_DIB = 2 };
+bool omc_win_clipboard_has(int kind); /* OMC_CLIP_DIB: any bitmap format */
+/* 1 with *out (malloc'd; text NUL-terminated) and *len, 0 when the clipboard holds no such data, -1 when the clipboard
+ * could not be opened (another program holds it) */
+int omc_win_clipboard_read(int kind, char **out, size_t *len);
+int omc_win_clipboard_set_text(const char *utf8, size_t n); /* 0, or -1 */
+
 #ifdef __cplusplus
 }
 #endif

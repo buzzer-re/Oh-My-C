@@ -360,10 +360,104 @@ static void test_pipeline(void) {
     free(fb);
 }
 
+/* ---- CF_DIB (Windows clipboard bitmaps) -> PNG: the shapes clipboard owners write (clipboard.rs dib_to_png tests) */
+
+static void put32(sb_t *b, uint32_t v) {
+    for (int i = 0; i < 4; i++) sb_putc(b, (char)(v >> (8 * i)));
+}
+static void put16(sb_t *b, uint16_t v) {
+    sb_putc(b, (char)v);
+    sb_putc(b, (char)(v >> 8));
+}
+/* BITMAPINFOHEADER (40 bytes) */
+static void dib_header(sb_t *b, int32_t w, int32_t h, uint16_t bpp, uint32_t comp, uint32_t clr_used) {
+    put32(b, 40), put32(b, (uint32_t)w), put32(b, (uint32_t)h), put16(b, 1), put16(b, bpp), put32(b, comp);
+    put32(b, 0), put32(b, 2835), put32(b, 2835), put32(b, clr_used), put32(b, 0);
+}
+
+/* decode `dib` to PNG, decode the PNG back, compare with RGBA `want` (w*h*4, top row first) */
+static void dib_check(const char *what, sb_t *dib, int w, int h, const uint8_t *want) {
+    size_t n = 0;
+    char *err = NULL;
+    uint8_t *png = img_dib_to_png((const uint8_t *)dib->s, dib->len, &n, &err);
+    CHECK(png != NULL, "%s: %s", what, err ? err : "?");
+    img_t im = {0};
+    if (png) CHECK(img_png_decode(png, n, &im, NULL) == 0, "%s: PNG decodes", what);
+    if (im.px) {
+        CHECK(im.w == w && im.h == h, "%s: %dx%d, got %dx%d", what, w, h, im.w, im.h);
+        if (im.w == w && im.h == h) CHECK(!memcmp(im.px, want, (size_t)w * (size_t)h * 4), "%s: pixels", what);
+    }
+    img_free(&im);
+    free(png);
+    free(err);
+    sb_free(dib);
+}
+
+static void test_dib(void) {
+    /* 2x2: top row red, green; bottom row blue, white */
+    static const uint8_t want[16] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255};
+    static const uint8_t bot_bgra[8] = {0xff, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff}, top_bgra[8] = {0, 0, 0xff, 0xff, 0, 0xff, 0, 0xff};
+    sb_t b = SB_INIT;
+
+    /* Qt: BITMAPINFOHEADER + BI_BITFIELDS + three masks, bottom-up */
+    dib_header(&b, 2, 2, 32, 3, 0);
+    put32(&b, 0x00FF0000), put32(&b, 0x0000FF00), put32(&b, 0x000000FF);
+    sb_appendn(&b, (const char *)bot_bgra, 8), sb_appendn(&b, (const char *)top_bgra, 8);
+    dib_check("32-bit bitfields", &b, 2, 2, want);
+
+    /* 32-bit BI_RGB with the fourth byte 0 everywhere (screenshots): opaque, top-down */
+    b = (sb_t)SB_INIT;
+    dib_header(&b, 2, -2, 32, 0, 0);
+    static const uint8_t z[16] = {0, 0, 0xff, 0, 0, 0xff, 0, 0, 0xff, 0, 0, 0, 0xff, 0xff, 0xff, 0};
+    sb_appendn(&b, (const char *)z, 16);
+    dib_check("32-bit zero alpha", &b, 2, 2, want);
+
+    /* 24-bit bottom-up, rows padded to 4 bytes */
+    b = (sb_t)SB_INIT;
+    dib_header(&b, 2, 2, 24, 0, 0);
+    static const uint8_t r24[16] = {0xff, 0, 0, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xff, 0, 0xff, 0, 0, 0};
+    sb_appendn(&b, (const char *)r24, 16);
+    dib_check("24-bit", &b, 2, 2, want);
+
+    /* 8-bit palette of four entries */
+    b = (sb_t)SB_INIT;
+    dib_header(&b, 2, 2, 8, 0, 4);
+    static const uint8_t pal[16] = {0, 0, 0xff, 0, 0, 0xff, 0, 0, 0xff, 0, 0, 0, 0xff, 0xff, 0xff, 0};
+    static const uint8_t idx[8] = {2, 3, 0, 0, 0, 1, 0, 0};
+    sb_appendn(&b, (const char *)pal, 16), sb_appendn(&b, (const char *)idx, 8);
+    dib_check("8-bit palette", &b, 2, 2, want);
+
+    /* truncated pixels, a zero width, an absurd height, RLE: errors, never a read past the end */
+    static const struct {
+        const char *what;
+        int32_t w, h;
+        uint16_t bpp;
+        uint32_t comp;
+        size_t pixels;
+    } bad[] = {{"truncated", 2, 2, 32, 0, 15}, {"zero width", 0, 2, 32, 0, 16}, {"huge", 2, 0x7fffffff, 32, 0, 16},
+               {"rle8", 2, 2, 8, 1, 16}};
+    for (size_t i = 0; i < ARRAY_LEN(bad); i++) {
+        b = (sb_t)SB_INIT;
+        dib_header(&b, bad[i].w, bad[i].h, bad[i].bpp, bad[i].comp, 0);
+        for (size_t k = 0; k < bad[i].pixels; k++) sb_putc(&b, 0);
+        size_t n = 0;
+        char *err = NULL;
+        uint8_t *png = img_dib_to_png((const uint8_t *)b.s, b.len, &n, &err);
+        CHECK(!png && err, "%s rejected", bad[i].what);
+        free(png), free(err), sb_free(&b);
+    }
+    size_t n = 0;
+    char *err = NULL;
+    CHECK(!img_dib_to_png((const uint8_t *)"\x28\0\0", 3, &n, &err), "3 bytes rejected");
+    free(err);
+}
+
 int main(void) {
+    test_dib(); /* needs no fixtures */
     if (system("python3 -I -c 'import PIL' >/dev/null 2>&1") != 0) {
-        printf("test_img: python3 with Pillow not found, skipping\n");
-        return 0;
+        printf("test_img: python3 with Pillow not found, skipping the fixture tests\n");
+        if (failures) fprintf(stderr, "%d failure(s)\n", failures);
+        return failures != 0;
     }
     const char *tmp = getenv("TMPDIR");
     snprintf(DIR_, sizeof DIR_, "%s/omc-img-test-%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
