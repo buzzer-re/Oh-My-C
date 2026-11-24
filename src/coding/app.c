@@ -1085,6 +1085,17 @@ static void hook_after_tool(void *ud, agent_t *ag, const json_t *call, tool_resu
     app_t *a = ud;
     UNUSED(ag);
     tool_postprocess_result(a->env, json_get_str(call, "name"), res);
+    if (a->result_filter)
+        for (size_t i = 0; i < json_len(res->content); i++) {
+            json_t *b = json_at(res->content, i);
+            const char *text = json_get_str(b, "text");
+            if (!text) continue;
+            char *f = a->result_filter(a->result_filter_ud, json_get_str(call, "name"), text);
+            if (!f) continue;
+            json_set_str(b, "text", f);
+            if (a->result_filter_release) a->result_filter_release(a->result_filter_ud, f);
+            else free(f);
+        }
     char *rem = ttsr_take_tool_reminder(a->ttsr, json_get_str(call, "id"));
     if (rem) {
         tool_result_text(res, rem);

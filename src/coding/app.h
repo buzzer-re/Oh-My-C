@@ -192,6 +192,10 @@ struct app {
     anthropic_slow_hooks_t slow_hooks;
     struct cache_warmer *warmer;   /* prompt cache warmer (cachewarm.c), NULL for subagents */
     strvec_t provider_states; /* provider session-state keys requests created since the last /fresh (under mu) */
+    /* the embedding program's tool result filter (omc_set_result_filter): every text block of every result */
+    char *(*result_filter)(void *ud, const char *tool_name, const char *text);
+    void (*result_filter_release)(void *ud, char *text);
+    void *result_filter_ud;
     pthread_mutex_t mu;
 };
 

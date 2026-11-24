@@ -298,6 +298,7 @@ Reject / Always reject), unless an explicit yolo or `--auto-approve` is set.
 | `omc_prompt(s, text, &answer)` | run a prompt to completion on the calling thread and return the final text |
 | `omc_abort`, `omc_wait_idle`, `omc_busy` | control a running turn |
 | `omc_register_tool(s, name, description, schema_json, fn, ud)` | native host tool. `fn(ud, args_json, &is_error)` returns malloc'd result text and runs on a worker thread |
+| `omc_set_result_filter(s, fn, release, ud)` | rewrite every tool result's text blocks (built-in, MCP and host tools) before the model and the session see them. `fn(ud, tool_name, text)` returns replacement text or NULL to keep it; omc copies it and passes it to `release` (NULL: `free`) |
 | `omc_session_id`, `omc_version`, `omc_api_version`, `omc_free` | utilities |
 
 `on_event` receives one JSON object per call (responses and events, exactly what `--mode rpc` would

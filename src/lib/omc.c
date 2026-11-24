@@ -171,6 +171,13 @@ int omc_wait_idle(omc_session_t *s, int timeout_ms) {
     return 0;
 }
 
+void omc_set_result_filter(omc_session_t *s, omc_result_filter_fn fn, void (*release)(void *ud, char *text), void *ud) {
+    if (!s) return;
+    s->app->result_filter_ud = ud;
+    s->app->result_filter_release = release;
+    s->app->result_filter = fn;
+}
+
 /* ---------- host tools ---------- */
 
 typedef struct {

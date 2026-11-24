@@ -39,7 +39,7 @@ extern "C" {
 #define OMC_API __attribute__((visibility("default")))
 #endif
 
-#define OMC_API_VERSION 1
+#define OMC_API_VERSION 2
 
 /* library version string: the omp release this build matches, e.g. "18.18.7" */
 OMC_API const char *omc_version(void);
@@ -107,6 +107,14 @@ typedef char *(*omc_tool_fn)(void *ud, const char *args_json, bool *is_error);
 /* Register (or replace) a tool. parameters_json is a JSON Schema object (NULL => no params). */
 OMC_API int omc_register_tool(omc_session_t *s, const char *name, const char *description, const char *parameters_json,
                               omc_tool_fn fn, void *ud);
+
+/* Rewrites tool results before the model, the session file and the events see them: every text block of every
+ * tool's result (built-in, MCP and host tools). fn returns text to replace `text`, or NULL to keep it; omc copies it
+ * and hands it back to release (NULL: free()), so a host with another C runtime frees its own memory. Called on the
+ * tool's worker thread. Set it before the first prompt; fn NULL removes it. */
+typedef char *(*omc_result_filter_fn)(void *ud, const char *tool_name, const char *text);
+OMC_API void omc_set_result_filter(omc_session_t *s, omc_result_filter_fn fn, void (*release)(void *ud, char *text),
+                                   void *ud);
 
 OMC_API void omc_free(void *p);
 
