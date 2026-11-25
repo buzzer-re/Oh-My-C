@@ -341,8 +341,8 @@ static json_t *provider_refusal_data(const json_t *m) {
 static void log_provider_turn_error(const json_t *msg) {
     if (!str_eq(json_get_str(msg, "stopReason"), "error")) return;
     sb_t b = SB_INIT;
-    sb_appendf(&b, "agent turn ended with provider error: provider=%s model=%s", json_get_str(msg, "provider") ? json_get_str(msg, "provider") : "",
-               json_get_str(msg, "model") ? json_get_str(msg, "model") : "");
+    const char *provider = json_get_str(msg, "provider"), *model = json_get_str(msg, "model");
+    sb_appendf(&b, "agent turn ended with provider error: provider=%s model=%s", provider ? provider : "", model ? model : "");
     if (json_get(msg, "errorStatus")) sb_appendf(&b, " errorStatus=%lld", (long long)json_get_int(msg, "errorStatus", 0));
     if (json_get(msg, "errorId")) sb_appendf(&b, " errorId=%lld", (long long)json_get_int(msg, "errorId", 0));
     if (json_get_str(msg, "requestId")) sb_appendf(&b, " requestId=%s", json_get_str(msg, "requestId"));

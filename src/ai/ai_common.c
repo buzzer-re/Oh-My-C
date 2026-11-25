@@ -1525,7 +1525,8 @@ static json_t *split_tool_calls(json_t *in) {
             continue;
         }
         json_t *results = json_arr();
-        while (json_len(in) && str_eq(json_get_str(json_at(in, 0), "role"), "toolResult")) json_push(results, json_arr_remove(in, 0));
+        while (json_len(in) && str_eq(json_get_str(json_at(in, 0), "role"), "toolResult"))
+            json_push(results, json_arr_remove(in, 0));
         json_t *content = json_get(msg, "content");
         bool first = true;
         json_arr_foreach(content, i, blk) {
@@ -1533,7 +1534,9 @@ static json_t *split_tool_calls(json_t *in) {
             json_t *piece = json_clone(msg), *pc = json_arr(), *other;
             json_del(piece, "providerPayload");
             if (first)
-                json_arr_foreach(content, j, other) if (!str_eq(json_get_str(other, "type"), "toolCall")) json_push(pc, json_clone(other));
+                json_arr_foreach(content, j, other) {
+                    if (!str_eq(json_get_str(other, "type"), "toolCall")) json_push(pc, json_clone(other));
+                }
             json_push(pc, json_clone(blk));
             json_set(piece, "content", pc);
             json_push(out, piece);
