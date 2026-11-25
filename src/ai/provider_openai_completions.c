@@ -160,6 +160,86 @@ void oai_policy_resolve(oai_policy_t *p, const ai_model_t *m, const ai_stream_op
     p->disable_reason = reason ? reason : (without_req || disabled_by_none) ? "not-requested" : NULL;
 }
 
+/* ---------- Gemini thought signatures on the OpenAI-compatible wire ----------
+ * A tool-call turn can carry independent signatures: a per-call one (`extra_content.google|vertex` or an encrypted
+ * `reasoning_details` entry), a `function.thought_signature` (Portkey without strict OpenAI compliance, omp
+ * 7e3718f535) and a message-level `thinking_signature` / `thought_signature` / `reasoning_signature`. All are stashed
+ * on the tool call's `thoughtSignature` as one envelope {perCall, function, message}, so persistence and replay keep
+ * each field. */
+
+static json_t *obj1(const char *k, json_t *v) {
+    json_t *o = json_obj();
+    json_set(o, k, v);
+    return o;
+}
+
+/* getGeminiThoughtSignatureExtraContent: {google|vertex: {thought_signature}} with a non-empty signature (owned/NULL) */
+static json_t *gemini_extra_content(const json_t *v) {
+    static const char *const ns[] = {"google", "vertex"};
+    for (size_t i = 0; json_is_obj(v) && i < ARRAY_LEN(ns); i++) {
+        const json_t *pc = json_get(v, ns[i]);
+        const char *sig = json_is_obj(pc) ? json_get_str(pc, "thought_signature") : NULL;
+        if (str_empty(sig)) continue;
+        return obj1(ns[i], obj1("thought_signature", json_str(sig)));
+    }
+    return NULL;
+}
+
+/* getGeminiFunctionThoughtSignature */
+static const char *gemini_function_sig(const json_t *tool_call) {
+    const json_t *fn = json_get(tool_call, "function");
+    const char *sig = json_is_obj(fn) ? json_get_str(fn, "thought_signature") : NULL;
+    return str_empty(sig) ? NULL : sig;
+}
+
+/* getGeminiMessageThoughtSignature: the first non-empty message-level field of `v` (*field set) */
+static const char *gemini_message_sig(const json_t *v, const char **field) {
+    static const char *const fields[] = {"thinking_signature", "thought_signature", "reasoning_signature"};
+    for (size_t i = 0; json_is_obj(v) && i < ARRAY_LEN(fields); i++) {
+        const char *sig = json_get_str(v, fields[i]);
+        if (str_empty(sig)) continue;
+        *field = fields[i];
+        return sig;
+    }
+    return NULL;
+}
+
+/* normalizeStoredGeminiSignature: the envelope's parts, also from the legacy raw shapes (a bare extra_content object,
+ * reasoning detail or message-level signature) persisted before the envelope existed. Owned, NULL for a non-object. */
+static json_t *stored_sig_normalize(const json_t *v) {
+    if (!json_is_obj(v) && !json_is_arr(v)) return NULL;
+    const json_t *per = json_get(v, "perCall");
+    const char *fn = json_get_str(v, "function");
+    const char *mfield = NULL, *msig = gemini_message_sig(json_get(v, "message"), &mfield);
+    json_t *out = json_obj();
+    if (per || !str_empty(fn) || msig) {
+        if (per) json_set(out, "perCall", json_clone(per));
+        if (!str_empty(fn)) json_set_str(out, "function", fn);
+        if (msig) json_set(out, "message", obj1(mfield, json_str(msig)));
+        return out;
+    }
+    if ((msig = gemini_message_sig(v, &mfield))) json_set(out, "message", obj1(mfield, json_str(msig)));
+    else json_set(out, "perCall", json_clone(v));
+    return out;
+}
+
+/* the tool call's stored envelope, normalized (owned/NULL) */
+static json_t *stored_sig_of(const json_t *blk) {
+    json_t *parsed = json_parse_str(json_get_str(blk, "thoughtSignature"));
+    json_t *st = stored_sig_normalize(parsed);
+    json_free(parsed);
+    return st;
+}
+
+/* mergeStoredGeminiSignature: a later signature of one kind never clobbers an earlier one of another (takes `val`) */
+static void stored_sig_merge(json_t *blk, const char *key, json_t *val) {
+    json_t *merged = stored_sig_of(blk);
+    if (!merged) merged = json_obj();
+    json_set(merged, key, val);
+    json_set(blk, "thoughtSignature", json_str_own(json_dump(merged, 0)));
+    json_free(merged);
+}
+
 /* ---------- strict JSON schema adaptation ---------- */
 
 static bool str_in(const char *s, const char *const *list) {
@@ -674,17 +754,27 @@ static void convert_assistant(json_t *out, const json_t *msg, const ai_model_t *
             json_t *args = json_get(blk, "arguments");
             json_set(fn, "arguments", args ? json_str_own(json_dump(args, 0)) : json_str("{}"));
             json_set(tc, "function", fn);
-            /* stored per-call provider signature (Gemini extra_content / OpenRouter reasoning_details) */
-            json_t *sig = json_parse_str(json_get_str(blk, "thoughtSignature"));
-            json_t *per = json_get_obj(sig, "perCall");
-            if (per) {
-                if (json_get(per, "google") || json_get(per, "vertex")) json_set(tc, "extra_content", json_clone(per));
-                else json_push(details, json_clone(per));
-            }
-            json_free(sig);
+            /* the stored envelope: Gemini extra_content or an OpenRouter reasoning_details entry per call, and the
+             * function-level Gemini signature */
+            json_t *st = stored_sig_of(blk);
+            json_t *per = json_get(st, "perCall");
+            json_t *extra = gemini_extra_content(per);
+            if (extra) json_set(tc, "extra_content", extra);
+            else if (per) json_push(details, json_clone(per));
+            if (json_get_str(st, "function")) json_set_str(fn, "thought_signature", json_get_str(st, "function"));
+            json_free(st);
             json_push(tcs, tc);
         }
         json_set(am, "tool_calls", tcs);
+        /* the first message-level Gemini signature a tool call stores replays on the message */
+        json_arr_foreach(content, j, blk) {
+            if (!str_eq(json_get_str(blk, "type"), "toolCall")) continue;
+            json_t *st = stored_sig_of(blk);
+            const char *field = NULL, *msig = gemini_message_sig(json_get(st, "message"), &field);
+            if (msig) json_set_str(am, field, msig);
+            json_free(st);
+            if (msig) break;
+        }
         json_set(am, "__per_call_details", details);
     }
     /* replay reasoning_details exactly as received; once the envelope is gone (a pass rewrote the turn, or it predates
@@ -1238,6 +1328,7 @@ struct oaic_stream {
     int reasoning_source;
     const char *mirrored_field;
     json_t *received_details;
+    char *msg_sig_field, *msg_sig; /* a message-level Gemini signature waiting for the turn's first tool call */
 };
 
 oaic_stream_t *oaic_stream_new(const ai_model_t *m, ai_event_cb cb, void *ud) {
@@ -1392,13 +1483,10 @@ static void handle_tool_calls(oaic_stream_t *s, json_t *calls) {
             json_set_str(blk, "id", id);
         }
         if (name) json_set_str(blk, "name", name);
-        json_t *extra = json_get_obj(c, "extra_content");
-        if (extra && (json_get(extra, "google") || json_get(extra, "vertex"))) {
-            json_t *sig = json_obj();
-            json_set(sig, "perCall", json_clone(extra));
-            json_set(blk, "thoughtSignature", json_str_own(json_dump(sig, 0)));
-            json_free(sig);
-        }
+        json_t *extra = gemini_extra_content(json_get(c, "extra_content"));
+        if (extra) stored_sig_merge(blk, "perCall", extra);
+        const char *fsig = gemini_function_sig(c);
+        if (fsig) stored_sig_merge(blk, "function", json_str(fsig));
         json_t *args = json_get(fn, "arguments");
         bool current = s->b.cur_kind == 3 && s->b.cur_index == t->block;
         if (json_is_str(args) && args->u.str.len) {
@@ -1548,11 +1636,28 @@ int oaic_stream_on_sse(void *ud, const char *event, const char *data, size_t len
             json_t *blk;
             json_arr_foreach(s_content(s), bi, blk) {
                 if (str_eq(json_get_str(blk, "type"), "toolCall") && str_eq(json_get_str(blk, "id"), did)) {
-                    json_t *sig = json_obj();
-                    json_set(sig, "perCall", json_clone(det));
-                    json_set(blk, "thoughtSignature", json_str_own(json_dump(sig, 0)));
-                    json_free(sig);
+                    stored_sig_merge(blk, "perCall", json_clone(det));
+                    break;
                 }
+            }
+        }
+        /* a message-level Gemini signature lands on the turn's first tool call, once one has streamed */
+        const char *mfield = NULL, *msig = gemini_message_sig(delta, &mfield);
+        if (msig) {
+            free(s->msg_sig_field);
+            free(s->msg_sig);
+            s->msg_sig_field = xstrdup(mfield);
+            s->msg_sig = xstrdup(msig);
+        }
+        if (s->msg_sig) {
+            json_t *blk;
+            json_arr_foreach(s_content(s), bi, blk) {
+                if (!str_eq(json_get_str(blk, "type"), "toolCall")) continue;
+                stored_sig_merge(blk, "message", obj1(s->msg_sig_field, json_str(s->msg_sig)));
+                free(s->msg_sig_field);
+                free(s->msg_sig);
+                s->msg_sig_field = s->msg_sig = NULL;
+                break;
             }
         }
     }
@@ -1575,6 +1680,8 @@ static void free_stream(oaic_stream_t *s) {
         free(s->heal);
     }
     json_free(s->received_details);
+    free(s->msg_sig_field);
+    free(s->msg_sig);
     aib_free(&s->b);
     free(s);
 }

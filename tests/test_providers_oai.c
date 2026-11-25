@@ -346,6 +346,117 @@ static void test_reasoning_details(void) {
     json_free(t.raw);
 }
 
+/* one streamed tool-call turn whose first delta is `delta_json`, replayed in the next request: the assistant message */
+static json_t *gemini_sig_replay(tmodel_t *t, const char *delta_json, json_t **streamed) {
+    char *sse = xasprintf("data: {\"id\":\"chatcmpl-gemini\",\"choices\":[{\"index\":0,\"delta\":%s}]}\n\n"
+                          "data: {\"id\":\"chatcmpl-gemini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                          "data: [DONE]\n\n",
+                          delta_json);
+    oaic_stream_t *st = oaic_stream_new(&t->m, NULL, NULL);
+    int rc = feed_sse(oaic_stream_on_sse, st, sse, 4096);
+    free(sse);
+    json_t *msg = oaic_stream_finish(st, rc, NULL);
+    *streamed = json_clone(msg);
+    json_t *msgs = json_arr();
+    json_push(msgs, J("{\"role\":\"user\",\"content\":\"Read README.md\",\"timestamp\":1}"));
+    /* the restored history: the turn round-trips through JSON like a session file */
+    char *d = json_dump(msg, 0);
+    json_free(msg);
+    json_push(msgs, J(d));
+    free(d);
+    json_push(msgs, J("{\"role\":\"toolResult\",\"toolCallId\":\"call_1\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\","
+                      "\"text\":\"README contents\"}],\"isError\":false,\"timestamp\":2}"));
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    json_t *p = oaic_build_request(&t->m, &ctx, &o);
+    json_t *am = NULL, *x;
+    json_arr_foreach(json_get(p, "messages"), i, x) if (!am && str_eq(json_get_str(x, "role"), "assistant")) am = x;
+    json_t *out = json_clone(am);
+    json_free(p);
+    json_free(msgs);
+    return out;
+}
+
+/* omp 7e3718f535 (openai-completions-thought-signature.test.ts): Gemini signatures on the OpenAI-compatible wire round-trip
+ * from each place they arrive (extra_content google/vertex, function.thought_signature, a message-level field), and all
+ * three together on one call */
+static void test_gemini_thought_signatures(void) {
+    tmodel_t t;
+    model_init(&t, "{\"id\":\"gemini-3.7-flash\",\"api\":\"openai-completions\",\"provider\":\"gemini\","
+                   "\"baseUrl\":\"https://generativelanguage.googleapis.com/v1beta/openai\",\"reasoning\":true,\"compat\":{}}");
+    static const char CALL[] = "\"index\":0,\"id\":\"call_1\",\"type\":\"function\"";
+    json_t *st, *am;
+    char *delta;
+    for (int ns = 0; ns < 2; ns++) {
+        const char *n = ns ? "vertex" : "google";
+        delta = xasprintf("{\"role\":\"assistant\",\"tool_calls\":[{%s,\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":"
+                          "\\\"README.md\\\"}\"},\"extra_content\":{\"%s\":{\"thought_signature\":\"opaque-signature\"}}}]}",
+                          CALL, n);
+        am = gemini_sig_replay(&t, delta, &st);
+        char *want = xasprintf("{\"%s\":{\"thought_signature\":\"opaque-signature\"}}", n);
+        char *got = json_dump(json_get(json_at(json_get(am, "tool_calls"), 0), "extra_content"), 0);
+        CHECK_STR(got, want);
+        free(got);
+        free(want);
+        json_free(am);
+        json_free(st);
+        free(delta);
+    }
+    delta = xasprintf("{\"role\":\"assistant\",\"tool_calls\":[{%s,\"function\":{\"name\":\"read\",\"arguments\":\"{}\","
+                      "\"thought_signature\":\"opaque-signature\"}}]}",
+                      CALL);
+    am = gemini_sig_replay(&t, delta, &st);
+    CHECK_STR(json_get_str(block_of(st, "toolCall", 0), "thoughtSignature"), "{\"function\":\"opaque-signature\"}");
+    json_t *tc = json_at(json_get(am, "tool_calls"), 0);
+    char *fn = json_dump(json_get(tc, "function"), 0);
+    CHECK_STR(fn, "{\"name\":\"read\",\"arguments\":\"{}\",\"thought_signature\":\"opaque-signature\"}");
+    free(fn);
+    CHECK(!json_get(tc, "extra_content") && !json_get(am, "reasoning_details"));
+    json_free(am);
+    json_free(st);
+    free(delta);
+    static const char *const fields[] = {"thinking_signature", "thought_signature", "reasoning_signature"};
+    for (size_t f = 0; f < ARRAY_LEN(fields); f++) {
+        delta = xasprintf("{\"role\":\"assistant\",\"%s\":\"opaque-signature\",\"tool_calls\":[{%s,\"function\":{\"name\":\"read\","
+                          "\"arguments\":\"{}\"}}]}",
+                          fields[f], CALL);
+        am = gemini_sig_replay(&t, delta, &st);
+        CHECK_STR(json_get_str(am, fields[f]), "opaque-signature");
+        for (size_t g = 0; g < ARRAY_LEN(fields); g++)
+            if (g != f) CHECK(!json_get(am, fields[g]));
+        json_free(am);
+        json_free(st);
+        free(delta);
+    }
+    /* all three on one call: each kept beside the others */
+    am = gemini_sig_replay(&t,
+                           "{\"role\":\"assistant\",\"thinking_signature\":\"message-sig\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\","
+                           "\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\",\"thought_signature\":\"function-sig\"},"
+                           "\"extra_content\":{\"google\":{\"thought_signature\":\"per-call-sig\"}}}]}",
+                           &st);
+    CHECK_STR(json_get_str(block_of(st, "toolCall", 0), "thoughtSignature"),
+              "{\"perCall\":{\"google\":{\"thought_signature\":\"per-call-sig\"}},\"function\":\"function-sig\","
+              "\"message\":{\"thinking_signature\":\"message-sig\"}}");
+    CHECK_STR(json_get_str(am, "thinking_signature"), "message-sig");
+    tc = json_at(json_get(am, "tool_calls"), 0);
+    CHECK_STR(json_get_str(json_get(tc, "function"), "thought_signature"), "function-sig");
+    CHECK_STR(json_get_str(json_get(json_get(tc, "extra_content"), "google"), "thought_signature"), "per-call-sig");
+    json_free(am);
+    json_free(st);
+    /* a message-level signature that streams before the call waits for it; a legacy raw extra_content still replays */
+    oaic_stream_t *s = oaic_stream_new(&t.m, NULL, NULL);
+    int rc = feed_sse(oaic_stream_on_sse, s,
+                      "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_signature\":\"early\"}}]}\n\n"
+                      "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":"
+                      "{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
+                      4096);
+    json_t *msg = oaic_stream_finish(s, rc, NULL);
+    CHECK_STR(json_get_str(block_of(msg, "toolCall", 0), "thoughtSignature"), "{\"message\":{\"reasoning_signature\":\"early\"}}");
+    json_free(msg);
+    json_free(t.raw);
+}
+
 static void test_completions_stream(void) {
     tmodel_t t;
     model_init(&t, "{\"id\":\"m1\",\"api\":\"openai-completions\",\"provider\":\"test\",\"reasoning\":true,\"compat\":{}}");
@@ -1416,6 +1527,7 @@ int main(void) {
     test_completions_dialects();
     test_completions_stream();
     test_reasoning_details();
+    test_gemini_thought_signatures();
     test_completions_stream_errors();
     test_responses_request();
     test_tool_name_prefix();

@@ -279,6 +279,12 @@ Points worth knowing per provider:
   (unlisted earlier models are marked gone), cached 2 h per credential in `<agent dir>/kiro-models.json`; a failed
   refresh keeps the last cache. It runs at startup when Kiro has a credential, after `/login kiro`, on hub F5 and
   `omc models refresh`. omp unions the rosters of several Kiro accounts; omc stores one credential per provider.
+- **Gemini signatures on chat completions** (`provider_openai_completions.c`): a tool call's per-call signature
+  (`extra_content.google|vertex`, or an encrypted `reasoning_details` entry naming the call), its
+  `function.thought_signature` (Portkey without strict OpenAI compliance) and a message-level `thinking_signature` /
+  `thought_signature` / `reasoning_signature` (stashed on the turn's first tool call) are merged into one
+  `thoughtSignature` envelope `{perCall, function, message}`; replay puts each back where it came from. Legacy raw
+  shapes (a bare `extra_content` object or detail) still read as `perCall`.
 - **Transcript dialects** (`dialect.c`): each dialect's `renderTranscript` and
   `serializeConversationForSummary`, used for compaction and branch-summary input (not for in-band tool
   calls).
