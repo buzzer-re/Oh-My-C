@@ -220,7 +220,19 @@ typedef struct {
     /* layout (mouse hit-testing) */
     int sidebar_w, body_w, content_rows, locked_login_line;
     char *config_error;
+    /* #committed: the role the last hub assign wrote and the row it was made on. That row's chip now reads as assigned,
+     * so Enter there would toggle the role off; a repeat Enter must not. Cleared when the cursor moves to another row,
+     * the view changes, the strip selection moves or a chip is clicked (omp bb6d78c023, 29c9405e86) */
+    const ai_model_t *committed_model;
+    char *committed_role;
+    int committed_scope;
 } hub_t;
+
+static void committed_clear(hub_t *h) {
+    free(h->committed_role);
+    h->committed_role = NULL;
+    h->committed_model = NULL;
+}
 
 /* ---------- role assignments (model-browser.ts resolveRoleAssignments) ---------- */
 
@@ -1524,6 +1536,7 @@ static void select_roles_entry(hub_t *h) {
     for (size_t i = 0; i < h->entries.n; i++)
         if (h->entries.v[i].kind == E_ROLES) h->active = i;
     h->follow = true;
+    committed_clear(h);
 }
 
 static void close_strip(hub_t *h) {
@@ -1767,6 +1780,10 @@ static void do_assign(hub_t *h, const ai_model_t *m, const char *role_in, bool b
     thinking_options(m, &opts, true);
     if (!strvec_contains(&opts, level)) level = "inherit";
     assign_role(h, m, role, level, scope);
+    committed_clear(h);
+    h->committed_model = m;
+    h->committed_role = xstrdup(role);
+    h->committed_scope = scope;
     refresh_after_mutation(h);
     if (!opts.n) {
         if (back) {
@@ -2044,8 +2061,11 @@ static void activate_chip(hub_t *h) {
         do_assign(h, m, role, false, scope);
         break;
     case CH_UNASSIGN:
-        unassign_role(h, role, project_storage() ? scope : SC_NONE);
-        refresh_after_mutation(h);
+        /* a repeat Enter on the row just committed is not a toggle back; moving the cursor re-arms it */
+        if (!(h->committed_role && h->committed_model == m && str_eq(h->committed_role, role) && h->committed_scope == scope)) {
+            unassign_role(h, role, project_storage() ? scope : SC_NONE);
+            refresh_after_mutation(h);
+        }
         close_strip(h);
         break;
     case CH_FALLBACK:
@@ -2185,6 +2205,7 @@ static void move_sidebar(hub_t *h, int delta) {
         h->active = i;
         h->follow = true;
         h->focus_list = false;
+        committed_clear(h);
         rebuild_browser(h);
         return;
     }
@@ -2194,6 +2215,7 @@ static void select_all_entry(hub_t *h) {
     for (size_t i = 0; i < h->entries.n; i++)
         if (h->entries.v[i].kind == E_ALL) h->active = i;
     h->follow = true;
+    committed_clear(h);
     rebuild_browser(h);
 }
 
@@ -2424,6 +2446,7 @@ static void hub_mouse(hub_t *h, const tui_key_t *k) {
             for (size_t i = 0; i < h->chip_ranges.n; i++)
                 if (col >= h->chip_ranges.v[i].start && col < h->chip_ranges.v[i].end) {
                     h->chip_index = (size_t)h->chip_ranges.v[i].index;
+                    committed_clear(h); /* a pointer activation is deliberate */
                     activate_chip(h);
                     return;
                 }
@@ -2467,6 +2490,7 @@ static void hub_mouse(hub_t *h, const tui_key_t *k) {
         bool already = (size_t)side_idx == h->active;
         int kind = h->entries.v[side_idx].kind;
         if (kind == E_ROLES) h->assigning = A_NONE;
+        if (!already) committed_clear(h);
         h->active = (size_t)side_idx;
         h->follow = true;
         h->focus_list = kind == E_ROLES;
@@ -2509,7 +2533,20 @@ static void f5_refresh(hub_t *h) {
     refresh_after_mutation(h);
 }
 
+static bool hub_key_inner(tui_component_t *c, const tui_key_t *k);
+
+/* the browser's onSelectionChange: the cursor on another row re-arms the committed-row guard */
 static bool hub_key(tui_component_t *c, const tui_key_t *k) {
+    hub_t *h = (hub_t *)c;
+    bool r = hub_key_inner(c, k);
+    if (h->committed_role && !h->strip && is_browser_view(h)) {
+        const ui_model_item_t *it = ui_model_browser_selected(h->b);
+        if (!it || it->model != h->committed_model) committed_clear(h);
+    }
+    return r;
+}
+
+static bool hub_key_inner(tui_component_t *c, const tui_key_t *k) {
     hub_t *h = (hub_t *)c;
     tui_component_request_render(c);
     if (k->kind == TUI_KEY_MOUSE) {
@@ -2521,10 +2558,13 @@ static bool hub_key(tui_component_t *c, const tui_key_t *k) {
         else if (h->strip == S_NAME) {
             if (tui_key_matches(k, "enter")) submit_name(h);
             else name_key(h, k);
-        } else if (tui_key_matches(k, "left") || tui_key_matches(k, "shift+tab"))
-            h->chip_index = (h->chip_index + h->chips.n - 1) % MAX(1, h->chips.n);
-        else if (tui_key_matches(k, "right") || tui_key_matches(k, "tab")) h->chip_index = (h->chip_index + 1) % MAX(1, h->chips.n);
-        else if (tui_key_matches(k, "enter")) activate_chip(h);
+        } else if (tui_key_matches(k, "left") || tui_key_matches(k, "shift+tab") || tui_key_matches(k, "right") ||
+                   tui_key_matches(k, "tab")) {
+            size_t prev = h->chip_index, n = MAX(1, h->chips.n);
+            bool back = tui_key_matches(k, "left") || tui_key_matches(k, "shift+tab");
+            h->chip_index = (h->chip_index + (back ? n - 1 : 1)) % n;
+            if (h->chip_index != prev) committed_clear(h); /* navigating within the strip re-arms the guard */
+        } else if (tui_key_matches(k, "enter")) activate_chip(h);
         return true;
     }
     entry_t *e = &h->entries.v[h->active];
@@ -2653,6 +2693,7 @@ static void hub_destroy(tui_component_t *c) {
     sb_free(&h->name_input);
     free(h->preset_cursor);
     free(h->config_error);
+    free(h->committed_role);
     free(h);
 }
 
