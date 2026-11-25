@@ -1175,6 +1175,18 @@ LGX='calls:'$(python3 -I -c 'import json; print(json.dumps([["bash",{"command":"
 n=$(mark); OMC_CODING_AGENT_DIR="$T/lgx" "$B" --model mock/mock-1 --no-session -p "$LGX" >/dev/null 2>&1 </dev/null
 out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"consecutive times"* ]] && echo "   ok  loop guard command exemption" || { echo "   FAIL loop guard command exemption"; fail=1; }
 check "todo reminder (rpc)" '"type": "todo_reminder", "todos": [{"content": "alpha", "status": "in_progress"}, {"content": "beta", "status": "pending"}], "attempt": 1, "maxAttempts": 3'  python3 -I "$ROOT/tests/parity/rpc_drive.py" "$B" "todo:alpha,beta" 1
+# the session starts at the explicit level of the --models entry it starts on: a remembered default's entry, or the
+# --model's own entry when its selector has no level; a --model outside the scope keeps its own (omp aead59a104,
+# 2090c10083, 4af9a68449)
+LASTEFF='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; r=[x for x in r if x.get("tools")]; print(r[-1]["model"], r[-1].get("reasoning_effort","-"))'
+mkdir -p "$T/scopelv" && cp "$T/agent/models.yml" "$T/scopelv/"
+OMC_CODING_AGENT_DIR="$T/scopelv" timeout 30 "$B" --model mock/mock-think --models mock/mock-think:low --no-session -p 'say:hi' >/dev/null 2>&1 </dev/null
+check "scope level for --model" "mock-think low"  python3 -I -c "$LASTEFF" "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/scopelv" timeout 30 "$B" --model mock/mock-think --models mock/mock-1:low --no-session -p 'say:hi' >/dev/null 2>&1 </dev/null
+check "scope level outside"  "mock-think high"  python3 -I -c "$LASTEFF" "$T/req.jsonl"
+printf 'modelRoles:\n  default: mock/mock-think\n' > "$T/scopelv/config.yml"
+OMC_CODING_AGENT_DIR="$T/scopelv" timeout 30 "$B" --models mock/mock-1:low,mock/mock-think:medium --no-session -p 'say:hi' >/dev/null 2>&1 </dev/null
+check "scope level remembered"  "mock-think medium"  python3 -I -c "$LASTEFF" "$T/req.jsonl"
 n=$(mark); "$B" --model mock/mock-think --thinking auto --no-session -p 'say:medium sized change' >/dev/null 2>&1 </dev/null
 check "auto thinking judge" $'2\nlow State:\n<request>say:medium sized change</request>'  python3 -I -c "$REQS" "$T/req.jsonl" $n all
 check "auto thinking level" "medium <system-reminder>"  python3 -I -c "$REQS" "$T/req.jsonl" $n

@@ -27,8 +27,9 @@ reaching the model as a prompt; everything else is the launch command (`omc laun
 
 Launch flags (`src/cli/args.c`, port of `cli/args.ts` + `flag-tables.ts`; `--flag=value` everywhere,
 `--` ends options): `--model`, `--smol/--slow/--plan` (or `PI_SMOL_MODEL`/`PI_SLOW_MODEL`/`PI_PLAN_MODEL`;
-runtime `modelRoles` overrides), `--models a,b` (scope: the first in-scope model starts a fresh session,
-explicit `:level` honored), `--provider`, `--api-key`, `--thinking`, `--goal`, `--plan-yolo[-into]`,
+runtime `modelRoles` overrides), `--models a,b` (scope: a remembered default resolved within it, else its first model,
+starts a fresh session at that entry's explicit `:level` (else the remembered role's); an explicit `--model` in the
+scope without a level of its own starts at its entry's level, one outside the scope keeps its own), `--provider`, `--api-key`, `--thinking`, `--goal`, `--plan-yolo[-into]`,
 `--system-prompt`, `--system-prompt-template <file>` (Handlebars, replaces the bundled template; a project or
 agent-dir `SYSTEM_TEMPLATE.md` is discovered like `SYSTEM.md`; failing those, the `systemPromptTemplates` setting maps
 model substrings to template files, longest match wins, a missing or empty file keeps the bundled prompt), `--append-system-prompt`, `--cwd`, `--mode`,

@@ -2238,7 +2238,15 @@ app_t *app_create(const app_opts_t *o, char **err) {
         }
         has_eff = true;
     }
-    if (!has_eff) {
+    /* the --model default role takes only the selector's or --thinking's level; a scope entry's seeds the session */
+    bool role_eff = has_eff;
+    ai_effort_t role_effort = eff;
+    bool role_auto = a->auto_thinking;
+    if (!has_eff && !a->auto_thinking && o->scope_thinking) {
+        if (!strcmp(o->scope_thinking, "auto")) a->auto_thinking = true;
+        else if (effort_parse(o->scope_thinking, &eff) == 0) has_eff = true;
+    }
+    if (!has_eff && !a->auto_thinking) {
         const char *dl = settings_str("defaultThinkingLevel", "high");
         if (str_eq(dl, "auto")) a->auto_thinking = true;
         else effort_parse(dl, &eff);
@@ -2259,7 +2267,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     }
     if (o->model && a->model && !o->subagent) {
         char *key = mr_model_key(a->model);
-        char *val = has_eff && !a->auto_thinking ? mr_selector_with_level(key, effort_name(eff)) : xstrdup(key);
+        char *val = role_eff && !role_auto ? mr_selector_with_level(key, effort_name(role_effort)) : xstrdup(key);
         settings_set_runtime_quiet("modelRoles.default", json_str_own(val));
         free(key);
     }

@@ -17,6 +17,9 @@ typedef struct {
     const char *provider;       /* --provider */
     const char *api_key;        /* --api-key */
     const char *thinking;       /* --thinking */
+    const char *scope_thinking; /* main.ts startScoped: the --models entry the session starts on has an explicit level and
+                                 * neither --thinking nor the --model selector names one; seeds the session's thinking,
+                                 * never the --model default role */
     const char *session_dir;
     const char *resume;         /* --resume <id|path> */
     const char *fork;           /* --fork <id|path> */
