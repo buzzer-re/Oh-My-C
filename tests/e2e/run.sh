@@ -744,6 +744,9 @@ fi
 if [ -x "$ROOT/build/examples/embed" ]; then
     check "lib host tool"  "hello from the host app, Ada"  "$ROOT/build/examples/embed" 'call:greet:{"name":"Ada"}' mock/mock-1
     check "lib rpc send"   '"command":"get_state","success":true'  "$ROOT/build/examples/embed" 'hi' mock/mock-1
+    # omc_set_result_filter: a host tool's and a built-in tool's results reach the model through the filter
+    check "lib result filter"  "hello from the host app, [redacted]"  env EMBED_REDACT=Ada "$ROOT/build/examples/embed" 'call:greet:{"name":"Ada"}' mock/mock-1
+    check "lib filter builtin" "Tool said: [redacted] and [redacted]"  env EMBED_REDACT=Ada "$ROOT/build/examples/embed" 'bash:echo Ada and Ada' mock/mock-1
 fi
 # ACP (Agent Client Protocol): permission request answered by the test client
 check "acp prompt"     "tool_call_update completed acp-ok"  python3 -I "$ROOT/tests/e2e/acp_client.py" "$B" "bash:echo acp-ok"

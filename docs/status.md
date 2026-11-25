@@ -384,6 +384,7 @@ Development is paused while the user tests omc day to day. Work resumes from use
 |---|---|---|
 | Library build (opt-in `make lib`): `libomc.a` (prelinked, only `omc_*` symbols global), `libomc.so.0` (version script), `omc.pc`, `make install-lib` | ✅ | public API `include/omc.h` |
 | API: sessions with options, full RPC protocol via `omc_send` + event callback, blocking `omc_prompt`, abort/wait/busy, host-implemented native tools, `omc_main` (whole CLI/TUI in-process) | ✅ | `examples/embed.c`, checked by `make test` |
+| Tool result filter: `omc_set_result_filter` rewrites every text block of every tool result (built-in, MCP and host tools) before the model, the session and the events see it; the host frees its own text through a release callback (`OMC_API_VERSION` 2) | ✅ | `src/coding/app.c` (after_tool hook), `src/lib/omc.c`; e2e `lib result filter`, `lib filter builtin` (`EMBED_REDACT` in `examples/embed.c`) |
 | Per-session configuration (settings/credentials/catalog are process-wide) | ❌ | |
 
 ## Modes & UI

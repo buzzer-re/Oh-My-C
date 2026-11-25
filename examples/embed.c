@@ -1,5 +1,6 @@
 /* embed.c - minimal libomc host: registers a native tool, runs a prompt, then drives the RPC protocol.
- *   usage: embed <prompt> [model]      (model defaults to the configured default) */
+ *   usage: embed <prompt> [model]      (model defaults to the configured default)
+ *   EMBED_REDACT=<word>: also installs a tool result filter that masks <word> in every tool's result */
 #include <omc.h>
 
 #include <stdio.h>
@@ -25,6 +26,25 @@ static char *greet(void *ud, const char *args_json, bool *is_error) {
     return r;
 }
 
+/* a tool result filter: every result's text with each `word` masked, or NULL to keep it as it is */
+static char *redact(void *ud, const char *tool_name, const char *text) {
+    (void)tool_name;
+    const char *word = ud;
+    size_t wl = strlen(word), hits = 0;
+    for (const char *p = strstr(text, word); p; p = strstr(p + wl, word)) hits++;
+    if (!hits) return NULL;
+    char *out = malloc(strlen(text) + hits * sizeof "[redacted]" + 1), *o = out;
+    for (const char *p = text, *hit; (hit = strstr(p, word)); p = hit + wl) {
+        memcpy(o, p, (size_t)(hit - p));
+        o += hit - p;
+        memcpy(o, "[redacted]", sizeof "[redacted]" - 1);
+        o += sizeof "[redacted]" - 1;
+        text = hit + wl;
+    }
+    strcpy(o, text);
+    return out; /* omc copies it, then frees it with free() (no release callback given) */
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <prompt> [model]\n", argv[0]);
@@ -41,6 +61,8 @@ int main(int argc, char **argv) {
     }
     omc_register_tool(s, "greet", "Greet someone from the host application",
                       "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}},\"required\":[\"name\"]}", greet, NULL);
+    const char *word = getenv("EMBED_REDACT");
+    if (word && *word) omc_set_result_filter(s, redact, NULL, (void *)word);
     char *answer = NULL;
     int rc = omc_prompt(s, argv[1], &answer);
     printf("answer(rc=%d): %s\n", rc, answer ? answer : "");
