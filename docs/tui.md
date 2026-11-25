@@ -119,8 +119,9 @@ updates). Timers (`tui_add_timer`) drive spinners, smooth streaming reveal and l
   arrives as a key: `app.suspend` calls `tui_suspend`, which restores the terminal, stops the
   foreground process group with SIGSTOP (omp `handleCtrlZ`) and starts a fresh frame on SIGCONT.
 - The key decoder handles UTF-8, C0 controls, CSI/SS3 with xterm modifiers, kitty CSI-u (with text
-  and event types), modifyOtherKeys, Alt via an ESC prefix, bracketed paste, focus, and terminal
-  replies. A lone ESC is held for `TUI_ESC_TIMEOUT_MS`. Key ids (`ctrl+c`, `alt+enter`,
+  and event types; the keypad's navigation codepoints, NumLock off, as their keys, `KP_BEGIN` as `clear`, and a keypad
+  digit as its navigation key once a modifier is held, like omp's keys.rs `map_keypad_nav`), modifyOtherKeys, Alt via
+  an ESC prefix, bracketed paste, focus, and terminal replies. A lone ESC is held for `TUI_ESC_TIMEOUT_MS`. Key ids (`ctrl+c`, `alt+enter`,
   `shift+tab`) are matched against the keybinding table.
 
 ### Keybindings (`keys.c`, `config/keybindings.c`)
