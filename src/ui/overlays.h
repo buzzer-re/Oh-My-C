@@ -239,6 +239,8 @@ void ui_overlay_model(ui_t *u); /* modelhub.c: the Models hub */
 void ui_agents_hub_open(ui_t *u); /* agentshub.c: the /agents hub (agent definitions) */
 /* modelpicker.c: the session-only model picker (Alt+P, `/switch`) */
 void ui_overlay_model_picker(ui_t *u);
+/* the loop ended: a picker-triggered discovery pass still running posts nothing any more */
+void ui_model_picker_shutdown(void);
 /* switchSessionModel: session-only switch (compacting first when the transcript exceeds the model's window);
  * `level` an explicit thinking selector or NULL (the role's explicit level for that model, else kept) */
 void ui_switch_session_model(ui_t *u, const struct ai_model *m, const char *level);

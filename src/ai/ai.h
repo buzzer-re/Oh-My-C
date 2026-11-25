@@ -102,6 +102,15 @@ const char *catalog_model_kind(const ai_model_t *m);
  * probed); force=true (hub F5) probes every server. Blocks for at most the probe timeouts (250 ms + 150 ms per
  * metadata call on loopback). Call from the UI/main thread. Returns the number of models registered. */
 int catalog_discover_local(bool force);
+/* ModelRegistry #lastOnlineRefreshAt (omp c9e8ae3134): a discovery pass that may reach the network started (startup,
+ * F5, catalog_rediscover; never under OMC_NO_LOCAL_DISCOVERY). catalog_discovery_stale(): the last one is older than
+ * the built-in discovery cache TTL (2 h; OMC_DISCOVERY_TTL_MS overrides it for tests); false before any. */
+void catalog_note_online_refresh(void);
+bool catalog_discovery_stale(void);
+/* refreshIfStale's discovery pass (the quick picker past the TTL): "online-if-uncached" over the implicit local servers
+ * (fresh cache rows replay, llama.cpp is probed) and the Kiro roster (its own 2 h cache), keeping retry-fallback
+ * cooldowns. Notes the refresh; blocks for the probes: call off the UI thread. Returns the models registered. */
+int catalog_rediscover(void);
 /* omp ModelRegistry.drainConfigWarnings: discovery warnings for built-in providers an env var redirected (moved
  * into `out`, which the interactive startup shows as warnings) */
 void catalog_drain_config_warnings(strvec_t *out);

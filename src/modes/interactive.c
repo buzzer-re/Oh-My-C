@@ -3903,6 +3903,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     int code = tui_run(u.tui);
     updatectl_shutdown(); /* nothing more may be posted to the TUI freed below */
     wt_hooks_shutdown();
+    ui_model_picker_shutdown();
     /* a tool thread waiting on the ask dialog would block the worker join forever once the loop is gone
      * (terminal closed mid-question): answer it as cancelled */
     pthread_mutex_lock(&u.mu);

@@ -4,7 +4,8 @@
   /llama/models, /llama/props                     llama.cpp (native root)
   /lms/v1/models, /lms/api/v0/models              LM Studio
 Usage: mock_local.py <port>
-MOCK_LOCAL_REQUIRE_KEY=<key>: the LM Studio routes answer 401 unless sent `Authorization: Bearer <key>`."""
+MOCK_LOCAL_REQUIRE_KEY=<key>: the LM Studio routes answer 401 unless sent `Authorization: Bearer <key>`.
+MOCK_LOCAL_LLAMA_EXTRA=<file>: once the file exists, llama.cpp also lists the model id it holds (a model loaded later)."""
 import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -38,6 +39,9 @@ class H(BaseHTTPRequestHandler):
         need = os.environ.get("MOCK_LOCAL_REQUIRE_KEY")
         if need and self.path.startswith("/lms/") and self.headers.get("Authorization") != "Bearer " + need:
             self.send({"error": "unauthorized"}, 401)
+        elif self.path == "/llama/models" and os.path.exists(os.environ.get("MOCK_LOCAL_LLAMA_EXTRA", "/nonexistent")):
+            extra = open(os.environ["MOCK_LOCAL_LLAMA_EXTRA"]).read().strip()
+            self.send({"data": LLAMA_MODELS["data"] + [{"id": extra, "meta": {"n_ctx_train": 32768}}]})
         elif self.path in routes:
             self.send(routes[self.path])
         else:

@@ -1160,6 +1160,11 @@ fi
 mkdir -p "$T/lragent" "$T/lrwork"; cp "$T/agent/models.yml" "$T/lragent/"; printf 'setupVersion: 2\n' > "$T/lragent/config.yml"
 LRPORT=$((PORT + 41))
 ( cd "$T/lrwork" && check "login refresh" "login refresh ok" python3 -I "$ROOT/tests/e2e/login_refresh.py" "$B" "$ROOT/tests/e2e/mock_local.py" "$T/lragent" "$LRPORT" )
+# Alt+P past the discovery TTL re-runs discovery in the background and the open picker lists a newly loaded local model
+# (omp c9e8ae3134)
+if python3 -c 'import pty' 2>/dev/null; then
+    check "picker refresh" $'picker ok\nrefreshed ok'  python3 -I "$ROOT/tests/e2e/picker_refresh_tui.py" "$B" "$ROOT/tests/e2e/mock_local.py" "$T/pref" "$((PORT + 47))"
+fi
 check "perf recorded"      '"mock/mock-1"'  cat "$T/agent/model-perf.json"
 # default-on agent guards and auto thinking (WP-3 / WP-12); request_diff.sh checks the same scenarios against omp
 REQS='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]; r=[x for x in r if x.get("tools") or len(sys.argv)>3]

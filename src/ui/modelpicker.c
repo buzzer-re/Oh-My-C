@@ -9,7 +9,9 @@
  * cycle-track segment); pressing the picker key again toggles task mode (the pick becomes a session-only
  * task.agentModelOverrides.task override, red chrome). Tab / Shift+Tab step the list through all models
  * and each provider's; in session mode ←/→ move a thinking slider for the highlighted model (shown after
- * the status hint), whose level the pick applies (omp 807c6d37f5 / 94a10c5b22). */
+ * the status hint), whose level the pick applies (omp 807c6d37f5 / 94a10c5b22). Opened once the last online discovery is
+ * two hours old, it re-runs discovery in the background (catalog_rediscover: local servers and the Kiro roster, cooldowns
+ * kept) and re-reads the catalog when that lands (omp c9e8ae3134). */
 #include "ui/modelbrowser.h"
 #include "ui/overlays.h"
 #include "ui/ui.h"
@@ -514,6 +516,69 @@ static void picker_destroy(tui_component_t *c) {
 
 static const tui_component_vt PICKER_VT = {"model-picker", picker_render, picker_key, NULL, picker_destroy};
 
+/* #syncFromRegistryState after the catalog moved: the session's models again, with the query, scope, mode and highlight
+ * kept */
+static void picker_reload(picker_t *p) {
+    ui_model_browser_t *nb = ui_session_model_browser();
+    p->models.n = 0;
+    for (size_t i = 0; i < nb->items.n; i++) vec_push(&p->models, nb->items.v[i].model);
+    const ui_model_item_t *sel = ui_model_browser_selected(p->b);
+    char *keep = sel ? xstrdup(sel->selector) : NULL;
+    if (p->b->query && *p->b->query) ui_model_browser_set_query(nb, p->b->query);
+    nb->ctx_tokens = p->b->ctx_tokens;
+    nb->mark_over_context = p->b->mark_over_context;
+    nb->show_provider = p->b->show_provider;
+    nb->focused = p->b->focused;
+    nb->max_visible = p->b->max_visible;
+    ui_model_browser_free(p->b);
+    p->b = nb;
+    sync_items(p, true);
+    if (keep) ui_model_browser_select(p->b, keep);
+    free(keep);
+    tui_request_render(p->u->tui);
+}
+
+/* refreshIfStale's discovery half (omp c9e8ae3134, 90cf96a574, cc0dfc366d): a picker opened once the last online
+ * refresh is two hours old re-runs discovery in the background (retry-fallback cooldowns kept); when it lands, a
+ * models.yml saved meanwhile reloads too and the open picker re-reads the catalog. One pass at a time. */
+static pthread_mutex_t g_rd_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool g_rediscovering;  /* UI thread */
+static tui_t *g_rediscover_tui; /* under g_rd_mu; NULL once the loop ended */
+
+static void rediscovered(void *ud) {
+    UNUSED(ud);
+    g_rediscovering = false;
+    catalog_refresh_if_stale();
+    if (g_open) picker_reload(g_open);
+}
+
+static void *rediscover_main(void *ud) {
+    UNUSED(ud);
+    catalog_rediscover();
+    pthread_mutex_lock(&g_rd_mu);
+    if (g_rediscover_tui) tui_post(g_rediscover_tui, rediscovered, NULL);
+    pthread_mutex_unlock(&g_rd_mu);
+    return NULL;
+}
+
+static void maybe_rediscover(ui_t *u) {
+    if (g_rediscovering || !catalog_discovery_stale()) return;
+    g_rediscovering = true;
+    pthread_mutex_lock(&g_rd_mu);
+    g_rediscover_tui = u->tui;
+    pthread_mutex_unlock(&g_rd_mu);
+    pthread_t t;
+    if (pthread_create(&t, NULL, rediscover_main, NULL) == 0) pthread_detach(t);
+    else g_rediscovering = false;
+}
+
+void ui_model_picker_shutdown(void) {
+    pthread_mutex_lock(&g_rd_mu);
+    g_rediscover_tui = NULL;
+    pthread_mutex_unlock(&g_rd_mu);
+    g_rediscovering = false;
+}
+
 void ui_overlay_model_picker(ui_t *u) {
     if (g_open) {
         tui_set_focus(u->tui, &g_open->base);
@@ -548,4 +613,5 @@ void ui_overlay_model_picker(ui_t *u) {
     tui_overlay_fill_screen(u->tui, &p->base); /* bottom-center against the full terminal, over a short transcript */
     tui_set_focus(u->tui, &p->base);
     tui_request_render(u->tui);
+    maybe_rediscover(u);
 }

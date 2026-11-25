@@ -652,13 +652,40 @@ static int discover(bool force, const char *only) {
     return total;
 }
 
+/* model-provider-discovery.ts BUILT_IN_DISCOVERY_CACHE_TTL_MS */
+#define BUILT_IN_DISCOVERY_CACHE_TTL_MS (2LL * 60 * 60 * 1000)
+static int64_t g_online_refresh_at; /* mono ms of the last pass that may reach the network, 0 = none (under g_mu) */
+
+void catalog_note_online_refresh(void) {
+    if (env_truthy("OMC_NO_LOCAL_DISCOVERY")) return; /* a registry that never refreshed online stays offline */
+    pthread_mutex_lock(&g_mu);
+    g_online_refresh_at = mono_ms();
+    pthread_mutex_unlock(&g_mu);
+}
+
+bool catalog_discovery_stale(void) {
+    const char *t = env_get("OMC_DISCOVERY_TTL_MS");
+    int64_t ttl = t && *t ? (int64_t)strtoll(t, NULL, 10) : BUILT_IN_DISCOVERY_CACHE_TTL_MS;
+    pthread_mutex_lock(&g_mu);
+    bool stale = g_online_refresh_at && mono_ms() - g_online_refresh_at >= ttl;
+    pthread_mutex_unlock(&g_mu);
+    return stale;
+}
+
 int catalog_discover_local(bool force) {
     catalog_init();
     if (!force) {
         if (g_started) return 0;
         g_started = true;
     }
+    catalog_note_online_refresh();
     return discover(force, NULL);
+}
+
+int catalog_rediscover(void) {
+    catalog_init();
+    catalog_note_online_refresh();
+    return discover(false, NULL) + kiro_discover(false);
 }
 
 int catalog_discover_provider(const char *provider) {
