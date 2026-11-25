@@ -92,6 +92,17 @@ void session_reset_leaf(session_t *s);
 json_t *session_path_to(const session_t *s, const char *leaf_id); /* owned array of borrowed->cloned entries root..leaf */
 json_t *session_children(const session_t *s, const char *id);      /* owned array of entries */
 
+/* SessionEntryIndex.treePosition (omp c9f03a4657): where the active leaf sits in the tree once it is off the tip of a
+ * single line. `branch_index`/`branch_count` (both 0 when absent): the path's branch at the deepest fork it passes
+ * through, 1-based in timestamp order, counting only siblings whose subtree holds a user turn (besides the path's
+ * own); `ahead`: user turns on the newest continuation below the leaf. False (the position is undefined) at the tip
+ * of a session without forks. */
+typedef struct {
+    int branch_index, branch_count;
+    int ahead;
+} session_tree_pos_t;
+bool session_tree_position(const session_t *s, session_tree_pos_t *out);
+
 /* context reconstruction: messages for the LLM along the current leaf. Owned array.
  * Also reports latest model/thinking selections (owned strings, may be NULL). */
 typedef struct {
