@@ -1,6 +1,6 @@
 # omc implementation status
 
-Status of the port against upstream oh-my-pi (reference: omp v19.1.0, see [UPDATE.md](../UPDATE.md) for the pinned upstream commit). ✅ ported and tested · 🟡 partial · ❌ not yet.
+Status of the port against upstream oh-my-pi (reference: omp v19.1.1, see [UPDATE.md](../UPDATE.md) for the pinned upstream commit). ✅ ported and tested · 🟡 partial · ❌ not yet.
 This file is the single source of truth for what is implemented; it is updated with every change.
 [gaps.md](gaps.md) audits omp's full user-facing surface against omc and lists the missing pieces as prioritized work packages. Keep both in sync when a gap closes.
 
@@ -60,6 +60,76 @@ session. The Windows script checks both against `tests/e2e/mock_release.py` (upd
 **Not yet:** the Windows console title from run state, Windows toast notifications, PowerShell profile aliases, MSVC
 linking (documented, not checked here); the full Linux e2e suite is not run on Windows (it assumes POSIX tools), the
 Windows script covers the platform paths.
+
+## omp v19.1.1 update (2026-11-25)
+
+Ported from v19.1.0 to v19.1.1 (410 non-merge upstream commits; 280 skipped by triage as changelog-only, upstream tests
+and CI, the Rust natives (desktop automation, file walkers, pty), the Rust shell and built-ins (`column`), the browser
+and relay, the `computer` tool and `computer.takeover`, stats, spotlight, JS eval and selective commits, `/tan`, `/omfg`,
+`antigravity-cli`, the auth broker, prompt perturbation). Four streams (providers, tools, TUI/CLI/model selection, agent
+core/sessions/MCP). Embedded data refreshed to v19.1.1: prompts (10 changed, 5 new), catalog (6,104 models), compat
+rules, providers, settings tables (`todo.backend`, `computer.takeover`; `computer.backgroundFallback` removed), changelog.
+
+**Ported:**
+- Providers: Anthropic `request-id` kept on the assistant message as `requestId` (refusals and mid-stream failures
+  included) and in the `agent turn ended with provider error` log line; a 402 with a billing-cap body is a usage limit,
+  so the fallback chain runs (`retry.fallbackOn` keys on the classifier's usage-limit flag); "stream stalled" wording is
+  a timeout; the loop guard's paragraph heuristics skip markdown tables and JSON records; Gemini `extra_content`,
+  `function.thought_signature` and message-level signatures merged in one envelope and replayed where they came from on
+  chat completions; compat `splitToolCalls` (Llama 3 rows) replays each call of a multi-call turn as its own assistant
+  message followed by its result.
+- Tools: the magic edit draft loop (`src/tools/magic.c`): the apply model edits an in-memory draft with
+  read/search/replace tool calls (12 turns in one 120 s budget, failure hints, retried replaces, calls written as fenced
+  JSON or Python lines, `N│text` views, a head+tail preview for files too big for the apply window), the finished draft
+  committed as one replace; its JSON syntax check matches omp's tree-sitter-json verdicts (63 probe drafts); apply
+  conversations identical to omp 19.1.1 against the mock in 12 scenarios. eval states its default cell deadline (cells
+  honour `tools.maxTimeout`, with omp's clamp notice); read's `:raw` help follows the line-prefix mode; ask refuses a
+  fieldset of split radio groups; background bash job labels are the command on one line (`formatAsyncJobLabel`).
+- TUI and CLI: kitty keypad navigation keys with NumLock off (modified keypad digits act as their navigation key); the
+  opt-in `tree` status segment; a repeated Enter on the model hub row a role was just assigned keeps the role;
+  `--models` startup thinking from the scope entry the session starts on (`--model` keeps its own level); a resumed plan
+  runs the plan model and restores the pre-plan model and level when planning ends; `/wt` runs the new worktree's
+  `post-checkout` hook with a spinner, rescans skills and commands and warns on failure; Alt+P re-runs discovery in the
+  background once the catalog is 2 h old (local servers and Kiro); the Todo Backend row (Native).
+- Agent, sessions and MCP: title models stop on a clean decline (`<title/>`, `none`) and go on past unusable replies;
+  empty-stop retries logged with model/provider/stop metadata, the budget reset after the cap; handoffs that cannot fit
+  the target window are refused before the provider call, and a handoff cut off at the output limit fails;
+  `--restore` reads the branch like omp (an idle eval snapshot after a finished answer is not replayed) and reports
+  background bash jobs a killed process never finished as failed with an unknown outcome; MCP falls back to the
+  handshake era when a server answers -32022 with a supported older revision (stdio and HTTP, with JSON-RPC error bodies
+  on HTTP error statuses); a speculative remote compaction that fails for good latches remote compaction off until a
+  compaction commits; Windows renames retry a transient sharing violation for up to 2 s.
+
+**Found while porting and fixed (older gaps):** OpenAI Responses, Codex and Azure tool schemas go through omp's
+`sanitizeSchemaForOpenAIResponses` (oneOf to anyOf, `properties` on object nodes, `{}` to true, lookaround and nested
+character-class patterns dropped, Codex itemless arrays) and omp's strict pipeline (`src/ai/toolschema.c`: the draft-07
+to 2020-12 upgrade, strict conversion in omp's key order, `$ref`/`allOf` objects kept strict), so bash, glob, grep, todo
+and MCP schemas are byte-identical to omp's on strict-capable routes; MCP tools are `strict: false` with the server's
+own description, and every tool carries omp's strict flag (this changes which tools Codex and Devin send strict); MCP
+and RPC host tool schemas are normalized at registration like omp's. Tool results have control characters (CR, C1, ANSI)
+stripped as they enter the agent loop. Edits and editor-bridge writes are verified on disk after writing (`edit appeared
+successful but file content did not change on disk: <path>`). Resume restores the model of the last model change (a
+`/switch` pick, the plan model, a cycled role) before the default role's. A provider discovery warning heads the header
+when startup found a model and follows the welcome otherwise. RPC mode exits 1 when writing to stdout fails. Settings
+rows are typed like omp's (text and secret fields, enum rows, multiselects; `build-tools/settings_patch.py` emits them
+that way). Checked with the installed `omp` 19.1.1 and the mocks: the first request (`request_diff.sh`, plain and
+`edit.mode: magic`) has identical tools, strict flags and messages apart from the out-of-scope parts below; the tree
+segment, model hub, settings rows, resume, startup warnings and magic apply conversations side by side.
+
+**Not ported, too expensive in C or the base feature is absent:** per-request `@upstream` pins (omc resolves
+`x@upstream` to the routed model and keeps no pinned copies), the startup model fallback warnings (`No default model
+selected`, `Could not restore model …`), online model rosters (Copilot account models, Z.AI coding plan, Codex
+unbundled names, auth-gateway `pi-native` rosters), Codex WebSocket turn-state, the OpenRouter unbilled-reasoning probe,
+`agent.db` credential salvage (omc keeps credentials in `auth.json`), the Apple FM provider, xAI `rejectRootObjectUnion`
+flattening, Moonshot schema normalization and the self-contradicting-schema quarantine, the magic edit syntax check
+beyond JSON (tree-sitter), format-on-write, LSP file watching, speculative tool execution, experimental context
+rollover, snapcompact, extension todo backends, `/tan`, `/omfg`, `antigravity-cli`, collab titles, the advisor's
+session-history transcript, the `--models` scope in the quick picker, SVG pictures in ask forms.
+
+**Still differs from omp:** the first request's read/bash/eval/task descriptions and system prompt sections for
+features omc doesn't have (omp's built-in shell commands, JS eval and its `commit`/`dsm` namespaces, the browser,
+executable metadata reads, eval-defined subagent tools); MCP tools come after resolve/reject/report_issue in omc's tool
+list (before them in omp); everything listed under v19.1.0 below that this update did not touch.
 
 ## omp v19.1.0 update (2026-11-23)
 

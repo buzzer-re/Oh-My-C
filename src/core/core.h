@@ -23,7 +23,7 @@
 #include "core/compat.h"
 
 /* the omp release whose behaviour this build matches (UPDATE.md pin); release tags are v<OMC_VERSION> */
-#define OMC_VERSION "19.1.0"
+#define OMC_VERSION "19.1.1"
 #define OMC_VERSION_LABEL "v" OMC_VERSION " (OMP equivalent)"
 #define OMC_NAME "omc"
 
