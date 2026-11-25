@@ -118,6 +118,10 @@ optionals, numeric strings, enum whitespace — up to 5 coercion passes, and omp
 `pattern must be a string (was missing)`) → `execute` → `after_tool` hook. Validation errors return
 `Validation failed for tool "<name>": ...` with the received arguments (2-space indented JSON,
 `{original, normalized}` when something was coerced), as omp does. Unknown tools return `Tool <name> not found`.
+The text of a result the tool returned (and of every partial result) is sanitized where it enters the loop, like
+omp's `coerceToolResult`: ANSI sequences, CR, the other C0 controls but `\t`/`\n`, DEL and C1 controls are dropped
+(`out_sanitize`, installed by the coding layer through `agent_set_text_sanitizer`), so the events, the history and
+the session file carry the clean text. A thrown error (omc's detail-less error result) keeps its text.
 
 ### The intent field `i`
 

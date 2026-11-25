@@ -137,3 +137,12 @@ ok=any(re.search(r"Delivery: handed over by this snapshot \(it finished [0-9.]+m
 print("superseded=%s" % ok)'
 # `.` on a running turn interrupts it and continues (8e3a4c0436): the prompt the model never answered runs again
 check "continue interrupts" "continue tui ok" env OMC_CODING_AGENT_DIR="$T/agent" python3 -I "$ROOT/tests/e2e/continue_tui.py" "$B" "$T/req.jsonl"
+# tool-result text is sanitized where it enters the loop (agent-loop.ts coerceToolResult): CR, ANSI, C0 and C1 controls
+# leave a returned result (read) in the request and the session; a thrown error (a missing path) keeps its text
+printf 'alpha\rbeta \033[31mred\033[0m \001gamma \302\205delta\n' > "$ACW/ctl.txt"
+M=$(ac_mark)
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 --no-session -p 'read:ctl.txt' </dev/null >/dev/null 2>&1)
+(cd "$ACW" && timeout 60 "$B" --model mock/mock-1 --no-session -p 'call:read:{"path":"no\u0001such.txt"}' </dev/null >/dev/null 2>&1)
+check "tool result sanitized" "read='[ctl.txt#B07C]\n1:alphabeta red gamma delta' thrown=\"Path 'no\x01such.txt' not found\"" python3 -I "$T/ac_req.py" "$T/req.jsonl" "$M" '
+tools=[text(m) for r in main for m in r["messages"] if m.get("role") == "tool"]
+print("read=%r thrown=%r" % (next(t for t in tools if "ctl.txt#" in t), next(t for t in tools if "not found" in t)))'

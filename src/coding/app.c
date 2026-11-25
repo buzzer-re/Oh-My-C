@@ -12,6 +12,7 @@
 #include "coding/keywords.h"
 #include "coding/thinkloop.h"
 #include "coding/title.h"
+#include "tools/outsink.h"
 #include "coding/branchsum.h"
 #include "coding/compaction.h"
 #include "coding/skilldesc.h"
@@ -1959,6 +1960,7 @@ static void install_agent(app_t *a) {
     a->env->can_prompt_user = a->opts.has_ui;
     a->env->ask_ui = a->opts.rpc_ui || a->opts.interactive_prompts;
     a->env->delegation_bias = model_delegation_bias(a->model);
+    agent_set_text_sanitizer(out_sanitize); /* coerceToolResult's sanitizeText (tools/outsink.c) */
     /* intentTracingActive: an explicit tools.intentTracing (any layer or PI_INTENT_TRACING) wins; unset, the host decides */
     if (settings_configured("tools.intentTracing")) agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
     else agent_reset_intent_tracing();

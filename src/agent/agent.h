@@ -79,6 +79,10 @@ void agent_tool_free(agent_tool_t *t);
 json_t *agent_tool_wire(const agent_tool_t *t); /* {name, description, parameters}; injects `i` when intent tracing is on */
 /* examples as JSDoc `@example` lines (ai dialect renderToolExamplesJsdoc; /dump tool inventory); owned or NULL */
 char *agent_tool_examples_jsdoc(const agent_tool_t *t);
+/* sanitizeText for tool-result text (coerceToolResult): owned copy, *out_len its length. Process-wide; unset (unit tests
+ * of the bare loop), results keep their text. The coding layer installs tools/outsink.c's out_sanitize. */
+typedef char *(*agent_text_sanitizer_fn)(const char *s, size_t len, size_t *out_len);
+void agent_set_text_sanitizer(agent_text_sanitizer_fn fn);
 /* intent tracing (upstream tools.intentTracing; PI_NO_INTENT=1 disables injection). Process-wide. */
 void agent_set_intent_tracing(bool on);
 /* tools.intentTracing unset: tracing follows the interactive host (on in the TUI and its subagents, off in print, RPC,
