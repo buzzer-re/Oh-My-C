@@ -3588,9 +3588,15 @@ static void initial_prompt_cb(void *ud) {
 static void restore_cb(void *ud) {
     ui_t *u = ud;
     /* restoreInterruptedTurn: close the cut-off turn, then retry() it (a fully cut-off batch runs again) */
-    if (u->worker_running || !app_restore_interrupted_turn(u->app) || !app_retry_prepare(u->app)) return;
+    json_t *branch = NULL;
+    if (u->worker_running || !app_restore_interrupted_turn(u->app, &branch) || !app_retry_prepare(u->app)) {
+        json_free(branch);
+        return;
+    }
     u->worker_running = true;
     if (pthread_create(&u->worker, NULL, retry_main, u) != 0) u->worker_running = false;
+    else app_restore_terminated_jobs(u->app, branch); /* delivered when the retried run ends (worker_done) */
+    json_free(branch);
 }
 
 static tui_container_t *g_header_after;

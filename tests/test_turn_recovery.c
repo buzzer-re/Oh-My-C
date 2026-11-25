@@ -2,6 +2,7 @@
  * and the turn-recovery.ts predicates (isRetryableError, #isMidStreamTransportFailure,
  * classifyResolvedInterruptedToolTurn, handleCommittedTextStreamStall) */
 #include "coding/turn_recovery.h"
+#include "coding/restore.h"
 #include "ai/ai.h"
 #include "config/model_resolver.h"
 #include "session/session.h"
@@ -123,7 +124,132 @@ static ssize_t turn_end_of(const char *spec) {
     return r;
 }
 
+/* ---------- --restore (exit-diagnostics.ts hasRestorableTurn, restoreTerminatedBashJobs) ---------- */
+
+/* a branch from a compact spec, one entry per letter: u user prompt, a assistant stop, A interrupted-turn abort
+ * (recovery: no completedAt), L the same abort written live (completedAt), I user-interrupt abort, s eval snapshot
+ * message, S eval snapshot custom_message, x extension prompt custom_message, d display-only custom_message,
+ * e signal session_exit, n normal session_exit */
+static json_t *branch_of(const char *spec) {
+    json_t *b = json_arr();
+    for (const char *p = spec; *p; p++) {
+        json_t *e = NULL;
+        switch (*p) {
+        case 'u': e = json_parse_str("{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"go on\"}}"); break;
+        case 'a':
+            e = json_parse_str("{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],"
+                               "\"stopReason\":\"stop\",\"completedAt\":1}}");
+            break;
+        case 'A':
+        case 'L':
+            e = json_parse_str("{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[],\"stopReason\":\"aborted\","
+                               "\"errorMessage\":\"" INTERRUPTED_TURN_ERROR "\"}}");
+            if (*p == 'L') json_set_int(json_get_obj(e, "message"), "completedAt", 1);
+            break;
+        case 'I':
+            e = json_parse_str("{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[],\"stopReason\":\"aborted\","
+                               "\"errorMessage\":\"Interrupted by user\",\"completedAt\":1}}");
+            break;
+        case 's':
+            e = json_parse_str("{\"type\":\"message\",\"message\":{\"role\":\"custom\",\"customType\":\"eval-state-context\","
+                               "\"content\":\"<system-reminder>eval</system-reminder>\",\"display\":false}}");
+            break;
+        case 'S': e = json_parse_str("{\"type\":\"custom_message\",\"customType\":\"eval-state-context\",\"content\":\"eval\",\"display\":false}"); break;
+        case 'x': e = json_parse_str("{\"type\":\"custom_message\",\"customType\":\"extension-prompt\",\"content\":\"check the build\",\"display\":true}"); break;
+        case 'd':
+            e = json_parse_str("{\"type\":\"custom_message\",\"customType\":\"bash-row\",\"content\":\"ls\",\"display\":true,\"excludeFromContext\":true}");
+            break;
+        case 'e':
+        case 'n':
+            e = json_parse_str("{\"type\":\"custom\",\"customType\":\"session_exit\",\"data\":{\"reason\":\"sighup\",\"kind\":\"signal\","
+                               "\"recordedAt\":\"2026-11-20T10:00:00.000Z\"}}");
+            if (*p == 'n') json_set_str(json_get_obj(e, "data"), "kind", "normal");
+            break;
+        }
+        json_push(b, e);
+    }
+    return b;
+}
+
+static bool restorable(const char *spec) {
+    json_t *b = branch_of(spec);
+    bool r = restore_branch_restorable(b);
+    json_free(b);
+    return r;
+}
+
+static void restore_tails(void) {
+    /* an idle compaction's snapshot after a finished answer, or an older release's abort over it: nothing to go on with */
+    CHECK(!restorable("uase"));
+    CHECK(!restorable("uaseAe"));
+    CHECK(!restorable("uaSeA"));  /* the snapshot as a custom_message entry */
+    CHECK(!restorable("uasde"));  /* a display-only custom message cannot start a turn */
+    CHECK(!restorable("ua"));
+    /* a genuine cut-off turn still goes on */
+    CHECK(restorable("useA"));    /* mid-turn snapshot, then a shutdown */
+    CHECK(restorable("uAeA"));    /* a restored request cut off again */
+    CHECK(restorable("uASeA"));   /* the same with the reopen's snapshot between the aborts */
+    CHECK(restorable("uInSeL"));  /* a live abort (completedAt) after a reopen */
+    CHECK(restorable("uaxeA"));   /* an extension prompt after a finished answer */
+    CHECK(restorable("uaxs"));    /* the same prompt overflowed, compacted, hard-killed */
+    CHECK(restorable("uaxsA"));   /* ... and killed again after --restore closed it */
+    CHECK(restorable("uIs"));     /* Esc, /retry, overflow, compaction, kill */
+    CHECK(restorable("uanxs"));   /* a clean quit and reopen before the extension prompt */
+    CHECK(restorable("uasxe"));   /* an extension prompt after an idle snapshot (omp 2da0223c61) */
+    CHECK(restorable("u"));
+    CHECK(!restorable("uan"));    /* a normal exit after a finished turn */
+    CHECK(!restorable("uAn"));    /* an abort a normal exit followed */
+}
+
+static void restore_jobs(void) {
+    json_t *b = json_parse_str(
+        "["
+        "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"toolUse\",\"content\":["
+        "{\"type\":\"toolCall\",\"id\":\"c1\",\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 30;\\n  echo   done\"}},"
+        "{\"type\":\"toolCall\",\"id\":\"c2\",\"name\":\"bash\",\"arguments\":{\"command\":\"make test\"}},"
+        "{\"type\":\"toolCall\",\"id\":\"c3\",\"name\":\"bash\",\"arguments\":{\"command\":\"npm run dev\"}},"
+        "{\"type\":\"toolCall\",\"id\":\"c4\",\"name\":\"bash\",\"arguments\":{\"command\":\"   \"}}]}},"
+        "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"c1\",\"toolName\":\"bash\",\"content\":[],"
+        "\"details\":{\"async\":{\"state\":\"running\",\"jobId\":\"bg_1\",\"type\":\"bash\"}}}},"
+        "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"c2\",\"toolName\":\"bash\",\"content\":[],"
+        "\"details\":{\"async\":{\"state\":\"running\",\"jobId\":\"bg_2\",\"type\":\"bash\"}}}},"
+        "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"c3\",\"toolName\":\"bash\",\"content\":[],"
+        "\"details\":{\"async\":{\"state\":\"running\",\"jobId\":\"bg_3\",\"type\":\"bash\"}}}},"
+        "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"c4\",\"toolName\":\"bash\",\"content\":[],"
+        "\"details\":{\"async\":{\"state\":\"running\",\"jobId\":\"bg_4\",\"type\":\"bash\"}}}},"
+        /* bg_2 delivered by an async-result; bg_3 settled by a wait snapshot */
+        "{\"type\":\"custom_message\",\"customType\":\"async-result\",\"content\":\"x\",\"details\":{\"jobs\":[{\"jobId\":\"bg_2\","
+        "\"status\":\"running\"}]}},"
+        "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"w1\",\"toolName\":\"wait\",\"content\":[],"
+        "\"details\":{\"jobs\":[{\"id\":\"bg_3\",\"status\":\"completed\"},{\"id\":\"bg_1\",\"status\":\"running\"}]}}}"
+        "]");
+    json_t *jobs = restore_unsettled_bash_jobs(b);
+    char *s = json_dump(jobs, 0);
+    CHECK(!strcmp(s, "[{\"id\":\"bg_1\",\"label\":\"sleep 30; echo done\"},{\"id\":\"bg_4\",\"label\":\"bg_4\"}]"));
+    if (strcmp(s, "[{\"id\":\"bg_1\",\"label\":\"sleep 30; echo done\"},{\"id\":\"bg_4\",\"label\":\"bg_4\"}]")) fprintf(stderr, "jobs: %s\n", s);
+    free(s);
+    json_free(jobs);
+    json_free(b);
+    /* a 200-character command: 117 characters and "..." */
+    char cmd[256], spec[1024];
+    memset(cmd, 'x', 200);
+    cmd[200] = 0;
+    snprintf(spec, sizeof spec,
+             "[{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"c\",\"name\":\"bash\","
+             "\"arguments\":{\"command\":\"%s\"}}]}},{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"c\","
+             "\"toolName\":\"bash\",\"details\":{\"async\":{\"state\":\"running\",\"jobId\":\"bg_9\",\"type\":\"bash\"}}}}]",
+             cmd);
+    b = json_parse_str(spec);
+    jobs = restore_unsettled_bash_jobs(b);
+    const char *label = json_get_str(json_at(jobs, 0), "label");
+    CHECK(label && strlen(label) == 120 && !strcmp(label + 117, "..."));
+    json_free(jobs);
+    json_free(b);
+}
+
 int main(void) {
+    restore_tails();
+    restore_jobs();
     /* isUnexpectedSocketCloseMessage */
     CHECK(aie_socket_close_text(SOCK));
     CHECK(aie_socket_close_text("The socket connection closed unexpectedly"));
