@@ -134,13 +134,39 @@ def literal(raw):
         return t.encode().decode("unicode_escape").encode("latin-1", "ignore").decode("utf8", "ignore") if "\\" in t else t, True
     # an array or object of plain literals
     if raw[:1] in "[{":
-        j = re.sub(r"([{,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', raw)
-        j = re.sub(r",\s*([}\]])", r"\1", j)
+        j = js_json(raw)
+        if j is None:
+            return None, False
         try:
             return json.loads(j), True
         except json.JSONDecodeError:
             return None, False
     return None, False
+
+
+def js_json(raw):
+    """JSON text for a JS array/object literal of plain values: keys quoted and trailing commas dropped only outside
+    strings (a description holding `word:` stays intact), '...' and `...` strings re-encoded; None for a template with
+    interpolation."""
+    out = []
+    i = 0
+    while i < len(raw):
+        if raw[i] in "\"'`":
+            j = skip_string(raw, i)
+            tok = raw[i:j]
+            if tok[0] == "`" and "${" in tok:
+                return None
+            text, _ = literal(tok)
+            out.append(json.dumps(text, ensure_ascii=False))
+            i = j
+            continue
+        j = i
+        while j < len(raw) and raw[j] not in "\"'`":
+            j += 1
+        code = re.sub(r"([{,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', raw[i:j])
+        out.append(re.sub(r",\s*([}\]])", r"\1", code))
+        i = j
+    return "".join(out)
 
 
 def settings_at(tag):
@@ -209,18 +235,56 @@ def describe(sid, e):
 
 
 def ui_row(sid, r, e):
+    """The settings panel row omp's settings-defs.ts entryToSettingDef makes of a registration, or None for one the
+    panel does not show (a number or array without choices)."""
     ui = e["ui"]
     if not ui:
         return None
-    row = {"path": sid, "schemaType": r["type"], "type": "boolean" if r["type"] == "boolean" else "submenu"}
+    schema = r["type"]
+    options = None  # None: no `options`; "runtime": host-supplied choices; else the list
+    if "options" in ui:
+        o, ok = literal(ui["options"])
+        options = "runtime" if o == "runtime" else (o if ok else [])
+    credential = literal(e["p"].get("credential", "false"))[0] is True
+    secret = False
+    if schema == "boolean":
+        kind = "boolean"
+    elif schema == "enum":
+        kind = "enum" if options is None else "submenu"
+    elif schema == "number":
+        if options is None or options == "runtime":
+            return None
+        kind = "submenu"
+    elif schema == "string":
+        if options is None:
+            kind, secret = "text", credential
+        else:
+            kind = "submenu"
+    elif schema == "array":
+        if literal(ui.get("editor", '""'))[0] == "json":
+            kind, secret, options = "text", credential, None
+        elif options is None or options == "runtime":
+            return None
+        else:
+            kind = "multiselect"
+    elif schema == "record":
+        kind, options = ("providerLimits" if sid == "providers.maxInFlightRequests" else "text"), None
+    else:
+        return None
+    row = {"path": sid, "schemaType": schema, "type": kind}
     if "default" in r:
         row["default"] = r["default"]
     row.update({"tab": r["tab"], "label": strtext(ui.get("label")), "description": r.get("description")})
     if strtext(ui.get("group")):
         row["group"] = strtext(ui.get("group"))
-    if "options" in ui:
-        o, ok = literal(ui["options"])
-        row["options"] = o if ok else []
+    if kind == "enum" and "values" in r:
+        row["values"] = r["values"]
+    if options is not None and kind != "text":
+        row["options"] = options
+    if kind == "multiselect" and literal(ui.get("ordered", "false"))[0] is True:
+        row["ordered"] = True
+    if secret:
+        row["secret"] = True
     return row
 
 
@@ -274,8 +338,14 @@ for s, d in changed:
             if k in r:
                 cur[k] = r[k]
     row = ui_by.get(s)
-    if row:
-        fresh = ui_row(s, r, new[s]) or {}
+    fresh = ui_row(s, r, new[s])
+    if row and fresh is None and new[s]["ui"]:  # the panel no longer shows it (a number or array that lost its choices)
+        tab["settings"][:] = [x for x in tab["settings"] if x["path"] != s]
+    elif row and fresh:
+        if fresh["type"] != row.get("type"):  # a new kind of row: keys of the old kind go
+            for k in ("options", "values", "secret", "ordered"):
+                if k not in fresh:
+                    row.pop(k, None)
         for k, v in fresh.items():
             if k in ("options",) and not v:
                 continue

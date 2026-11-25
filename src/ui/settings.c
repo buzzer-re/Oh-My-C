@@ -164,12 +164,6 @@ static void load_defs(void) {
             const char *v = json_get_str(o, "value"), *l = json_get_str(o, "label"), *de = json_get_str(o, "description");
             d->opts[d->nopt++] = (sopt_t){xstrdup(v ? v : ""), xstrdup(l ? l : (v ? v : "")), de ? xstrdup(de) : NULL};
         }
-        /* entryToSettingDef: a string setting without choices is a text field (`credential` ones masked). The generated
-         * table types the rows settings_patch.py added as `submenu` and carries no credential flag for them */
-        if (str_eq(d->schema, "string") && str_eq(d->type, "submenu") && !json_get(s, "options")) {
-            d->type = "text";
-            if (str_eq(d->path, "live.apiKey")) d->secret = true;
-        }
         if (str_eq(d->path, "auth.unpausedProviders")) paused_provider_choices(d);
         if (d->path && d->label && d->type && d->tab >= 0 && !omc_inert(d->path)) g_ndefs++;
     }
