@@ -150,4 +150,30 @@ import json, sys
 rs = [json.loads(l) for l in open(sys.argv[1])]
 m = rs[-1]["body"]["messages"][0]
 print(m["role"], m["content"][0].get("type"), m["content"][0].get("signature"))' "$T/cprov.jsonl"
+# a handoff whose prepared request cannot fit the model's window is refused before the provider is called and the
+# ladder moves on (omp 7e27048049, 108af4ea8e): no handoff request reaches the mock, the soft summary commits
+mkdir -p "$T/cg7"
+cat > "$T/cg7/models.yml" <<YML
+providers:
+  mock:
+    baseUrl: http://127.0.0.1:$PORT/v1
+    apiKey: MOCK_KEY
+    api: openai-completions
+    models:
+      - id: mock-1
+        contextWindow: 30000
+        maxTokens: 4096
+YML
+printf 'modelRoles:\n  default: mock/mock-1\ncompaction:\n  thresholdTokens: 15000\n  asyncEnabled: false\n  methodOrder: [handoff, soft]\n' > "$T/cg7/config.yml"
+CG7M=$(cat "$T/req.jsonl" 2>/dev/null | wc -l)
+OMC_CODING_AGENT_DIR="$T/cg7" "${CR[@]}" "{\"type\":\"prompt\",\"message\":\"$BIG1\"}" > "$T/cg7.out"
+check "handoff fit gate" "refused=True sent=0 soft=True"  python3 -I -c '
+import json, re, sys
+ev = [json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]
+pat = r"^Auto-compaction failed: Handoff input does not fit mock/mock-1: at least \d+ prompt tokens leave no room for output in its 30000-token window; trying the next preferred compaction method\.$"
+refused = any(e.get("type") == "auto_compaction_end" and e.get("action") == "handoff" and re.match(pat, e.get("errorMessage", "")) for e in ev)
+rs = [json.loads(l) for l in open(sys.argv[2])][int(sys.argv[3]):]
+sent = sum("Write a handoff document" in json.dumps(r.get("messages", [])) for r in rs)
+soft = any(e.get("type") == "auto_compaction_end" and e.get("action") == "context-full" and e.get("result") for e in ev)
+print("refused=%s sent=%d soft=%s" % (refused, sent, soft))' "$T/cg7.out" "$T/req.jsonl" "$CG7M"
 kill $CMPID 2>/dev/null

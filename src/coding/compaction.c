@@ -1799,10 +1799,46 @@ bool cmp_handoff_has_goal(const char *text) {
     return false;
 }
 
+/* output-budget.ts MIN_FITTED_OUTPUT_TOKENS (the smallest output cap a request asks for) and OUTPUT_FIT_HEADWAY_TOKENS (the
+ * per-request framing no message count sees) */
+#define MIN_FITTED_OUTPUT_TOKENS 1024
+#define OUTPUT_FIT_HEADWAY_TOKENS 64
+
+/* countContextOverrun: the local prompt count of a prepared request when it leaves `m` no room for the smallest output the
+ * transport asks for, else 0 (also for an unknown window). No usage anchor is trusted and no tokenizer margin is added, so
+ * only a clear overrun counts; encrypted reasoning is not counted, and counting stops at the first message past the
+ * window, so the count is a floor. */
+static int64_t context_overrun(const ai_model_t *m, const json_t *sys, const json_t *tools, const json_t *msgs) {
+    if (!m || m->context_window <= 0) return 0;
+    int64_t budget = m->context_window - OUTPUT_FIT_HEADWAY_TOKENS - MIN_FITTED_OUTPUT_TOKENS, tokens = 0;
+    const json_t *x;
+    json_arr_foreach(sys, i, x) tokens += text_tokens(json_is_str(x) ? json_sv(x) : NULL);
+    json_arr_foreach(tools, i, x) {
+        char *params = json_dump(json_get(x, "parameters"), 0);
+        tokens += text_tokens(json_get_str(x, "name")) + text_tokens(json_get_str(x, "description")) + text_tokens(params);
+        free(params);
+    }
+    json_arr_foreach(msgs, i, x) {
+        if (tokens > budget) break;
+        tokens += cmp_message_tokens(x);
+    }
+    return tokens > budget ? tokens : 0;
+}
+
 /* SessionHandoff.generateDocument's request: owned text, NULL + *err on failure; NULL without *err for an empty
  * auto-triggered document */
 static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char **err) {
     const ai_model_t *model = a->model;
+    /* generateHandoffFromContext: a handoff reads the whole prepared context, which may have expanded behind a native
+     * compaction this model cannot replay; one that cannot fit is refused before the provider is called, so automatic
+     * maintenance moves on to its next method (omp 7e27048049, 108af4ea8e) */
+    int64_t overrun = context_overrun(model, h->sys, h->tools, h->wire);
+    if (overrun) {
+        *err = xasprintf("Handoff input does not fit %s/%s: at least %lld prompt tokens leave no room for output in its "
+                         "%lld-token window",
+                         model->provider, model->id, (long long)overrun, (long long)model->context_window);
+        return NULL;
+    }
     ai_context_t c = {.system_prompt = h->sys, .messages = h->wire, .tools = json_len(h->tools) ? h->tools : NULL};
     ai_stream_opts_t o = a->agent->base_opts;
     char *key = app_api_key_for(model);
@@ -1837,6 +1873,8 @@ static char *handoff_exec(app_t *a, handoff_req_t *h, bool auto_triggered, char 
     else if (str_eq(stop, "error") || !r) {
         em = json_get_str(r, "errorMessage");
         *err = xasprintf("Handoff generation failed: %s", em && *em ? em : "Unknown error");
+    } else if (str_eq(stop, "length")) {
+        *err = xstrdup("Handoff generation failed: model output ended incomplete (stopReason: length)");
     } else {
         text = joined_text(r);
         char *t = str_trim(text);

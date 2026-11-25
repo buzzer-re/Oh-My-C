@@ -307,7 +307,12 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   `handoff-<time>.md` to the session artifacts) and commits it with `method: "handoff"`, rendered
   through `handoff-summary-context.md`. A document without a `## Goal` heading line (text before it is allowed) is
   rejected (an automatic handoff moves on to the next method, `/handoff` reports "Compaction failed: Handoff generation
-  produced an invalid document").
+  produced an invalid document"). Before sending, the prepared request (system prompt, tool schemas, transformed
+  history, handoff prompt) is counted against the model's window without usage anchors or a tokenizer margin, stopping
+  at the first message past it (omp `countContextOverrun`); one that leaves less than the smallest output a request
+  asks for (window − 64 − 1024) is refused locally ("Handoff input does not fit …"), so automatic and speculative
+  passes move on without calling the provider. A document cut off at the output limit fails as
+  `Handoff generation failed: model output ended incomplete (stopReason: length)`.
 - **Triggers**: after each turn (`cmp_after_turn`: stale-read supersession and useless-result elision
   with `compaction.supersedeReads` / `dropUseless`, tool-output pruning, then the threshold), between
   tool-loop turns (`cmp_mid_turn`, `compaction.midTurnEnabled`, through the agent's `turn_boundary`
