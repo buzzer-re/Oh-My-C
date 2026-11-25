@@ -97,6 +97,28 @@ static void test_keys(void) {
         {"\x1b[27u", "escape"},
         {"\x1b[127;5u", "ctrl+backspace"},
         {"\x1b[1;2A", "shift+up"},
+        /* omp 8b762fb985: kitty's keypad navigation codepoints (NumLock off), with or without modifiers; lock bits are
+         * not modifiers, and an alternate key code does not override the navigation identity */
+        {"\x1b[57417u", "left"},
+        {"\x1b[57420u", "down"},
+        {"\x1b[57421u", "pageup"},
+        {"\x1b[57424u", "end"},
+        {"\x1b[57426u", "delete"},
+        {"\x1b[57427u", "clear"},
+        {"\x1b[57424;1u", "end"},
+        {"\x1b[57419;1u", "up"},
+        {"\x1b[57424;2u", "shift+end"},
+        {"\x1b[57419;5u", "ctrl+up"},
+        {"\x1b[57426;6u", "ctrl+shift+delete"},
+        {"\x1b[57424;129u", "end"},
+        {"\x1b[57424::57399;5u", "ctrl+end"},
+        /* a keypad digit types its character unmodified, and is its navigation key with a modifier */
+        {"\x1b[57400u", "1"},
+        {"\x1b[57400;129u", "1"},
+        {"\x1b[57400;5u", "ctrl+end"},
+        {"\x1b[57404;5u", "ctrl+clear"},
+        {"\x1b[57409;2u", "shift+delete"},
+        {"\x1b[57413;5u", "ctrl++"},
         {"\x1f", "ctrl+_"},
         {"\x1b", "escape"},
     };

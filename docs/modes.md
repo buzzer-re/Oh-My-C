@@ -27,8 +27,9 @@ reaching the model as a prompt; everything else is the launch command (`omc laun
 
 Launch flags (`src/cli/args.c`, port of `cli/args.ts` + `flag-tables.ts`; `--flag=value` everywhere,
 `--` ends options): `--model`, `--smol/--slow/--plan` (or `PI_SMOL_MODEL`/`PI_SLOW_MODEL`/`PI_PLAN_MODEL`;
-runtime `modelRoles` overrides), `--models a,b` (scope: the first in-scope model starts a fresh session,
-explicit `:level` honored), `--provider`, `--api-key`, `--thinking`, `--goal`, `--plan-yolo[-into]`,
+runtime `modelRoles` overrides), `--models a,b` (scope: a remembered default resolved within it, else its first model,
+starts a fresh session at that entry's explicit `:level` (else the remembered role's); an explicit `--model` in the
+scope without a level of its own starts at its entry's level, one outside the scope keeps its own), `--provider`, `--api-key`, `--thinking`, `--goal`, `--plan-yolo[-into]`,
 `--system-prompt`, `--system-prompt-template <file>` (Handlebars, replaces the bundled template; a project or
 agent-dir `SYSTEM_TEMPLATE.md` is discovered like `SYSTEM.md`; failing those, the `systemPromptTemplates` setting maps
 model substrings to template files, longest match wins, a missing or empty file keeps the bundled prompt), `--append-system-prompt`, `--cwd`, `--mode`,
@@ -122,8 +123,15 @@ Workspace and session lifecycle (WP-21): the session's roots are its cwd plus th
 session bucket, then `chdir` and a re-scope of project settings, discovery, file commands and the system
 prompt; a failure moves the session back). In the TUI `/move` without an argument opens the directory overlay
 and offers to create a missing directory; `/wt` creates the worktree on the next tick so the `Creating worktree
-on …` row paints, and the worktrees a launch created are offered for removal on exit per `worktree.onExit`
-(planned in the TUI, removed after the terminal is handed back, messages on stderr). `worktree.onStart` runs on
+on …` row paints (`git worktree add` with its hooks held back), then, once the session moved in, runs the
+worktree's `post-checkout` hook as `git worktree add` would (`git hook run --ignore-missing post-checkout -- <null>
+<base> 1`, or the hook file itself before git 2.36; `session_wt_run_hook`) off the UI thread under a `Running
+post-checkout hook…` row (a turn starting meanwhile takes the row over), rescans skills and file commands
+(`app_refresh_skills_and_commands`, after a turn that started meanwhile) and shows `Worktree created, but
+post-checkout hook exited with N: <last line>` when it fails; RPC/ACP `/wt` runs it inline and adds `Warning: …`
+lines. The worktrees a launch created are offered for removal on exit per `worktree.onExit` (planned in the TUI,
+removed after the terminal is handed back, messages on stderr; one whose hook still runs is kept with `Kept worktree
+…: its post-checkout hook is still running.`). `worktree.onStart` runs on
 fresh launches only. `/restart` closes the TUI like `/exit` and `cli.c` execs `/proc/self/exe` with omp's
 restartArgv (one-shot session selectors and positionals dropped, `--restore <session file>` appended when the
 session is on disk, so a turn the teardown cut off goes on; omp also revives the subagents it cut off, which omc does
@@ -156,7 +164,10 @@ to `async.printWaitMs`.
 This is omp's RPC protocol (`modes/rpc/*`). One JSON object per line on stdin, and responses plus
 events on stdout. `rpc_attach()` / `rpc_handle_json()` make the same endpoint embeddable: the library
 uses it ([below](#library-embedding)). `--mode rpc-ui` is the same protocol with the `ask` tool enabled
-(its questions go to the client).
+(its questions go to the client). When stdout stops taking frames (the client went away: a broken or closed pipe),
+later frames are dropped, `RPC output delivery failed` goes to the log, the run in flight is aborted, the session
+and its MCP servers are disposed and the process exits 1, like omp's `RpcOutputWriter` failure path; a closed stdin
+instead lets the run in flight finish.
 
 On start the endpoint emits `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],
 "maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"supportsBashExcludeFromContext":true}` (`bash`

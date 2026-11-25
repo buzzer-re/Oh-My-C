@@ -5,6 +5,8 @@
 #include "core/fs.h"
 #include "core/proc.h"
 #include "tools/gh.h"
+#include "tools/jobtext.h"
+#include "tui/ansi.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -134,6 +136,135 @@ char *session_wt_default_branch(void) {
     localtime_r(&t, &tm);
     return xasprintf("wt/%04d%02d%02d-%02d%02d%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
                      tm.tm_sec);
+}
+
+/* ---------- post-checkout hook (session-worktree.ts runSessionWorktreeHook, natives vcs.runPostCheckoutHook) ---------- */
+
+/* bytes at the end of a failed hook's output searched for its last line */
+#define HOOK_OUTPUT_TAIL_BYTES 4096
+
+/* sanitizeDisplayWarning + truncateToWidth(.., 100): one plain line, home paths as `~` */
+static char *display_warning(const char *text) {
+    char *plain = tui_strip_ansi(text);
+    sb_t b = SB_INIT;
+    size_t n = strlen(plain);
+    for (size_t k = 0; k < n;) {
+        uint32_t cp;
+        int m = utf8_decode(plain + k, n - k, &cp);
+        if (cp == '\t') sb_append(&b, "   ");
+        else if (cp == '\r' || cp == '\n') sb_putc(&b, ' ');
+        else if (!(cp <= 0x1F || (cp >= 0x7F && cp <= 0x9F) || cp == 0xFFFD)) sb_appendn(&b, plain + k, (size_t)m);
+        k += (size_t)(m > 0 ? m : 1);
+    }
+    free(plain);
+    char *t = str_trim(sb_cstr(&b));
+    sb_free(&b);
+    char *home = job_shorten_home(t);
+    free(t);
+    char *r = tui_visible_width(home) > 100 ? tui_truncate_to_width(home, 100, "\xe2\x80\xa6") : xstrdup(home);
+    free(home);
+    return r;
+}
+
+/* the last non-blank line of a failed hook's output tails (stdout, then stderr: stderr's wins) */
+static char *hook_last_line(const proc_result_t *r) {
+    sb_t b = SB_INIT;
+    size_t ol = r->out_len, el = r->err_len;
+    if (r->out) sb_appendn(&b, r->out + (ol > HOOK_OUTPUT_TAIL_BYTES ? ol - HOOK_OUTPUT_TAIL_BYTES : 0), MIN(ol, (size_t)HOOK_OUTPUT_TAIL_BYTES));
+    sb_putc(&b, '\n');
+    if (r->err) sb_appendn(&b, r->err + (el > HOOK_OUTPUT_TAIL_BYTES ? el - HOOK_OUTPUT_TAIL_BYTES : 0), MIN(el, (size_t)HOOK_OUTPUT_TAIL_BYTES));
+    strvec_t lines = str_split(sb_cstr(&b), "\n");
+    sb_free(&b);
+    char *last = NULL;
+    for (size_t i = lines.n; i-- > 0 && !last;) {
+        const char *l = lines.v[i];
+        const char *cr = strrchr(l, '\r'); /* sanitizeDisplayLines keeps what follows the last \r */
+        char *t = str_trim(cr ? cr + 1 : l);
+        if (*t) last = t;
+        else free(t);
+    }
+    strvec_free(&lines);
+    return last;
+}
+
+/* git before 2.36 has no `git hook run` */
+static bool git_predates_hook_run(void) {
+    char *v = git(NULL, NULL, "--version", NULL);
+    int major = 0, minor = 0;
+    bool old = false;
+    for (const char *p = v; p && *p; p++)
+        if (isdigit((unsigned char)*p) && sscanf(p, "%d.%d", &major, &minor) == 2) {
+            old = major < 2 || (major == 2 && minor < 36);
+            break;
+        }
+    free(v);
+    return old;
+}
+
+#ifndef _WIN32
+/* runPostCheckoutHookFile: the hook file run the way git would (core.hooksPath with --path, else the common dir's
+ * hooks/; absent or not executable is success), with git's hook environment and no stdin */
+static int run_hook_file(const char *root, const char *null_oid, const char *head, proc_result_t *r) {
+    char *configured = git(root, NULL, "config", "--path", "--get", "core.hooksPath", NULL);
+    char *common = git(root, NULL, "rev-parse", "--git-common-dir", NULL);
+    char *hooks = configured && *configured ? xstrdup(configured) : path_join(common && *common ? common : ".git", "hooks");
+    char *dir = path_abs(hooks, root);
+    char *file = path_join(dir, "post-checkout");
+    free(configured), free(common), free(hooks), free(dir);
+    int rc = 0;
+    if (access(file, X_OK) == 0) {
+        char *exec_path = git(NULL, NULL, "--exec-path", NULL);
+        const char *path = env_get("PATH");
+        char *e1 = xasprintf("GIT_EXEC_PATH=%s", exec_path ? exec_path : "");
+        char *e3 = exec_path && *exec_path ? xasprintf("PATH=%s:%s", exec_path, path ? path : "") : NULL;
+        const char *env[] = {e1, "GIT_PREFIX=", e3, NULL};
+        const char *argv[] = {file, null_oid, head, "1", NULL};
+        proc_opts_t o = {.cwd = root, .env_extra = env};
+        rc = proc_run(argv, &o, r);
+        free(e1), free(e3), free(exec_path);
+    }
+    free(file);
+    return rc;
+}
+#endif
+
+void session_wt_run_hook(const char *path, const char *base_commit, strvec_t *warnings) {
+    /* without a `git` executable no hook can run: stay silent, as `/wt` was before it ran hooks */
+    char *g = which("git");
+    if (!g) return;
+    free(g);
+    const char *head = base_commit ? base_commit : "";
+    char *null_oid = xmalloc(strlen(head) + 1);
+    memset(null_oid, '0', strlen(head));
+    null_oid[strlen(head)] = 0;
+    proc_result_t r = {0};
+    int rc = 0;
+    if (git_predates_hook_run()) {
+#ifndef _WIN32
+        rc = run_hook_file(path, null_oid, head, &r);
+#endif
+    } else {
+        const char *argv[] = {"git", "hook", "run", "--ignore-missing", "post-checkout", "--", null_oid, head, "1", NULL};
+        proc_opts_t o = {.cwd = path};
+        rc = proc_run(argv, &o, &r);
+    }
+    char *warning = NULL;
+    if (rc != 0 || r.spawn_errno) {
+        warning = xasprintf("post-checkout hook could not run: %s", strerror(r.spawn_errno ? r.spawn_errno : errno));
+    } else if (r.exit_code != 0) {
+        char *last = hook_last_line(&r);
+        warning = last ? xasprintf("post-checkout hook exited with %d: %s", r.exit_code, last)
+                       : xasprintf("post-checkout hook exited with %d", r.exit_code);
+        free(last);
+    }
+    proc_result_free(&r);
+    free(null_oid);
+    if (warning) {
+        char *full = xasprintf("Worktree created, but %s", warning);
+        strvec_push_own(warnings, display_warning(full));
+        free(full);
+        free(warning);
+    }
 }
 
 char *session_wt_summary(const session_wt_t *w, bool cleaned) {
@@ -309,7 +440,11 @@ int session_wt_create(const char *cwd, const char *branch, bool keep_changes, se
         goto out;
     }
     free(r);
-    r = git(root, &gerr, "worktree", "add", "--quiet", wpath, branch, NULL);
+    /* omp checks the tree out without git's hooks and runs `post-checkout` once the session moved in
+     * (session_wt_run_hook): a hooks directory that cannot exist holds them back here */
+    char *nohooks = xasprintf("core.hooksPath=%s.nohooks", wpath);
+    r = git(root, &gerr, "-c", nohooks, "worktree", "add", "--quiet", wpath, branch, NULL);
+    free(nohooks);
     if (!r) {
         *err = xasprintf("git worktree add: %s", gerr);
         free(gerr);

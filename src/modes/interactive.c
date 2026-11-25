@@ -517,10 +517,12 @@ static void fork_now(ui_t *u) {
 }
 
 static void plan_exec_resume(ui_t *u);
+static void wt_hook_turn_end(ui_t *u);
 static void worker_done(void *ud) {
     ui_t *u = ud;
     pthread_join(u->worker, NULL);
     u->worker_running = false;
+    wt_hook_turn_end(u);
     u->wake_suppressed = false; /* a turn ended on its own since the interrupt */
     bool settled_done = ui_signals_settle();
     ui_signals_settle_startup(); /* a startup prompt whose run reported nothing goes back to idle */
@@ -2223,6 +2225,94 @@ typedef struct {
     bool keep;
 } wt_ctx_t;
 
+/* runWorktreeHook: the post-checkout hook of a worktree /wt created runs off the UI thread under a status spinner
+ * (omp 911a80022a, fbff86448f); its warnings show when it ends and the session rescans skills and commands (deferred to
+ * the end of a turn that started meanwhile). The spinner row is removed only while it is still the hook's: a turn
+ * starting during the hook takes the row over. */
+typedef struct {
+    ui_t *u;
+    char *path, *base;
+    strvec_t warnings;
+} wt_hook_t;
+
+static pthread_mutex_t g_wt_hook_mu = PTHREAD_MUTEX_INITIALIZER;
+static tui_t *g_wt_hook_tui;       /* NULL once the loop ended: nothing more is posted */
+static strvec_t g_wt_in_hook;      /* paths of owned worktrees whose hook still runs (an exit keeps them) */
+static bool g_wt_rescan_pending;   /* the skills/commands rescan waits for the running turn */
+
+static void wt_hook_done(void *ud) {
+    wt_hook_t *h = ud;
+    ui_t *u = h->u;
+    for (size_t i = 0; i < g_wt_in_hook.n; i++)
+        if (str_eq(g_wt_in_hook.v[i], h->path)) {
+            free(g_wt_in_hook.v[i]);
+            memmove(&g_wt_in_hook.v[i], &g_wt_in_hook.v[i + 1], (g_wt_in_hook.n - i - 1) * sizeof *g_wt_in_hook.v);
+            g_wt_in_hook.n--;
+            break;
+        }
+    if (u->wt_hook_row && !g_wt_in_hook.n) {
+        u->wt_hook_row = false;
+        if (!u->worker_running) {
+            ui_working_stop(u);
+            ui_working_set_message(u, NULL);
+        }
+    }
+    /* the session rediscovers skills and commands so it sees what the hook added */
+    if (u->worker_running) g_wt_rescan_pending = true;
+    else app_refresh_skills_and_commands(u->app);
+    for (size_t i = 0; i < h->warnings.n; i++) add_notice(u, "warning", h->warnings.v[i]);
+    strvec_free(&h->warnings);
+    free(h->path);
+    free(h->base);
+    free(h);
+    tui_request_render(u->tui);
+}
+
+static void *wt_hook_main(void *arg) {
+    wt_hook_t *h = arg;
+    session_wt_run_hook(h->path, h->base, &h->warnings);
+    pthread_mutex_lock(&g_wt_hook_mu);
+    if (g_wt_hook_tui) tui_post(g_wt_hook_tui, wt_hook_done, h);
+    pthread_mutex_unlock(&g_wt_hook_mu);
+    return NULL; /* after the loop ended the job is dropped with the process */
+}
+
+static void wt_hook_start(ui_t *u, const session_wt_t *wt) {
+    wt_hook_t *h = xcalloc(1, sizeof *h);
+    h->u = u;
+    h->path = xstrdup(wt->path);
+    h->base = xstrdup(wt->base_commit ? wt->base_commit : "");
+    pthread_mutex_lock(&g_wt_hook_mu);
+    g_wt_hook_tui = u->tui;
+    pthread_mutex_unlock(&g_wt_hook_mu);
+    strvec_push(&g_wt_in_hook, wt->path);
+    if (!u->worker_running) {
+        ui_working_set_message(u, "Running post-checkout hook\xe2\x80\xa6");
+        ui_working_start(u);
+        u->wt_hook_row = true;
+    }
+    pthread_t t;
+    if (pthread_create(&t, NULL, wt_hook_main, h) == 0) pthread_detach(t);
+    else wt_hook_main(h); /* no thread: run inline; the post lands on the next loop pass */
+    tui_request_render(u->tui);
+}
+
+/* a turn ended: a rescan the hook left for it runs now */
+static void wt_hook_turn_end(ui_t *u) {
+    if (!g_wt_rescan_pending) return;
+    g_wt_rescan_pending = false;
+    app_refresh_skills_and_commands(u->app);
+}
+
+/* the loop ended: no hook thread may post into the TUI any more */
+static void wt_hooks_shutdown(void) {
+    pthread_mutex_lock(&g_wt_hook_mu);
+    g_wt_hook_tui = NULL;
+    pthread_mutex_unlock(&g_wt_hook_mu);
+    g_wt_rescan_pending = false;
+    strvec_free(&g_wt_in_hook); /* libomc can run the TUI again in this process */
+}
+
 static void wt_run_cb(void *ud) {
     wt_ctx_t *c = ud;
     ui_t *u = c->u;
@@ -2251,6 +2341,7 @@ static void wt_run_cb(void *ud) {
         free(sum);
         free(cerr);
         vec_push(&g_owned_wt, wt);
+        wt_hook_start(u, &g_owned_wt.v[g_owned_wt.n - 1]);
     }
     free(err);
     free(source);
@@ -2355,6 +2446,18 @@ static void ix_shutdown(ui_t *u) {
         return;
     }
     if (u->worker_running) app_abort(u->app);
+    /* a worktree whose post-checkout hook still runs is kept rather than removed under the hook */
+    for (size_t i = 0; i < g_owned_wt.n; i++) {
+        session_wt_t *w = &g_owned_wt.v[i];
+        if (!w->path || !strvec_contains(&g_wt_in_hook, w->path)) continue;
+        char *sp = tc_shorten_path(w->path);
+        char *m = xasprintf("Kept worktree %s: its post-checkout hook is still running.", sp);
+        add_notice(u, "warning", m);
+        free(m);
+        free(sp);
+        session_wt_free(w);
+        memset(w, 0, sizeof *w);
+    }
     g_wt_plan_next = g_owned_wt.n;
     wt_exit_next(u);
 }
@@ -2734,8 +2837,7 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         } else if (!settings_bool("plan.enabled", true)) {
             add_notice(u, "warning", "Plan mode is disabled. Enable it in settings (plan.enabled).");
         } else {
-            app_enter_plan_mode(a, NULL);
-            app_plan_apply_model(a);
+            app_enter_plan_mode(a, NULL, true);
             char *m = xasprintf("Plan mode enabled. Plan file: %s", a->plan_file);
             add_notice(u, "info", m);
             free(m);
@@ -3666,15 +3768,23 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_container_t *root = tui_root(u.tui);
     tui_term_set_mouse_capture(tui_term(u.tui), settings_bool("tui.mouse", false));
     tui_sym_set_preset(settings_str("symbolPreset", "unicode"));
-    /* config warnings head the header (interactive-mode.ts #buildConfigWarningComponents): retry.fallbackChains
-     * validation (turn-recovery validateRetryFallbackChains) and the model registry's discovery warnings */
-    strvec_t models_warns = {0};
+    /* the session's config warnings head the header (interactive-mode.ts #buildConfigWarningComponents):
+     * retry.fallbackChains validation (turn-recovery validateRetryFallbackChains), then the discovery failures of
+     * env-redirected local providers, which omp's initial background discovery moves there once it settles
+     * (#surfaceModelRegistryWarningsAfterDiscovery). The registry warnings startup already holds are main.ts notifs
+     * after the welcome instead: the models.yml findings always, and the discovery failures when startup had to await
+     * a discovery pass to find a model (sdk.ts resolveModelDiscoveryFallback: no model from the static catalog) */
+    bool mute_warnings = settings_bool("startup.quietWarnings", false); /* omc-only: /quiet */
+    strvec_t models_warns = {0}, discovery_warns = {0};
     catalog_take_models_file_warnings(&models_warns);
+    if (!mute_warnings) catalog_drain_config_warnings(&discovery_warns);
+    bool discovery_awaited = !a->model || json_get_bool(a->model->raw, "discovered", false);
     {
         strvec_t warns = {0};
         mr_fallback_validate(&warns);
-        catalog_drain_config_warnings(&warns); /* model registry: failed discovery of an env-redirected local provider */
-        bool mute = settings_bool("startup.quietWarnings", false); /* omc-only: /quiet */
+        if (!discovery_awaited)
+            for (size_t i = 0; i < discovery_warns.n; i++) strvec_push(&warns, discovery_warns.v[i]);
+        bool mute = mute_warnings;
         for (size_t i = 0; i < warns.n && !mute; i++) {
             char *t = xasprintf("Warning: %s", warns.v[i]);
             char *styled = tui_fgs(NULL, TUI_TC_WARNING, t);
@@ -3743,8 +3853,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_chat_rebuild(&u);
     if (json_len(a->session->entries)) ui_plan_restore(&u);
     if (!a->plan_mode && !a->plan_yolo_target && app_plan_should_start(a)) { /* #applyPlanModeDefault */
-        app_enter_plan_mode(a, NULL);
-        app_plan_apply_model(a);
+        app_enter_plan_mode(a, NULL, true);
         char *m = xasprintf("Plan mode enabled. Plan file: %s", a->plan_file);
         add_notice(&u, "info", m);
         free(m);
@@ -3786,10 +3895,13 @@ int run_interactive_mode(app_t *a, const char *initial) {
     /* worktree.onStart applies to fresh launches only */
     if (fresh) tui_post(u.tui, wt_onstart_cb, &u);
     if (g_start && g_start->restore) tui_post(u.tui, restore_cb, &u);
-    if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice); /* main.ts notifs */
-    /* main.ts: models.yml findings (dropped input modalities) are startup warnings, not header lines */
+    /* main.ts notifs, in its order: the model registry's config warnings (models.yml findings, then discovery failures),
+     * then the model scope */
     for (size_t i = 0; i < models_warns.n; i++) add_notice(&u, "warning", models_warns.v[i]);
+    for (size_t i = 0; discovery_awaited && i < discovery_warns.n; i++) add_notice(&u, "warning", discovery_warns.v[i]);
     strvec_free(&models_warns);
+    strvec_free(&discovery_warns);
+    if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice);
     /* main.ts checkForNewVersion: in the background from here; its notice lands after the startup transcript */
     bool setup_pending = ui_setup_pending(a->opts.resume || a->opts.continue_recent);
     updatectl_start(&u, !setup_pending && !(g_start && g_start->resume_picker));
@@ -3805,6 +3917,8 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_add_timer(u.tui, 1, false, skilldesc_start_cb, a->skilldesc);
     int code = tui_run(u.tui);
     updatectl_shutdown(); /* nothing more may be posted to the TUI freed below */
+    wt_hooks_shutdown();
+    ui_model_picker_shutdown();
     /* a tool thread waiting on the ask dialog would block the worker join forever once the loop is gone
      * (terminal closed mid-question): answer it as cancelled */
     pthread_mutex_lock(&u.mu);

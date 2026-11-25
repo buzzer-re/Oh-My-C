@@ -5,6 +5,7 @@
 #define OMC_AUTOLEARN_H
 
 #include "agent/agent.h"
+#include "coding/discovery.h"
 #include "core/core.h"
 
 struct app;
@@ -34,6 +35,9 @@ bool autolearn_rediscover_skills(struct tool_env *env);
 /* the hidden `skill-notice` for the next user prompt (owned developer message, NULL when nothing changed) */
 json_t *autolearn_take_skill_notice(struct app *a);
 void autolearn_free_skill_graveyard(struct app *a); /* skill lists the registry replaced */
+/* swap a freshly discovered skill list into the registry; the replaced list is kept until the app is freed (a tool
+ * thread may still read it). Takes fresh->skills */
+void autolearn_adopt_skills(struct app *a, discovery_t *fresh);
 
 /* controller: installed for top-level sessions; reads autolearn.* live at every stop */
 autolearn_t *autolearn_new(struct app *a);

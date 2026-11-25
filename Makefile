@@ -401,3 +401,5 @@ clean:
 
 .PHONY: all lib install-lib test test-unit fuzz fuzz-bins version dist dist-src clean install FORCE windows test-build
 -include $(OBJ:.o=.d)
+# the fuzz harness objects test_fuzz_regress links: a changed header (a struct they hold on the stack) rebuilds them
+-include $(patsubst tests/fuzz/%.c,$(O)/tests/fuzz/%.d,$(FUZZ_SRC))

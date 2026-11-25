@@ -17,6 +17,9 @@ typedef struct {
     const char *provider;       /* --provider */
     const char *api_key;        /* --api-key */
     const char *thinking;       /* --thinking */
+    const char *scope_thinking; /* main.ts startScoped: the --models entry the session starts on has an explicit level and
+                                 * neither --thinking nor the --model selector names one; seeds the session's thinking,
+                                 * never the --model default role */
     const char *session_dir;
     const char *resume;         /* --resume <id|path> */
     const char *fork;           /* --fork <id|path> */
@@ -123,8 +126,14 @@ struct app {
     char *plan_reference_path;  /* approved plan re-injected (plan-mode-reference.md) after history rewrites */
     bool plan_reference_sent;
     bool plan_reference_approved; /* only an approved plan becomes an execution reference (omp 5fd26783af) */
-    const ai_model_t *plan_prev_model; /* the model before the `plan` role took over (restored on exit) */
+    /* #planModePreviousModelState: the model and configured thinking level before the `plan` role took over, restored
+     * on exit and journaled on the plan mode_change (prePlanModelIdentity / prePlanThinkingLevel) so a resumed plan
+     * restores them too (omp 05aca3f69c). The model is NULL when a resumed identity names no available model */
+    const ai_model_t *plan_prev_model;
+    char *plan_prev_identity; /* `provider/id` (owned), kept when unresolvable */
     ai_effort_t plan_prev_thinking;
+    bool plan_prev_auto;      /* the configured level was `auto` */
+    bool plan_prev_has_level; /* a level was recorded (a resumed entry can lack one) */
     bool plan_prev_set;
     const ai_model_t *plan_yolo_target; /* --plan-yolo: hand-off model once the plan is proposed */
     ai_effort_t plan_yolo_thinking;
@@ -273,7 +282,9 @@ bool app_set_thinking_level(app_t *a, const char *level);
 /* ---------- plan mode (planmode.c) ---------- */
 /* enter/leave read-only plan mode (mode_change entries, system prompt rebuild) */
 void app_set_plan_mode(app_t *a, bool on);
-void app_enter_plan_mode(app_t *a, const char *plan_file); /* NULL: the reference path / local://PLAN.md */
+/* plan_file NULL: the reference path / local://PLAN.md; apply_model: drive the session from modelRoles.plan first
+ * (#applyPlanModeModel: interactive entry), the mode_change then records the pre-plan model */
+void app_enter_plan_mode(app_t *a, const char *plan_file, bool apply_model);
 void app_exit_plan_mode(app_t *a, bool paused);
 void app_plan_apply_model(app_t *a); /* switch to modelRoles.plan (interactive plan entry) */
 void app_set_plan_file(app_t *a, const char *plan_file);   /* promote a reviewed plan into plan-mode state */
@@ -495,6 +506,9 @@ char *app_complete_first(app_t *a, const mr_pool_t *models, const char *system, 
  * (load_session_into_agent), and the per-request options of the live loop (prepareSimpleStreamOptions) */
 void app_notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3, 4);
 void app_reload_context(app_t *a);
+/* refreshSkillsAndCommands: rediscover skills (the system prompt's list too) and the file-based slash commands for the
+ * cwd, then rebuild the system prompt; call while no turn runs */
+void app_refresh_skills_and_commands(app_t *a);
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o);
 /* omitsDemotedReasoning(model): this session turned replayed foreign reasoning off after a refusal and `m`'s classifier
  * refuses reasoning replayed as text; sets o->omit_demoted_reasoning (a caller's own true is kept) */

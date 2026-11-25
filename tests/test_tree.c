@@ -450,7 +450,100 @@ static void test_session_write_failure(void) {
     json_free(a);
 }
 
+/* SessionManager.getTreePosition (omp c9f03a4657, test/session-manager/tree-position.test.ts) */
+static void test_tree_position(void) {
+    session_tree_pos_t tp;
+    char t[3][2][64];
+    session_t *s = session_in_memory("/tmp/treepos");
+    for (int i = 0; i < 3; i++) {
+        char p[32], r[32];
+        snprintf(p, sizeof p, "prompt %d", i + 1);
+        snprintf(r, sizeof r, "reply %d", i + 1);
+        snprintf(t[i][0], 64, "%s", add(s, user(p)));
+        snprintf(t[i][1], 64, "%s", add(s, assistant(r)));
+    }
+    session_append_thinking_change(s, "high");
+    CHECK(!session_tree_position(s, &tp)); /* the tip of a single line */
+    /* a rewind to the reply before the second prompt leaves two turns past the leaf */
+    session_branch(s, t[0][1]);
+    CHECK(session_tree_position(s, &tp) && tp.branch_count == 0 && tp.ahead == 2);
+    /* the prompt asked again forks: second of two, nothing ahead */
+    add(s, user("prompt 2, asked again"));
+    CHECK(session_tree_position(s, &tp) && tp.branch_index == 2 && tp.branch_count == 2 && tp.ahead == 0);
+    session_append_thinking_change(s, "low");
+    CHECK(session_tree_position(s, &tp) && tp.branch_index == 2 && tp.branch_count == 2 && tp.ahead == 0);
+    /* the older branch's tip: first of two; rewound on it, the fork stays named beside the turns ahead */
+    session_branch(s, t[2][1]);
+    CHECK(session_tree_position(s, &tp) && tp.branch_index == 1 && tp.branch_count == 2 && tp.ahead == 0);
+    session_branch(s, t[1][1]);
+    CHECK(session_tree_position(s, &tp) && tp.branch_index == 1 && tp.branch_count == 2 && tp.ahead == 1);
+    session_free(s);
+
+    /* a branch without a user turn (a dropped failed reply) is no fork */
+    s = session_in_memory("/tmp/treepos");
+    char prompt[64];
+    snprintf(prompt, sizeof prompt, "%s", add(s, user("prompt")));
+    add(s, assistant("failed reply"));
+    session_branch(s, prompt);
+    CHECK(!session_tree_position(s, &tp));
+    add(s, assistant("retried reply"));
+    CHECK(!session_tree_position(s, &tp));
+    session_free(s);
+
+    /* forks order by timestamp, not by journal order */
+    s = session_in_memory("/tmp/treepos");
+    char root[64], late[64], early[64];
+    snprintf(root, sizeof root, "%s", add(s, user("root")));
+    snprintf(late, sizeof late, "%s", add(s, user("asked later")));
+    session_branch(s, root);
+    snprintf(early, sizeof early, "%s", add(s, user("asked first")));
+    json_set_str(session_get(s, late), "timestamp", "2026-11-24T10:00:02.000Z");
+    json_set_str(session_get(s, early), "timestamp", "2026-11-24T10:00:01.000Z");
+    CHECK(session_tree_position(s, &tp) && tp.branch_index == 1 && tp.branch_count == 2 && tp.ahead == 0);
+    session_branch(s, root); /* the newest continuation below the root is the later prompt: one turn ahead */
+    CHECK(session_tree_position(s, &tp) && tp.branch_count == 0 && tp.ahead == 1);
+    session_free(s);
+}
+
+/* getRestorableSessionModels (omp session-context.ts): the last model_change role's model before the default's */
+static void test_restorable_models(void) {
+    session_context_t sc;
+    session_t *s = session_in_memory("/tmp/restore");
+    session_append_model_change(s, "mock/a", NULL);
+    add(s, user("hi"));
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 1 && !strcmp(sc.restore_models.v[0], "mock/a"));
+    session_context_free(&sc);
+    session_append_model_change(s, "mock/b", "temporary"); /* a /switch pick or the plan model */
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 2 && !strcmp(sc.restore_models.v[0], "mock/b") && !strcmp(sc.restore_models.v[1], "mock/a"));
+    session_context_free(&sc);
+    session_append_model_change(s, "mock/a", "smol"); /* a cycled role on the default model: tried once */
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 1 && !strcmp(sc.restore_models.v[0], "mock/a"));
+    session_context_free(&sc);
+    session_append_model_change(s, "mock/c", "fallback"); /* a retry-fallback hop restores the default */
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 1 && !strcmp(sc.restore_models.v[0], "mock/a"));
+    session_context_free(&sc);
+    session_free(s);
+
+    /* a legacy session without a default model_change: the newest assistant message's model */
+    s = session_in_memory("/tmp/restore");
+    add(s, user("hi"));
+    json_t *m = assistant("hello");
+    json_set_str(m, "provider", "mock");
+    json_set_str(m, "model", "legacy");
+    add(s, m);
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 1 && !strcmp(sc.restore_models.v[0], "mock/legacy"));
+    session_context_free(&sc);
+    session_free(s);
+}
+
 int main(void) {
+    test_restorable_models();
+    test_tree_position();
     test_session_write_failure();
     test_session_concurrent_reads();
     test_picker_first_pass();

@@ -789,6 +789,14 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "agents tui" $'waiting ok\ndelivered ok\nwaiting again ok\nstop waiting ok\nfolded ok\nagents ok\nstrip ok\nmodel strip ok\nback ok\ntoggle ok\nconfig True\nenable ok\nclose ok'  python3 -I "$ROOT/tests/e2e/agents_tui.py" "$B" "$T/agent"
     # Alt+P model picker: Tab provider scopes, ←/→ thinking slider, the pick applies the slider's level (omp 94a10c5b22)
     check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep right ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok\nstep right again ok\nesc keeps level ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
+    # plan mode journals the pre-plan model; a resumed plan session runs the plan model (the last model change) and
+    # restores the pre-plan model when planning ends (omp 05aca3f69c, sdk.ts restoreSessionModel)
+    mkdir -p "$T/planres/agent" && cp "$T/agent/models.yml" "$T/planres/agent/"
+    check "plan resume tui" $'composer ok\nplan on ok\nturn ok\njournal ok\nplan model ok\nresumed in plan ok\nresumed on plan model ok\nplan off ok\nrestored ok'  python3 -I "$ROOT/tests/e2e/plan_resume_tui.py" "$B" "$T/planres/agent"
+    # /settings: option-less string rows are text fields; Todo Backend offers Native (omp b0d3834d78)
+    check "settings rows tui" $'text field ok\ntodo backend row ok\nnative choice ok'  python3 -I "$ROOT/tests/e2e/settings_rows_tui.py" "$B" "$T/setrows"
+    # Models hub: Enter Enter on a just-assigned row keeps its role; moving the strip or the cursor re-arms it (omp bb6d78c023)
+    check "model hub repeat" $'search ok\nrole strip ok\nassigned ok\nchip reads assigned ok\nrepeat keeps role ok\nstrip move re-arms ok\nassigned again ok\ncursor move re-arms ok'  python3 -I "$ROOT/tests/e2e/model_hub_repeat_tui.py" "$B" "$T/mhub"
     # WP-29: inline images per protocol, cache-miss marker, Ctrl+Shift+O tool activity, tui.mouse capture
     mkdir -p "$T/agent-disp" "$T/disp" && cp "$T/agent/models.yml" "$T/agent-disp/"
     check "display kitty" $'kitty transmit once ok\nkitty placement ok\ncache miss ok\nkitty placeholders ok'  env OMC_CODING_AGENT_DIR="$T/agent-disp" python3 -I "$ROOT/tests/e2e/display_tui.py" "$B" "$T/disp" kitty
@@ -808,6 +816,10 @@ check "rpc extracmds"  "extracmds rpc ok"  python3 -I "$ROOT/tests/e2e/extracmds
 check "tui extracmds"  "extracmds tui ok"  python3 -I "$ROOT/tests/e2e/extracmds_tui.py" "$B" "$T/xc"
 # workspace and session lifecycle (WP-21): --add-dir, /add-dir, /remove-dir, /dirs, /pin, /fresh, /move, /wt
 check "rpc workspace"  "workspace rpc ok"  python3 -I "$ROOT/tests/e2e/workspace_rpc.py" "$B" "$T/req.jsonl"
+# RPC exits 1 once stdout cannot take a frame (omp RpcOutputWriter onFailure: dispose, then exit 1)
+check "rpc output fail"  "rpc output fail ok"  python3 -I "$ROOT/tests/e2e/rpc_output_fail.py" "$B"
+# /wt runs the new worktree's post-checkout hook once with git's arguments, rescans skills, warns on failure (omp 911a80022a)
+check "wt post-checkout hook"  "wt hook rpc ok"  python3 -I "$ROOT/tests/e2e/wt_hook_rpc.py" "$B" "$T/req.jsonl"
 # model switching (WP-19): /switch, /modelpreset, prewalk handoff, in a throwaway agent dir
 mkdir -p "$T/agent-ms" && cp "$T/agent/models.yml" "$T/agent-ms/"
 check "rpc model switch" "ok prewalk session entries"  env OMC_CODING_AGENT_DIR="$T/agent-ms" python3 -I "$ROOT/tests/e2e/model_switch_rpc.py" "$B" "$T/agent-ms" "$T/req.jsonl"
@@ -1161,6 +1173,11 @@ fi
 mkdir -p "$T/lragent" "$T/lrwork"; cp "$T/agent/models.yml" "$T/lragent/"; printf 'setupVersion: 2\n' > "$T/lragent/config.yml"
 LRPORT=$((PORT + 41))
 ( cd "$T/lrwork" && check "login refresh" "login refresh ok" python3 -I "$ROOT/tests/e2e/login_refresh.py" "$B" "$ROOT/tests/e2e/mock_local.py" "$T/lragent" "$LRPORT" )
+# Alt+P past the discovery TTL re-runs discovery in the background and the open picker lists a newly loaded local model
+# (omp c9e8ae3134)
+if python3 -c 'import pty' 2>/dev/null; then
+    check "picker refresh" $'picker ok\nrefreshed ok'  python3 -I "$ROOT/tests/e2e/picker_refresh_tui.py" "$B" "$ROOT/tests/e2e/mock_local.py" "$T/pref" "$((PORT + 47))"
+fi
 check "perf recorded"      '"mock/mock-1"'  cat "$T/agent/model-perf.json"
 # default-on agent guards and auto thinking (WP-3 / WP-12); request_diff.sh checks the same scenarios against omp
 REQS='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][int(sys.argv[2]):]; r=[x for x in r if x.get("tools") or len(sys.argv)>3]
@@ -1181,6 +1198,18 @@ LGX='calls:'$(python3 -I -c 'import json; print(json.dumps([["bash",{"command":"
 n=$(mark); OMC_CODING_AGENT_DIR="$T/lgx" "$B" --model mock/mock-1 --no-session -p "$LGX" >/dev/null 2>&1 </dev/null
 out=$(python3 -I -c "$REQS" "$T/req.jsonl" $n); [[ "$out" != *"consecutive times"* ]] && echo "   ok  loop guard command exemption" || { echo "   FAIL loop guard command exemption"; fail=1; }
 check "todo reminder (rpc)" '"type": "todo_reminder", "todos": [{"content": "alpha", "status": "in_progress"}, {"content": "beta", "status": "pending"}], "attempt": 1, "maxAttempts": 3'  python3 -I "$ROOT/tests/parity/rpc_drive.py" "$B" "todo:alpha,beta" 1
+# the session starts at the explicit level of the --models entry it starts on: a remembered default's entry, or the
+# --model's own entry when its selector has no level; a --model outside the scope keeps its own (omp aead59a104,
+# 2090c10083, 4af9a68449)
+LASTEFF='import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; r=[x for x in r if x.get("tools")]; print(r[-1]["model"], r[-1].get("reasoning_effort","-"))'
+mkdir -p "$T/scopelv" && cp "$T/agent/models.yml" "$T/scopelv/"
+OMC_CODING_AGENT_DIR="$T/scopelv" timeout 30 "$B" --model mock/mock-think --models mock/mock-think:low --no-session -p 'say:hi' >/dev/null 2>&1 </dev/null
+check "scope level for --model" "mock-think low"  python3 -I -c "$LASTEFF" "$T/req.jsonl"
+OMC_CODING_AGENT_DIR="$T/scopelv" timeout 30 "$B" --model mock/mock-think --models mock/mock-1:low --no-session -p 'say:hi' >/dev/null 2>&1 </dev/null
+check "scope level outside"  "mock-think high"  python3 -I -c "$LASTEFF" "$T/req.jsonl"
+printf 'modelRoles:\n  default: mock/mock-think\n' > "$T/scopelv/config.yml"
+OMC_CODING_AGENT_DIR="$T/scopelv" timeout 30 "$B" --models mock/mock-1:low,mock/mock-think:medium --no-session -p 'say:hi' >/dev/null 2>&1 </dev/null
+check "scope level remembered"  "mock-think medium"  python3 -I -c "$LASTEFF" "$T/req.jsonl"
 n=$(mark); "$B" --model mock/mock-think --thinking auto --no-session -p 'say:medium sized change' >/dev/null 2>&1 </dev/null
 check "auto thinking judge" $'2\nlow State:\n<request>say:medium sized change</request>'  python3 -I -c "$REQS" "$T/req.jsonl" $n all
 check "auto thinking level" "medium <system-reminder>"  python3 -I -c "$REQS" "$T/req.jsonl" $n

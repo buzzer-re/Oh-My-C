@@ -2128,11 +2128,23 @@ static void build_context_for_model(app_t *a, const ai_model_t *m, session_conte
     session_build_context_as(a->session, m ? m->provider : NULL, m ? m->api : NULL, sc);
 }
 
+/* restoreSessionModel: the first restorable selector (getRestorableSessionModels: the last model_change role's model,
+ * then the default role's) that names a registered model with credentials; *level is that selector's thinking suffix */
+static const ai_model_t *restore_session_model(const session_context_t *sc, const char **level) {
+    *level = NULL;
+    for (size_t i = 0; i < sc->restore_models.n; i++) {
+        const ai_model_t *m = mr_session_selector(sc->restore_models.v[i], level);
+        if (m) return m;
+    }
+    return NULL;
+}
+
 static void load_session_into_agent(app_t *a) {
     xdnotice_reset_announced(a); /* the replaced transcript's notices no longer apply */
     session_context_t sc;
     build_context_for_model(a, a->model, &sc);
-    const ai_model_t *restored = sc.model && !a->opts.model ? catalog_resolve(sc.model) : NULL;
+    const char *restored_level = NULL;
+    const ai_model_t *restored = !a->opts.model ? restore_session_model(&sc, &restored_level) : NULL;
     if (restored && restored != a->model &&
         !str_eq(session_readable_compaction(a->session, a->model ? a->model->provider : NULL, a->model ? a->model->api : NULL),
                 session_readable_compaction(a->session, restored->provider, restored->api))) {
@@ -2155,6 +2167,21 @@ static void load_session_into_agent(app_t *a) {
     if (sc.has_service_tier) modelctl_tiers_from_json(sc.service_tier, &tiers);
     else modelctl_tiers_from_settings(&tiers);
     app_restore_service_tiers(a, &tiers);
+    /* pickInitialThinkingLevel: the session's thinking entry, else the restored selector's `:level` */
+    if (!sc.thinking && restored && restored_level && !a->opts.thinking) {
+        ai_effort_t e;
+        if (str_eq(restored_level, "auto")) {
+            a->auto_thinking = true;
+            a->auto_resolved = -1;
+            a->thinking = autothink_provisional(a->model, &e) ? e : EFFORT_OFF;
+            a->agent->thinking = a->thinking;
+        } else if (effort_parse(restored_level, &e) == 0) {
+            a->auto_thinking = false;
+            a->auto_resolved = -1;
+            a->thinking = e;
+            a->agent->thinking = e;
+        }
+    }
     if (sc.thinking && !a->opts.thinking) {
         ai_effort_t e;
         if (str_eq(sc.thinking_configured, "auto")) { /* restoreThinkingLevel(auto): provisional, unresolved */
@@ -2173,6 +2200,21 @@ static void load_session_into_agent(app_t *a) {
 }
 
 void app_reload_context(app_t *a) { load_session_into_agent(a); }
+
+void app_refresh_skills_and_commands(app_t *a) {
+    if (!a->opts.no_skills) {
+        discovery_t fresh = {0};
+        discover_all(a->cwd, &fresh, true, false, true);
+        autolearn_adopt_skills(a, &fresh);
+        discovery_free(&fresh);
+        discovery_copy_skills(&a->prompt_skills, &a->disc);
+    }
+    if (!a->opts.subagent) {
+        commands_free(&a->file_cmds);
+        commands_load(a->cwd, &a->file_cmds);
+    }
+    app_rebuild_system_prompt(a);
+}
 
 static bool app_env_plan_mode(tool_env_t *env) { return env && env->session && ((app_t *)env->session)->plan_mode; }
 
@@ -2240,7 +2282,15 @@ app_t *app_create(const app_opts_t *o, char **err) {
         }
         has_eff = true;
     }
-    if (!has_eff) {
+    /* the --model default role takes only the selector's or --thinking's level; a scope entry's seeds the session */
+    bool role_eff = has_eff;
+    ai_effort_t role_effort = eff;
+    bool role_auto = a->auto_thinking;
+    if (!has_eff && !a->auto_thinking && o->scope_thinking) {
+        if (!strcmp(o->scope_thinking, "auto")) a->auto_thinking = true;
+        else if (effort_parse(o->scope_thinking, &eff) == 0) has_eff = true;
+    }
+    if (!has_eff && !a->auto_thinking) {
         const char *dl = settings_str("defaultThinkingLevel", "high");
         if (str_eq(dl, "auto")) a->auto_thinking = true;
         else effort_parse(dl, &eff);
@@ -2261,7 +2311,7 @@ app_t *app_create(const app_opts_t *o, char **err) {
     }
     if (o->model && a->model && !o->subagent) {
         char *key = mr_model_key(a->model);
-        char *val = has_eff && !a->auto_thinking ? mr_selector_with_level(key, effort_name(eff)) : xstrdup(key);
+        char *val = role_eff && !role_auto ? mr_selector_with_level(key, effort_name(role_effort)) : xstrdup(key);
         settings_set_runtime_quiet("modelRoles.default", json_str_own(val));
         free(key);
     }
@@ -2346,7 +2396,8 @@ app_t *app_create(const app_opts_t *o, char **err) {
     if (!a->model) {
         session_context_t sc;
         session_build_context(a->session, &sc);
-        if (sc.model) a->model = catalog_resolve(sc.model);
+        const char *lv = NULL;
+        a->model = restore_session_model(&sc, &lv); /* sdk.ts restoreSessionModel */
         session_context_free(&sc);
     }
     /* workspace roots: --add-dir / workspace.additionalDirectories (a subagent: its parent's), merged with the
@@ -2476,6 +2527,7 @@ void app_free(app_t *a) {
     free(a->fixed_dead_end_session);
     free(a->failed_remote_spec);
     free(a->plan_file);
+    free(a->plan_prev_identity);
     free(a->plan_reference_path);
     free(a->fallback.role);
     free(a->fallback.original);

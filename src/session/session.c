@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -658,6 +659,133 @@ json_t *session_children(const session_t *s, const char *id) {
     return out;
 }
 
+/* isUserRequestEntry: a user message, or a user-invoked /skill: prompt / collab peer prompt (isUserTurnInitiator) */
+static bool tree_user_initiator(const json_t *m) {
+    const char *ct = json_get_str(m, "customType");
+    return (str_eq(ct, "skill-prompt") || str_eq(ct, "collab-prompt")) && str_eq(json_get_str(m, "attribution"), "user");
+}
+
+static bool tree_user_request(const json_t *e) {
+    const char *t = json_get_str(e, "type");
+    if (str_eq(t, "message")) {
+        const json_t *m = json_get(e, "message");
+        const char *role = json_get_str(m, "role");
+        return str_eq(role, "user") || (str_eq(role, "custom") && tree_user_initiator(m));
+    }
+    return str_eq(t, "custom_message") && tree_user_initiator(e);
+}
+
+/* entriesByTimestamp over `idx` (stable; an unparsable timestamp compares equal, like a NaN comparison) */
+static void tree_sort_by_time(size_t *idx, size_t n, const double *ts) {
+    for (size_t i = 1; i < n; i++) {
+        size_t x = idx[i], j = i;
+        while (j > 0 && !isnan(ts[idx[j - 1]]) && !isnan(ts[x]) && ts[idx[j - 1]] > ts[x]) {
+            idx[j] = idx[j - 1];
+            j--;
+        }
+        idx[j] = x;
+    }
+}
+
+#define TREE_ROOT_KEY "\x01root" /* the bucket of entries without a parent (no entry id holds a control byte) */
+
+bool session_tree_position(const session_t *s, session_tree_pos_t *out) {
+    memset(out, 0, sizeof *out);
+    if (!s) return false;
+    session_lock(s);
+    size_t n = json_len(s->entries);
+    if (!n) {
+        session_unlock(s);
+        return false;
+    }
+    long *par = xcalloc(n, sizeof *par);   /* parent index, -1 none or missing */
+    size_t *bucket = xcalloc(n, sizeof *bucket); /* the children bucket an entry sits in */
+    bool *user = xcalloc(n, sizeof *user), *marked = xcalloc(n, sizeof *marked), *seen = xcalloc(n, sizeof *seen);
+    double *ts = xcalloc(n, sizeof *ts);
+    hmap_t index, buckets; /* id -> index + 1; parent key -> bucket + 1 */
+    hmap_init(&index);
+    hmap_init(&buckets);
+    for (size_t i = 0; i < n; i++) {
+        const char *id = json_get_str(json_at(s->entries, i), "id");
+        if (id && !hmap_has(&index, id)) hmap_put(&index, id, (void *)(uintptr_t)(i + 1));
+    }
+    size_t nb = 0;
+    for (size_t i = 0; i < n; i++) {
+        const json_t *e = json_at(s->entries, i);
+        const char *p = json_get_str(e, "parentId");
+        uintptr_t pi = p ? (uintptr_t)hmap_get(&index, p) : 0;
+        par[i] = pi ? (long)pi - 1 : -1;
+        const char *key = p ? p : TREE_ROOT_KEY;
+        uintptr_t b = (uintptr_t)hmap_get(&buckets, key);
+        if (!b) {
+            b = ++nb;
+            hmap_put(&buckets, key, (void *)b);
+        }
+        bucket[i] = b - 1;
+        user[i] = tree_user_request(e);
+        double t;
+        ts[i] = trace_parse_iso_ms(json_get_str(e, "timestamp"), &t) ? t : NAN;
+    }
+    /* #markUserTurn: an entry and its ancestors hold a user turn (stops at the first already marked) */
+    for (size_t i = 0; i < n; i++)
+        for (long j = user[i] ? (long)i : -1; j >= 0 && !marked[j]; j = par[j]) marked[j] = true;
+    /* children per bucket, insertion order (CSR) */
+    size_t *start = xcalloc(nb + 1, sizeof *start), *fill = xcalloc(nb + 1, sizeof *fill), *kids = xcalloc(n, sizeof *kids);
+    for (size_t i = 0; i < n; i++) start[bucket[i] + 1]++;
+    for (size_t b = 0; b < nb; b++) start[b + 1] += start[b];
+    for (size_t i = 0; i < n; i++) kids[start[bucket[i]] + fill[bucket[i]]++] = i;
+    size_t *tmp = xcalloc(n, sizeof *tmp);
+    /* branchView: root..leaf */
+    long leaf = -1;
+    bool lost_leaf = false; /* a leaf id no entry has: no path, nothing below it */
+    if (s->leaf_id) {
+        uintptr_t li = (uintptr_t)hmap_get(&index, s->leaf_id);
+        leaf = li ? (long)li - 1 : -1;
+        lost_leaf = !li;
+    }
+    size_t plen = 0;
+    size_t *path = xcalloc(n, sizeof *path);
+    for (long j = leaf; j >= 0 && plen < n && !seen[j]; j = par[j]) {
+        seen[j] = true;
+        path[plen++] = (size_t)j;
+    }
+    memset(seen, 0, n * sizeof *seen);
+    for (size_t i = plen; i-- > 0 && !out->branch_count;) {
+        size_t e = path[i], b = bucket[e], cnt = start[b + 1] - start[b];
+        if (cnt < 2) continue;
+        size_t m = 0;
+        for (size_t k = start[b]; k < start[b + 1]; k++)
+            if (kids[k] == e || marked[kids[k]]) tmp[m++] = kids[k];
+        if (m < 2) continue;
+        tree_sort_by_time(tmp, m, ts);
+        for (size_t k = 0; k < m; k++)
+            if (tmp[k] == e) out->branch_index = (int)k + 1;
+        out->branch_count = (int)m;
+    }
+    /* the turns on the newest continuation below the leaf */
+    const char *cursor = leaf >= 0 ? json_get_str(json_at(s->entries, (size_t)leaf), "id") : lost_leaf ? NULL : TREE_ROOT_KEY;
+    while (cursor) {
+        uintptr_t b = (uintptr_t)hmap_get(&buckets, cursor);
+        if (!b) break;
+        size_t m = 0;
+        for (size_t k = start[b - 1]; k < start[b]; k++)
+            if (marked[kids[k]]) tmp[m++] = kids[k];
+        if (!m) break;
+        tree_sort_by_time(tmp, m, ts);
+        size_t next = tmp[m - 1];
+        if (seen[next]) break;
+        seen[next] = true;
+        if (user[next]) out->ahead++;
+        cursor = json_get_str(json_at(s->entries, next), "id");
+    }
+    session_unlock(s);
+    hmap_free(&index, NULL);
+    hmap_free(&buckets, NULL);
+    free(par), free(bucket), free(user), free(marked), free(seen), free(ts);
+    free(start), free(fill), free(kids), free(tmp), free(path);
+    return out->branch_count > 0 || out->ahead > 0;
+}
+
 /* ---------- context ---------- */
 
 static json_t *user_text_msg(const char *text, int64_t ts) {
@@ -847,6 +975,9 @@ void session_build_context_for(const json_t *path, session_context_t *out) {
 
 static void build_context_path(const json_t *path, session_context_t *out, const reader_t *rd) {
     size_t n = json_len(path);
+    json_t *role_models = json_obj(); /* buildSessionContext models: role -> "provider/id" */
+    const char *last_role = NULL;     /* lastModelChangeRole */
+    bool explicit_default = false;
     ssize_t boundary = -1, compaction = -1;
     /* omp ca42dc150a: a retry-fallback hop is ephemeral, so the thinking level it applied (a chain entry's `:level`)
      * does not outlive it: the level in effect before the first hop wins unless a later change superseded the
@@ -878,6 +1009,22 @@ static void build_context_path(const json_t *path, session_context_t *out, const
             if (!role || !strcmp(role, "default")) {
                 free(out->model);
                 out->model = xstrdup(json_get_str(e, "model"));
+            }
+            if (json_get_str(e, "model") && *json_get_str(e, "model")) {
+                json_set_str(role_models, role ? role : "default", json_get_str(e, "model"));
+                if (!role || !strcmp(role, "default")) explicit_default = true;
+            }
+            last_role = role ? role : "default";
+        } else if (str_eq(t, "message") && !explicit_default &&
+                   str_eq(json_get_str(json_get(e, "message"), "role"), "assistant")) {
+            /* legacy sessions: the default model is inferred from assistant messages until a default model_change
+             * names one (Claude Code's synthetic errors keep a placeholder model, not a selection) */
+            const json_t *m = json_get(e, "message");
+            const char *mp = json_get_str(m, "provider"), *mid = json_get_str(m, "model");
+            if (mp && mid && strcmp(mid, "<synthetic>")) {
+                char *k = xasprintf("%s/%s", mp, mid);
+                json_set_str(role_models, "default", k);
+                free(k);
             }
         } else if (str_eq(t, "thinking_level_change")) {
             free(out->thinking);
@@ -948,11 +1095,26 @@ static void build_context_path(const json_t *path, session_context_t *out, const
         start = (size_t)compaction + 1;
     }
     for (size_t i = start; i < n; i++) emit_entry(out->messages, json_at(path, i));
+    /* getRestorableSessionModels */
+    const char *def = json_get_str(role_models, "default");
+    if (!last_role || !strcmp(last_role, "default") || !strcmp(last_role, "fallback")) {
+        if (def) strvec_push(&out->restore_models, def);
+    } else {
+        const char *rm = json_get_str(role_models, last_role);
+        if (!rm) {
+            if (def) strvec_push(&out->restore_models, def);
+        } else {
+            strvec_push(&out->restore_models, rm);
+            if (def && strcmp(rm, def)) strvec_push(&out->restore_models, def);
+        }
+    }
+    json_free(role_models);
 }
 
 void session_context_free(session_context_t *c) {
     json_free(c->messages);
     free(c->model);
+    strvec_free(&c->restore_models);
     free(c->thinking);
     free(c->thinking_configured);
     json_free(c->service_tier);

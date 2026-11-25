@@ -214,7 +214,17 @@ static bool map_code(tui_key_t *k, uint32_t code, uint32_t shifted, unsigned mod
     case 57424: mk(k, TUI_KEY_END, 0, mods); return true;
     case 57425: mk(k, TUI_KEY_INSERT, 0, mods); return true;
     case 57426: mk(k, TUI_KEY_DELETE, 0, mods); return true;
+    case 57427: mk(k, TUI_KEY_CLEAR, 0, mods); return true; /* KP_BEGIN */
     default: break;
+    }
+    /* keys.rs map_keypad_nav: a modified keypad digit or decimal is its navigation key (ctrl+KP_1 = ctrl+end); only an
+     * unmodified one types its character */
+    if (mods && code >= 57399 && code <= 57409) {
+        static const tui_key_kind_t nav[] = {TUI_KEY_INSERT, TUI_KEY_END,  TUI_KEY_DOWN,  TUI_KEY_PAGEDOWN,
+                                             TUI_KEY_LEFT,   TUI_KEY_CLEAR, TUI_KEY_RIGHT, TUI_KEY_HOME,
+                                             TUI_KEY_UP,     TUI_KEY_PAGEUP, TUI_KEY_DELETE};
+        mk(k, nav[code - 57399], 0, mods);
+        return true;
     }
     if (code >= 57399 && code <= 57415) {
         static const char kp[] = "0123456789./*-+\0=";

@@ -12,6 +12,7 @@
 #include "coding/goal.h"
 #include "coding/migrate.h"
 #include "config/auth.h"
+#include "config/model_resolver.h"
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
@@ -30,6 +31,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef _WIN32
@@ -534,10 +536,27 @@ static void *deadline_main(void *ud) {
 /* resolve --models patterns (resolveModelScope): models in order, an explicit `:level` kept */
 typedef struct {
     const ai_model_t *m;
-    ai_effort_t effort;
-    bool has_effort;
-    const char *level; /* the explicit `:level` as written */
+    const char *level; /* the explicit `:level` (clamped to the model; `auto` kept), NULL when none (static) */
 } scoped_t;
+
+/* app_resolve_model_pattern with the selector's explicit level: over `pool`, else the available pool and then the whole
+ * catalog; *level is static or NULL */
+static const ai_model_t *resolve_scoped(const char *pattern, const mr_pool_t *pool, const char **level) {
+    *level = NULL;
+    mr_result_t r;
+    const ai_model_t *m = NULL;
+    if (mr_resolve_value(pattern, pool, &r)) m = r.model;
+    else if (!pool) {
+        mr_result_clear(&r);
+        mr_pool_t all = {0};
+        mr_pool_all(&all, "all");
+        if (mr_resolve_value(pattern, &all, &r)) m = r.model;
+        mr_pool_free(&all);
+    }
+    if (m && r.explicit_level) *level = r.level;
+    mr_result_clear(&r);
+    return m;
+}
 
 /* ---------- launch ---------- */
 
@@ -773,6 +792,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     /* --models: the first scoped model starts a fresh session unless --model or a saved default in scope wins */
     VEC(scoped_t) scoped = {0};
     char *scoped_model = NULL;
+    const char *scope_thinking = NULL; /* main.ts startScoped: the start entry's explicit level */
     if (A->has_models) {
         ai_providers_init();
         catalog_init();
@@ -780,8 +800,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         for (size_t i = 0; i < A->models.n; i++) {
             if (!*A->models.v[i]) continue;
             scoped_t s = {0};
-            s.m = app_resolve_model_pattern(A->models.v[i], &s.effort, &s.has_effort);
-            if (s.has_effort && strrchr(A->models.v[i], ':')) s.level = strrchr(A->models.v[i], ':') + 1;
+            s.m = resolve_scoped(A->models.v[i], NULL, &s.level);
             if (!s.m) {
                 char *w = xasprintf("Warning: No models match pattern \"%s\"", A->models.v[i]);
                 char *y = cli_yellow(w);
@@ -796,17 +815,32 @@ static int launch_run(launch_args_t *A, bool force_acp) {
         }
         bool restoring = A->continue_recent || A->resume_set;
         if (!A->model && scoped.n && !restoring) {
+            /* a remembered default resolved within the scope, else the first entry */
             const scoped_t *pick = &scoped.v[0];
-            const char *remembered = settings_str("modelRoles.default", NULL);
+            const char *remembered = settings_str("modelRoles.default", NULL), *remembered_level = NULL;
             if (remembered) {
-                ai_effort_t re;
-                bool rh;
-                const ai_model_t *rm = app_resolve_model_pattern(remembered, &re, &rh);
+                mr_pool_t sp = {0};
+                for (size_t k = 0; k < scoped.n; k++) mr_pool_push(&sp, scoped.v[k].m);
+                const ai_model_t *rm = resolve_scoped(remembered, &sp, &remembered_level);
+                mr_pool_free(&sp);
+                for (size_t k = 0; k < scoped.n && !rm; k++)
+                    if (!strcasecmp(scoped.v[k].m->id, remembered)) rm = scoped.v[k].m;
                 for (size_t k = 0; k < scoped.n && rm; k++)
                     if (scoped.v[k].m == rm) pick = &scoped.v[k];
+                if (pick->m != rm) remembered_level = NULL;
             }
             scoped_model = xasprintf("%s/%s", pick->m->provider, pick->m->id);
-            if (!A->thinking && pick->has_effort && pick->level) A->thinking = pick->level;
+            /* the session starts at that entry's explicit level, else the remembered role's (omp aead59a104) */
+            scope_thinking = pick->level ? pick->level : remembered_level;
+        } else if (A->model && scoped.n && !restoring) {
+            /* an explicit --model keeps its own level; in the scope without one it takes its entry's (omp 2090c10083,
+             * 4af9a68449); a model outside the scope gets none from it */
+            char *pat = A->provider && !strchr(A->model, '/') ? xasprintf("%s/%s", A->provider, A->model) : xstrdup(A->model);
+            const char *own = NULL;
+            const ai_model_t *cm = resolve_scoped(pat, NULL, &own);
+            free(pat);
+            for (size_t k = 0; k < scoped.n && cm && !own; k++)
+                if (scoped.v[k].m == cm && scoped.v[k].level) scope_thinking = scoped.v[k].level;
         }
     }
     if (A->api_key && !A->model && !scoped_model && !A->has_models) {
@@ -825,6 +859,7 @@ static int launch_run(launch_args_t *A, bool force_acp) {
     o.provider = A->provider;
     o.api_key = A->api_key;
     o.thinking = A->thinking;
+    o.scope_thinking = A->thinking ? NULL : scope_thinking;
     o.session_dir = A->session_dir;
     o.resume = resume_path;
     o.fork = A->fork;
@@ -944,8 +979,8 @@ static int launch_run(launch_args_t *A, bool force_acp) {
             sb_t b = SB_INIT;
             sb_append(&b, "Model scope: ");
             for (size_t i = 0; i < scoped.n; i++)
-                sb_appendf(&b, "%s%s%s%s", i ? ", " : "", scoped.v[i].m->id, scoped.v[i].has_effort && scoped.v[i].level ? ":" : "",
-                           scoped.v[i].has_effort && scoped.v[i].level ? scoped.v[i].level : "");
+                sb_appendf(&b, "%s%s%s%s", i ? ", " : "", scoped.v[i].m->id, scoped.v[i].level ? ":" : "",
+                           scoped.v[i].level ? scoped.v[i].level : "");
             sb_append(&b, " (Ctrl+P to cycle)");
             scope_notice = sb_detach(&b);
         }

@@ -92,11 +92,27 @@ void session_reset_leaf(session_t *s);
 json_t *session_path_to(const session_t *s, const char *leaf_id); /* owned array of borrowed->cloned entries root..leaf */
 json_t *session_children(const session_t *s, const char *id);      /* owned array of entries */
 
+/* SessionEntryIndex.treePosition (omp c9f03a4657): where the active leaf sits in the tree once it is off the tip of a
+ * single line. `branch_index`/`branch_count` (both 0 when absent): the path's branch at the deepest fork it passes
+ * through, 1-based in timestamp order, counting only siblings whose subtree holds a user turn (besides the path's
+ * own); `ahead`: user turns on the newest continuation below the leaf. False (the position is undefined) at the tip
+ * of a session without forks. */
+typedef struct {
+    int branch_index, branch_count;
+    int ahead;
+} session_tree_pos_t;
+bool session_tree_position(const session_t *s, session_tree_pos_t *out);
+
 /* context reconstruction: messages for the LLM along the current leaf. Owned array.
  * Also reports latest model/thinking selections (owned strings, may be NULL). */
 typedef struct {
     json_t *messages;
-    char *model;         /* "provider/id" */
+    char *model;         /* "provider/id" of the latest default-role model_change */
+    /* getRestorableSessionModels: the model selectors a resume tries, in fallback order: the model of the last
+     * model_change's role (a /switch pick, the plan model, a cycled role) before the default role's; just the default
+     * after a default or retry-fallback change. The default falls back to the newest assistant message's model when no
+     * default model_change was recorded (legacy sessions). Owned. */
+    strvec_t restore_models;
     char *thinking;      /* level name */
     char *thinking_configured; /* configured selector of the latest thinking entry ("auto"), may be NULL */
     bool has_service_tier;     /* the path has a service_tier_change entry */

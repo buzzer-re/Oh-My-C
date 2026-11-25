@@ -648,6 +648,33 @@ static void cache_wake_sync(const segctx_t *c, const cache_status_t *st, int64_t
     if (wake) g_cache_wake_timer = tui_add_timer(u->tui, (int)MIN(wake - now, (int64_t)86400000), false, cache_wake_cb, u);
 }
 
+/* SessionManager.getTreePosition, memoized while the session's entries and leaf stay the same (the walk is linear in
+ * the session) */
+static struct {
+    const session_t *s;
+    size_t n;
+    char *leaf;
+    bool ok;
+    session_tree_pos_t pos;
+} g_tree;
+
+static bool tree_position(const session_t *s, session_tree_pos_t *out) {
+    memset(out, 0, sizeof *out);
+    if (!s) return false;
+    session_lock(s);
+    size_t n = json_len(s->entries);
+    if (g_tree.s != s || g_tree.n != n || !str_eq(g_tree.leaf, s->leaf_id)) {
+        free(g_tree.leaf);
+        g_tree.s = s;
+        g_tree.n = n;
+        g_tree.leaf = s->leaf_id ? xstrdup(s->leaf_id) : NULL;
+        g_tree.ok = session_tree_position(s, &g_tree.pos);
+    }
+    session_unlock(s);
+    *out = g_tree.pos;
+    return g_tree.ok;
+}
+
 static char *render_segment(const char *id, const segctx_t *c) {
     const app_t *a = c->a;
     if (str_eq(id, "pi")) {
@@ -969,6 +996,19 @@ static char *render_segment(const char *id, const segctx_t *c) {
         char t[48];
         snprintf(t, sizeof t, "$%.2f", a->total_cost);
         return fgw(TUI_TC_STATUS_LINE_COST, t);
+    }
+    if (str_eq(id, "tree")) { /* treeSegment (omp c9f03a4657); none while a subagent is focused: /tree acts on main */
+        session_tree_pos_t tp;
+        if ((c->u && c->u->focus_id) || !tree_position(a->session, &tp)) return NULL;
+        char label[64] = "";
+        if (tp.branch_count) snprintf(label, sizeof label, "%d/%d", tp.branch_index, tp.branch_count);
+        if (tp.ahead > 0)
+            snprintf(label + strlen(label), sizeof label - strlen(label), "%s%d ahead", *label ? " \xc2\xb7 " : "", tp.ahead);
+        if (!*label) return NULL;
+        char *w = with_icon(sym("icon.worktree"), label), *acc = fgw(TUI_TC_ACCENT, w), *hint = fgw(TUI_TC_DIM, "/tree");
+        char *r = xasprintf("%s %s", acc, hint);
+        free(w), free(acc), free(hint);
+        return r;
     }
     if (str_eq(id, "stream")) { /* streamSegment: `● REC` while /record runs (omc has no live stream) */
         if (!g_recording) return NULL;

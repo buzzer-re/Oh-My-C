@@ -1172,6 +1172,10 @@ static void sub_opts_for(settings_view_t *v, const sdef_t *d) {
             vec_push(&o, s);
         }
         strvec_free(&names);
+    } else if (!strcmp(d->path, "todo.backend")) {
+        /* #todoBackendOptions: Native, then every backend an enabled extension registered (omc has no extensions) */
+        sopt_t s = {xstrdup("native"), xstrdup("Native"), xstrdup("Keep the todo list in the session only")};
+        vec_push(&o, s);
     } else if (!strcmp(d->path, "composer.shape")) {
         for (size_t i = 0; i < ARRAY_LEN(UI_COMPOSER_SHAPES); i++) {
             sopt_t s = {xstrdup(UI_COMPOSER_SHAPES[i].value), xstrdup(UI_COMPOSER_SHAPES[i].label),
