@@ -584,8 +584,37 @@ int omc_win_remove(const char *path) {
     return omc_win_unlink(path);
 }
 
+/* atomic-file.ts RENAME_RETRY_*: the budget a transient Windows denial gets to clear */
+#define RENAME_RETRY_BUDGET_MS 2000
+#define RENAME_RETRY_INITIAL_MS 5
+#define RENAME_RETRY_MAX_MS 100
+
+static BOOL rename_once(const wchar_t *wf, const wchar_t *wt, DWORD *err);
+
 int omc_win_rename(const char *from, const char *to) {
     wchar_t *wf = win_path(from), *wt = win_path(to);
+    /* replaceFileAtomically: a rename over a destination held open without share-delete reports a sharing violation
+     * (Node's EBUSY) until the last holder closes, and moving it aside cannot succeed either, so it is retried in place
+     * within the rename budget (omp e14f3281e8) */
+    ULONGLONG deadline = GetTickCount64() + RENAME_RETRY_BUDGET_MS;
+    DWORD e = 0;
+    BOOL ok;
+    for (int failures = 0;; failures++) {
+        ok = rename_once(wf, wt, &e);
+        if (ok || (e != ERROR_SHARING_VIOLATION && e != ERROR_LOCK_VIOLATION)) break;
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline) break;
+        ULONGLONG wait = failures < 5 ? (ULONGLONG)RENAME_RETRY_INITIAL_MS << failures : RENAME_RETRY_MAX_MS;
+        if (wait > RENAME_RETRY_MAX_MS) wait = RENAME_RETRY_MAX_MS;
+        if (wait > deadline - now) wait = deadline - now;
+        Sleep((DWORD)wait);
+    }
+    free(wf);
+    free(wt);
+    return ok ? 0 : win_fail(e);
+}
+
+static BOOL rename_once(const wchar_t *wf, const wchar_t *wt, DWORD *err) {
     BOOL ok = MoveFileExW(wf, wt, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
     DWORD e = ok ? 0 : GetLastError();
     if (!ok && e == ERROR_ACCESS_DENIED) {
@@ -605,11 +634,13 @@ int omc_win_rename(const char *from, const char *to) {
                 free(ri);
             }
             CloseHandle(h);
+        } else {
+            DWORD oe = GetLastError(); /* the source itself held without share-delete: as transient as the target */
+            if (oe == ERROR_SHARING_VIOLATION || oe == ERROR_LOCK_VIOLATION) e = oe;
         }
     }
-    free(wf);
-    free(wt);
-    return ok ? 0 : win_fail(e);
+    *err = e;
+    return ok;
 }
 
 int omc_win_access(const char *path, int mode) {
