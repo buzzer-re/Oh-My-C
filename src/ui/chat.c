@@ -1749,6 +1749,10 @@ void ui_agent_start(ui_t *u) {
         u->pinned_error = NULL;
     }
     ui_error_banner_clear(u);
+    if (u->wt_hook_row) { /* a turn starting during /wt's post-checkout hook takes the status row over */
+        u->wt_hook_row = false;
+        ui_working_set_message(u, NULL);
+    }
     ui_working_start(u);
 }
 

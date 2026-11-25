@@ -250,6 +250,8 @@ static void adopt_skills(app_t *a, discovery_t *fresh) {
     pthread_mutex_unlock(&a->mu);
 }
 
+void autolearn_adopt_skills(app_t *a, discovery_t *fresh) { adopt_skills(a, fresh); }
+
 void autolearn_free_skill_graveyard(app_t *a) {
     while (a->skill_graveyard) {
         graveyard_t *g = a->skill_graveyard;

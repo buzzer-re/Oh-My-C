@@ -2172,6 +2172,21 @@ static void load_session_into_agent(app_t *a) {
 
 void app_reload_context(app_t *a) { load_session_into_agent(a); }
 
+void app_refresh_skills_and_commands(app_t *a) {
+    if (!a->opts.no_skills) {
+        discovery_t fresh = {0};
+        discover_all(a->cwd, &fresh, true, false, true);
+        autolearn_adopt_skills(a, &fresh);
+        discovery_free(&fresh);
+        discovery_copy_skills(&a->prompt_skills, &a->disc);
+    }
+    if (!a->opts.subagent) {
+        commands_free(&a->file_cmds);
+        commands_load(a->cwd, &a->file_cmds);
+    }
+    app_rebuild_system_prompt(a);
+}
+
 static bool app_env_plan_mode(tool_env_t *env) { return env && env->session && ((app_t *)env->session)->plan_mode; }
 
 app_t *app_create(const app_opts_t *o, char **err) {

@@ -82,6 +82,7 @@ struct ui {
     bool retry_announced;
     pthread_t worker;
     bool worker_running;
+    bool wt_hook_row; /* the working row shows /wt's "Running post-checkout hook…": a turn starting takes it over */
     bool expand_tools;
     bool hide_thinking;
     bool hide_tool_activity;  /* display.hideToolActivity (app.tools.toggleVisibility) */

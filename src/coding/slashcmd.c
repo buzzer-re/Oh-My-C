@@ -944,6 +944,12 @@ static void h_wt(const slash_parsed_t *c, slash_rt_t *rt, slash_result_t *res) {
         out(rt, sum);
         free(sum);
         free(cerr);
+        /* runSessionWorktreeHook: the new worktree's post-checkout hook, then a skills/commands rescan */
+        strvec_t warnings = {0};
+        session_wt_run_hook(wt.path, wt.base_commit, &warnings);
+        app_refresh_skills_and_commands(a);
+        for (size_t i = 0; i < warnings.n; i++) outf(rt, res, false, "Warning: %s", warnings.v[i]);
+        strvec_free(&warnings);
     }
     session_wt_free(&wt);
     free(err);

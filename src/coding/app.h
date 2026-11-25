@@ -504,6 +504,9 @@ char *app_complete_first(app_t *a, const mr_pool_t *models, const char *system, 
  * (load_session_into_agent), and the per-request options of the live loop (prepareSimpleStreamOptions) */
 void app_notice(app_t *a, const char *level, const char *fmt, ...) PRINTF_LIKE(3, 4);
 void app_reload_context(app_t *a);
+/* refreshSkillsAndCommands: rediscover skills (the system prompt's list too) and the file-based slash commands for the
+ * cwd, then rebuild the system prompt; call while no turn runs */
+void app_refresh_skills_and_commands(app_t *a);
 void app_fill_request_opts(app_t *a, ai_stream_opts_t *o);
 /* omitsDemotedReasoning(model): this session turned replayed foreign reasoning off after a refusal and `m`'s classifier
  * refuses reasoning replayed as text; sets o->omit_demoted_reasoning (a caller's own true is kept) */

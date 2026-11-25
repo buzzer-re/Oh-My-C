@@ -120,8 +120,15 @@ Workspace and session lifecycle (WP-21): the session's roots are its cwd plus th
 session bucket, then `chdir` and a re-scope of project settings, discovery, file commands and the system
 prompt; a failure moves the session back). In the TUI `/move` without an argument opens the directory overlay
 and offers to create a missing directory; `/wt` creates the worktree on the next tick so the `Creating worktree
-on …` row paints, and the worktrees a launch created are offered for removal on exit per `worktree.onExit`
-(planned in the TUI, removed after the terminal is handed back, messages on stderr). `worktree.onStart` runs on
+on …` row paints (`git worktree add` with its hooks held back), then, once the session moved in, runs the
+worktree's `post-checkout` hook as `git worktree add` would (`git hook run --ignore-missing post-checkout -- <null>
+<base> 1`, or the hook file itself before git 2.36; `session_wt_run_hook`) off the UI thread under a `Running
+post-checkout hook…` row (a turn starting meanwhile takes the row over), rescans skills and file commands
+(`app_refresh_skills_and_commands`, after a turn that started meanwhile) and shows `Worktree created, but
+post-checkout hook exited with N: <last line>` when it fails; RPC/ACP `/wt` runs it inline and adds `Warning: …`
+lines. The worktrees a launch created are offered for removal on exit per `worktree.onExit` (planned in the TUI,
+removed after the terminal is handed back, messages on stderr; one whose hook still runs is kept with `Kept worktree
+…: its post-checkout hook is still running.`). `worktree.onStart` runs on
 fresh launches only. `/restart` closes the TUI like `/exit` and `cli.c` execs `/proc/self/exe` with omp's
 restartArgv (one-shot session selectors and positionals dropped, `--restore <session file>` appended when the
 session is on disk, so a turn the teardown cut off goes on; omp also revives the subagents it cut off, which omc does
