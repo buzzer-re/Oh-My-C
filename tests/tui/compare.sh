@@ -30,7 +30,8 @@
 #      (e.g. tests/e2e/bin-gh for the fake `gh` the github tool needs),
 #      CMP_ENV="VAR=value ..." extra environment for both apps (e.g. a scripted fake EDITOR for Ctrl+G),
 #      CMP_PROVIDERS (extra models.yml provider entries for both, e.g. '  anthropic:\n    baseUrl: http://…/v1'),
-#      CMP_AUTH=<file> (an `auth export` document imported into both agent dirs before launch, e.g. mock OAuth logins).
+#      CMP_AUTH=<file> (an `auth export` document imported into both agent dirs before launch, e.g. mock OAuth logins),
+#      CMP_NATIVES=<dir> (omp's natives cache to link into the throwaway HOME; default the real ~/.omp/natives).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 D=${CMP_DIR:-${TMPDIR:-/tmp}/omc-tuicmp}
@@ -73,8 +74,13 @@ start)
     cols=${1:-120}; rows=${2:-40}
     "$0" stop >/dev/null 2>&1
     rm -rf "$D"; mkdir -p "$D/home/.omp"
-    # omp extracts its native module into ~/.omp/natives; share the real cache (omp's own files) with the throwaway HOME
-    [ -d "$HOME/.omp/natives" ] && ln -s "$HOME/.omp/natives" "$D/home/.omp/natives"
+    # omp extracts its native module into ~/.omp/natives; share a cache with the throwaway HOME: CMP_NATIVES (a natives
+    # dir kept for harnesses, so omp never writes the real ~/.omp), else the real one (omp's own files)
+    NAT=${CMP_NATIVES:-$HOME/.omp/natives}
+    [ -d "$NAT" ] && ln -s "$NAT" "$D/home/.omp/natives"
+    # $D is a repo root (a `.git` entry): project discovery from the work dir stops here instead of walking into the
+    # real home's .claude/.agents skills and rules
+    mkdir -p "$D/.git"
     workdirs; mkdir -p "$WO" "$WC"
     if [ -n "${CMP_SEED:-}" ]; then cp -R "$CMP_SEED/." "$WO/"; [ "$WO" = "$WC" ] || cp -R "$CMP_SEED/." "$WC/"; fi
     # pick a free port; retry when another harness grabbed it first (the mock exits on EADDRINUSE)
