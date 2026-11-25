@@ -787,6 +787,8 @@ if python3 -c 'import pty' 2>/dev/null; then
     # plan mode journals the pre-plan model; a session resumed in plan mode restores it when planning ends (omp 05aca3f69c)
     mkdir -p "$T/planres/agent" && cp "$T/agent/models.yml" "$T/planres/agent/"
     check "plan resume tui" $'composer ok\nswitch ok\nplan on ok\nturn ok\njournal ok\nplan model ok\nresumed in plan ok\nplan off ok\nrestored ok'  python3 -I "$ROOT/tests/e2e/plan_resume_tui.py" "$B" "$T/planres/agent"
+    # /settings: option-less string rows are text fields; Todo Backend offers Native (omp b0d3834d78)
+    check "settings rows tui" $'text field ok\ntodo backend row ok\nnative choice ok'  python3 -I "$ROOT/tests/e2e/settings_rows_tui.py" "$B" "$T/setrows"
     # Models hub: Enter Enter on a just-assigned row keeps its role; moving the strip or the cursor re-arms it (omp bb6d78c023)
     check "model hub repeat" $'search ok\nrole strip ok\nassigned ok\nchip reads assigned ok\nrepeat keeps role ok\nstrip move re-arms ok\nassigned again ok\ncursor move re-arms ok'  python3 -I "$ROOT/tests/e2e/model_hub_repeat_tui.py" "$B" "$T/mhub"
     # WP-29: inline images per protocol, cache-miss marker, Ctrl+Shift+O tool activity, tui.mouse capture
