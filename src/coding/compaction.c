@@ -7,6 +7,7 @@
 #include "coding/advisor.h"
 #include "coding/branchsum.h"
 #include "coding/dcr.h"
+#include "coding/turn_recovery.h"
 #include "config/compaction_point.h"
 #include "ai/ai_images.h"
 #include "config/settings.h"
@@ -1077,6 +1078,7 @@ static bool compact_candidates(app_t *a, prep_t *p, const char *instructions, bo
     bool ok = false, tried = false;
     char *native_err = NULL;
     const char *native_provider = NULL;
+    int native_status = 0, last_status = 0;
     for (size_t i = 0; i < cands.n && !ok; i++) {
         const ai_model_t *c = cands.v[i];
         if (remote && !remote_endpoint_set() && a->model && !live_native(c, a->model)) continue;
@@ -1102,14 +1104,20 @@ static bool compact_candidates(app_t *a, prep_t *p, const char *instructions, bo
             if (!native_err) {
                 native_err = *err ? xstrdup(*err) : xstrdup("Remote compaction failed");
                 native_provider = c->provider;
+                native_status = tmp.status;
             }
             result_free(&tmp);
             continue;
         }
+        last_status = tmp.status;
         bool auth = auth_failure(&tmp, *err);
         result_free(&tmp);
         if (auth || any_error_falls_through) continue;
         break;
+    }
+    if (!ok) { /* the failure the caller classifies: a native one wins, as its error does */
+        r->native_error = native_err != NULL;
+        r->status = native_err ? native_status : last_status;
     }
     if (!ok && native_err) {
         free(*err);
@@ -1168,6 +1176,9 @@ static int64_t branch_tokens(app_t *a) {
 
 /* #commitCompactionEntry */
 static void commit(app_t *a, const prep_t *p, const result_t *r, const char *method) {
+    /* a committed compaction starts a new cycle: remote compaction gets a fresh try */
+    free(a->failed_remote_spec);
+    a->failed_remote_spec = NULL;
     session_compaction_t c = {.summary = r->summary,
                               .short_summary = r->short_summary,
                               .first_kept_id = r->first_kept,
@@ -2331,7 +2342,11 @@ struct cmp_spec {
     volatile int accepted; /* a provider billed one of its requests (which read the cached prefix) */
     bool bridge;           /* bridges a long tool call: the armed result commits at the next mid-run boundary */
     bridge_ticket_t *ticket;
-    bool armed, native_failed, joined;
+    bool armed, joined;
+    bool remote_failed; /* a remote run failed for a reason a retry would hit again (set by the run's thread) */
+    bool latched;       /* remote_failed was taken into app_t.failed_remote_spec */
+    char *latch_key;    /* #remoteSpeculationKey of the session and model when the run started */
+    const ai_model_t *latch_model; /* that model (catalog-owned) */
     char *method; /* remote | handoff | soft */
     char *snapshot_leaf;
     int64_t ctx_at_start;
@@ -2395,8 +2410,13 @@ static void *spec_main(void *arg) {
         if (ok) handoff_result(&sp->prep, doc, &sp->result);
         free(doc);
     } else {
-        ok = compact_candidates(sp->a, &sp->prep, NULL, str_eq(sp->method, "remote"), false, &sp->result, &err);
-        if (!ok && sp->result.native_error) sp->native_failed = true;
+        bool remote = str_eq(sp->method, "remote");
+        ok = compact_candidates(sp->a, &sp->prep, NULL, remote, false, &sp->result, &err);
+        /* any remote failure but a retriable one (429, 5xx, timeouts, network) latches remote speculation off until a
+         * compaction commits, a native rejection and an endpoint one alike (omp c398b30162) */
+        if (!ok && remote && !sp->cancel && sp->latch_key &&
+            !aie_retriable(aie_classify_text(err, sp->result.status, sp->latch_model->api, sp->latch_model->provider)))
+            sp->remote_failed = true;
         if (!ok) result_free(&sp->result);
     }
     free(err);
@@ -2410,6 +2430,11 @@ static void spec_free(struct cmp_spec *sp) {
     if (!sp) return;
     sp->cancel = 1;
     if (!sp->joined) pthread_join(sp->th, NULL);
+    if (sp->remote_failed && !sp->latched) { /* the run failed for good before anything read it */
+        free(sp->a->failed_remote_spec);
+        sp->a->failed_remote_spec = xstrdup(sp->latch_key);
+    }
+    free(sp->latch_key);
     prep_free(&sp->prep);
     handoff_req_free(&sp->hreq);
     result_free(&sp->result);
@@ -2427,6 +2452,27 @@ static void spec_cancel(app_t *a) {
 
 
 static bool spec_done(const struct cmp_spec *sp) { return __atomic_load_n(&sp->done, __ATOMIC_ACQUIRE) != 0; }
+
+/* #remoteSpeculationKey: the session and model a remote speculation ran for (owned) */
+static char *remote_spec_key(app_t *a, const ai_model_t *m) {
+    return xasprintf("%s/%s/%s", a->session ? session_id(a->session) : "", m->provider, m->id);
+}
+
+/* #remoteSpeculationFailed: `m`'s remote speculation already failed for good this cycle (a settled run's verdict is taken
+ * into app_t.failed_remote_spec first; the latch outlives the run until a compaction commits) */
+static bool remote_spec_failed(app_t *a, const ai_model_t *m) {
+    struct cmp_spec *sp = a->cmp_spec;
+    if (sp && spec_done(sp) && sp->remote_failed && !sp->latched) {
+        free(a->failed_remote_spec);
+        a->failed_remote_spec = xstrdup(sp->latch_key);
+        sp->latched = true;
+    }
+    if (!m || !a->failed_remote_spec) return false;
+    char *k = remote_spec_key(a, m);
+    bool r = str_eq(k, a->failed_remote_spec);
+    free(k);
+    return r;
+}
 
 /* a->cmp_spec is driven from the agent thread's maintenance hooks and, for a bridge compaction, from the cache
  * warmer's thread: one recursive lock serializes them (a hook's blocking pass holds it; the warmer only tries it) */
@@ -2471,6 +2517,8 @@ static void spec_start(app_t *a, int64_t ctx, const char *method) {
         }
     }
     sp->method = xstrdup(method);
+    sp->latch_model = a->model; /* keyed now: the session can switch before the run settles */
+    sp->latch_key = remote_spec_key(a, a->model);
     /* a bridge's snapshot ends before the pending tool call: the call and its coming result stay in the kept tail */
     const json_t *last = json_at(sp->prep.path, json_len(sp->prep.path) - 1);
     sp->snapshot_leaf = xstrdup(sp->bridge && json_get_str(last, "id") ? json_get_str(last, "id") : a->session->leaf_id);
@@ -2480,6 +2528,7 @@ static void spec_start(app_t *a, int64_t ctx, const char *method) {
         handoff_req_free(&sp->hreq);
         free(sp->method);
         free(sp->snapshot_leaf);
+        free(sp->latch_key);
         free(sp);
         return;
     }
@@ -2551,7 +2600,7 @@ static void spec_maybe_start(app_t *a, int64_t ctx) {
     int64_t th = threshold_for(m);
     if (ctx >= th || th - ctx > spec_lead(th)) return;
     struct cmp_spec *sp = a->cmp_spec;
-    bool skip_remote = sp && spec_done(sp) && sp->native_failed;
+    bool skip_remote = remote_spec_failed(a, a->model);
     if (sp) {
         if (!spec_done(sp) || sp->bridge) return; /* one run at a time; a bridge result waits for the boundary that commits it */
         if (sp->armed) {
@@ -2572,7 +2621,7 @@ static bool spec_defer(app_t *a, int64_t ctx) {
     const ai_model_t *m = a->model;
     if (!m || m->context_window <= 0 || !async_enabled() || a->compacting || !a->session) return false;
     struct cmp_spec *sp = a->cmp_spec;
-    bool skip_remote = sp && spec_done(sp) && sp->native_failed;
+    bool skip_remote = remote_spec_failed(a, a->model);
     const char *method = spec_method(a, skip_remote);
     if (!method) return false;
     int64_t th = threshold_for(m);
@@ -2713,6 +2762,13 @@ static int cmp_auto_locked(app_t *a, cmp_reason_t reason, bool will_retry, int64
         struct cmp_spec *forced = tl_forced;
         tl_forced = NULL;
         if (!forced && !method_usable(m, reason, a->model)) continue;
+        /* re-sending a remote request that just failed for good only delays the fallback: skipped while a later method
+         * can still run */
+        if (!forced && str_eq(m, "remote") && a->model && remote_spec_failed(a, a->model) &&
+            later_usable(&methods, idx + 1, reason, a->model, false)) {
+            LOGD("Skipping remote compaction after a failed speculative attempt model=%s/%s", a->model->provider, a->model->id);
+            continue;
+        }
         picked_any = true;
         /* an armed background speculation supplies this pass's summary (snapcompact is local and never waits) */
         struct cmp_spec *armed = forced ? forced : str_eq(m, "snapcompact") ? NULL : spec_claim(a, trigger);
@@ -3278,8 +3334,7 @@ static const char *bridge_method(app_t *a) {
         !settings_bool("compaction.midTurnEnabled", true))
         return NULL;
     if (a->compacting || cmp_bg_active(a)) return NULL;
-    struct cmp_spec *sp = a->cmp_spec;
-    bool skip_remote = sp && spec_done(sp) && sp->native_failed;
+    bool skip_remote = remote_spec_failed(a, a->model);
     const char *m = spec_method(a, skip_remote);
     if (str_eq(m, "soft")) {
         /* resolveSpeculationMethod over the order without soft */
@@ -3297,7 +3352,10 @@ static const char *bridge_method(app_t *a) {
 }
 
 bool cmp_bridge_estimate(app_t *a, int64_t prompt_tokens, int64_t *summary_tokens, int64_t *kept_tokens) {
-    if (!bridge_method(a)) return false;
+    if (!spec_trylock()) return false; /* the speculation state belongs to a pass running now */
+    bool can = bridge_method(a) != NULL;
+    spec_unlock();
+    if (!can) return false;
     *summary_tokens = BRIDGE_SUMMARY_TOKENS;
     /* omc keeps no tokensAfter on compaction entries: the keep-recent budget plus the summary, never above the prompt */
     *kept_tokens = MIN(settings_int("compaction.keepRecentTokens", 20000) + BRIDGE_SUMMARY_TOKENS, prompt_tokens);

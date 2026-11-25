@@ -176,4 +176,18 @@ rs = [json.loads(l) for l in open(sys.argv[2])][int(sys.argv[3]):]
 sent = sum("Write a handoff document" in json.dumps(r.get("messages", [])) for r in rs)
 soft = any(e.get("type") == "auto_compaction_end" and e.get("action") == "context-full" and e.get("result") for e in ev)
 print("refused=%s sent=%d soft=%s" % (refused, sent, soft))' "$T/cg7.out" "$T/req.jsonl" "$CG7M"
+# a remote speculation the endpoint rejects for good (a 404 for the model) latches remote compaction off until a
+# compaction commits (omp c398b30162): the threshold pass moves on to soft without re-sending it
+cagent "$T/cg8" $'modelRoles:\n  default: mockr/mock-r\ncompaction:\n  thresholdTokens: 20000\n  methodOrder: [remote, soft]'
+: > "$T/cprov.jsonl"
+OMC_CODING_AGENT_DIR="$T/cg8" "${CR[@]}" '{"type":"prompt","message":"COMPACT404 CTX=15000 first question"}' \
+    '{"type":"prompt","message":"CTX=30000 second question"}' > "$T/cg8.out"
+check "remote speculation latch" "compact requests=1 speculated=True soft=True"  python3 -I -c '
+import json, sys
+rs = [json.loads(l) for l in open(sys.argv[1])]
+compact = [i for i, r in enumerate(rs) if r["path"].endswith("/responses/compact")]
+second = [i for i, r in enumerate(rs) if r["path"].endswith("/responses") and "CTX=30000" in json.dumps(r["body"].get("input"))]
+ev = [json.loads(l) for l in open(sys.argv[2]) if l.startswith("{")]
+soft = any(e.get("type") == "auto_compaction_end" and e.get("action") == "context-full" and e.get("result") for e in ev)
+print("compact requests=%d speculated=%s soft=%s" % (len(compact), bool(compact and second and compact[0] < second[0]), soft))' "$T/cprov.jsonl" "$T/cg8.out"
 kill $CMPID 2>/dev/null

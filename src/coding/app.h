@@ -77,6 +77,7 @@ struct app {
     int64_t last_context_tokens;
     bool compacting;
     struct cmp_spec *cmp_spec; /* background speculative compaction run (compaction.c), NULL when idle */
+    char *failed_remote_spec;  /* #failedRemoteSpeculation: "<session>/<provider>/<id>" until a compaction commits */
     struct cmp_bg *cmp_bg;     /* background (handoff) compaction in flight (compaction.c), NULL when idle */
     bool title_done;
     int retry_count;

@@ -319,7 +319,10 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   hook), before a prompt (`cmp_before_prompt`), and on context overflow (every attempt, with a retry
   of the failed turn). With `compaction.asyncEnabled`, a background thread prepares the summary or
   handoff document inside `[threshold − lead, threshold)` and a threshold pass in the grace band
-  defers to it; the armed result is committed by the next pass when still valid for the branch.
+  defers to it; the armed result is committed by the next pass when still valid for the branch. A remote speculation
+  that fails for a reason a retry would hit again (anything but a 429, 5xx, timeout or network error, e.g. a 404 for
+  the model) latches remote compaction off for that session and model until a compaction commits: speculation runs
+  the next method instead, and a threshold pass skips remote while a later method can run.
 - **Dead ends**: when preparation finds nothing or a commit leaves no headroom (or no retry fit), a
   rescue elides inside the kept tail, then drops images; otherwise omp's dead-end warning is shown
   and stamped on the compaction entry. A threshold pass is not started at all while the system prompt and

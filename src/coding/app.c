@@ -2474,6 +2474,7 @@ void app_free(app_t *a) {
     free(a->cost_refusal);
     free(a->demoted_omitted_for);
     free(a->fixed_dead_end_session);
+    free(a->failed_remote_spec);
     free(a->plan_file);
     free(a->plan_reference_path);
     free(a->fallback.role);
