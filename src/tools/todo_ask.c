@@ -1063,6 +1063,34 @@ static void *ask_signal_main(void *p) {
     return NULL;
 }
 
+/* splitRadioFieldsets: fieldsets whose radios each sit in a group of their own (one `name` per input). HTML submits
+ * every checked radio under its own name, so a preselected option would come back next to the user's pick as a
+ * second answer to one question. [{legend, names}] (owned array, empty when none). */
+static json_t *split_radio_fieldsets(const hf_form_t *form) {
+    json_t *split = json_arr();
+    for (size_t i = 0; i < form->sections.n; i++) {
+        const hf_section_t *sec = &form->sections.v[i];
+        if (!sec->fieldset) continue;
+        json_t *names = json_arr();
+        for (size_t k = 0; k < sec->blocks.n; k++) {
+            const hf_block_t *blk = &sec->blocks.v[k];
+            if (blk->kind != HF_B_FIELD || !blk->field) continue;
+            const hf_field_t *f = blk->field;
+            if (f->kind != HF_CHOICE || f->multi || f->select) continue;
+            if (f->name && *f->name && f->opts.n == 1) json_push_str(names, f->name);
+        }
+        if (json_len(names) > 1) {
+            json_t *e = json_obj();
+            json_set(e, "legend", json_str_own(hf_spans_text(&sec->title)));
+            json_set(e, "names", names);
+            json_push(split, e);
+        } else {
+            json_free(names);
+        }
+    }
+    return split;
+}
+
 static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     tool_env_t *env = self->ud;
     if (!env->ui.form && !(env->ui.select && env->ui.input && env->ui.editor)) {
@@ -1085,6 +1113,21 @@ static int ask_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, 
         json_set(out->details, "answers", json_arr());
         return 0;
     }
+    json_t *split = split_radio_fieldsets(form);
+    if (json_len(split)) { /* refused before the user sees the form: the model rewrites it */
+        json_t *tctx = json_obj();
+        json_set(tctx, "fieldsets", split);
+        char *t = tool_prompt("ask-split-radio-groups", tctx);
+        json_free(tctx);
+        free(html);
+        hf_form_free(form);
+        tool_result_text(out, t ? t : "");
+        free(t);
+        out->details = json_obj();
+        json_set(out->details, "answers", json_arr());
+        return 0;
+    }
+    json_free(split);
     bool plan = env->plan_mode_active && env->plan_mode_active(env);
     double secs = settings_num("ask.timeout", 0);
     int64_t timeout = plan || !(secs > 0) ? 0 : (int64_t)(secs * 1000);

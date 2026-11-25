@@ -198,6 +198,26 @@ def ask_with(pid, html, reply):
     return te, ask
 
 
+# a fieldset whose radios each carry their own name is refused before the host sees it (omp a1ba8e0793, 9e76ee47b6);
+# radios sharing a name, a lone radio and separate fieldsets are asked as usual
+SPLIT = ('<form><fieldset><legend>Sharing</legend><label><input type="radio" name="shared_sources" value="common" checked>'
+         ' Common location only</label><label><input type="radio" name="personal_auto"> Include personal installations</label>'
+         '</fieldset></form>')
+r.ui = [{"data": {}}]
+n0 = len(r.frames)
+r.prompt("a1s", "call:ask:" + json.dumps({"html": SPLIT}))
+te = r.wait(lambda f: f.get("type") == "tool_execution_end" and f.get("toolName") == "ask" and r.frames.index(f) >= n0)
+with r.lock:
+    fr = next((f for f in r.frames[n0:] if f.get("method") == "form"), None)
+check("ask split radios", fr is None and te and not te["isError"] and te["result"]["details"] == {"answers": []} and
+      te["result"]["content"][0]["text"].startswith("Error: a <fieldset> holds radios that each carry a different `name`, so each is"
+                                                    " a group of its own:\n- <fieldset> \"Sharing\": shared_sources, personal_auto\n\n"
+                                                    "A preselected radio of one group is submitted together with the user's pick"), te)
+LONE = ('<form><fieldset><legend>Sharing</legend><label><input type="radio" name="personal_auto"> Include personal installations'
+        '</label></fieldset><fieldset><legend>Other</legend><label><input type="radio" name="shared_sources" value="common">'
+        ' Common</label></fieldset></form>')
+te, _ = ask_with("a1t", LONE, {"data": {"personal_auto": "on"}})
+check("ask lone radios", te and not te["isError"] and te["result"]["content"][0]["text"].startswith("User answers:"), te)
 te, ask = ask_with("a2", FORM2, {"data": {"c": ["x", "teal"]}})
 check("ask other", ask is None and te and te["result"]["content"][0]["text"] == 'User answers:\n{\n  "c": [\n    "x",\n    "teal"\n  ]\n}', te)
 x = r.call({"id": "ad2", "type": "set_ask_dialog", "enabled": False})
