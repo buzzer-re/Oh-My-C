@@ -528,6 +528,13 @@ static json_t *project_roots(void) {
 static int http_send(mcp_server_t *s, const json_t *msg, char **err);
 /* a request's own HTTP bounds (tools/call deadlines), else the server's timeout */
 static __thread int64_t tl_http_total = -1, tl_http_idle = -1;
+/* #statusError: the JSON-RPC error a modern server put in the body of a failed POST, captured for the request that asked
+ * (tl_want_status_rpc) and taken by it (owned) */
+static __thread json_t *tl_status_rpc;
+static __thread bool tl_want_status_rpc;
+
+/* jsonRpcErrorOf: {code: number, message: string, data?} */
+static bool json_rpc_error_of(const json_t *e) { return json_is_obj(e) && json_is_num(json_get(e, "code")) && json_is_str(json_get(e, "message")); }
 
 static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
     char *body = json_dump(msg, 0);
@@ -579,6 +586,16 @@ static int http_send(mcp_server_t *s, const json_t *msg, char **err) {
         s->http_status = c.status;
         *err = xasprintf("HTTP %d: %.300s", c.status, sb_cstr(&c.body));
         rc = -1;
+        /* a modern server reports protocol errors (header mismatch, unsupported version, unknown method) as a JSON-RPC
+         * error body under a 4xx status: that error is the server's own answer, the status its cause */
+        if (tl_want_status_rpc && s->modern && method && c.status != 403 && c.body.len) {
+            json_t *j = json_parse(c.body.s, c.body.len, NULL);
+            if (json_rpc_error_of(json_get(j, "error"))) {
+                json_free(tl_status_rpc);
+                tl_status_rpc = json_take(j, "error");
+            }
+            json_free(j);
+        }
     } else if (!c.is_sse && c.body.len && s->transport == T_HTTP) {
         json_t *j = json_parse(c.body.s, c.body.len, NULL);
         if (json_is_arr(j)) {
@@ -746,10 +763,21 @@ static json_t *mcp_request_once(mcp_server_t *s, const char *method, json_t *par
         tl_http_idle = timeout_ms > 0 ? timeout_ms + 5000 : 24 * 3600 * 1000LL;
     }
     int64_t started = mono_ms();
+    json_free(tl_status_rpc);
+    tl_status_rpc = NULL;
+    tl_want_status_rpc = true;
     int rc = send_msg(s, msg, err);
+    tl_want_status_rpc = false;
     tl_http_total = tl_http_idle = -1;
     json_free(msg);
-    if (rc != 0) fail_from_send(s, *err, fail);
+    if (rc != 0 && tl_status_rpc) {
+        json_t *e = tl_status_rpc;
+        tl_status_rpc = NULL;
+        free(*err);
+        *err = xasprintf("%s (code %lld)", json_get_str(e, "message"), (long long)json_get_int(e, "code", 0));
+        mcp_fail_json_rpc(fail, transport_kind(s), e);
+        json_free(e);
+    } else if (rc != 0) fail_from_send(s, *err, fail);
     json_t *result = NULL;
     pthread_mutex_lock(&s->mu);
     int64_t limit = timeout_ms;
@@ -993,8 +1021,25 @@ static json_t *legacy_init_params(void) {
 /* discoverResultOf: a server/discover answer names its versions and capabilities */
 static bool discover_result(const json_t *r) { return json_is_arr(json_get(r, "supportedVersions")) && json_is_obj(json_get(r, "capabilities")); }
 
-/* isModernErrorCode: errors only a 2026-07-28 server emits (header mismatch, missing capability, unsupported version) */
+/* isModernErrorCode: errors specific to MCP 2026-07-28 (header mismatch, missing capability, unsupported version) */
 static bool modern_error_code(int64_t c) { return c == -32020 || c == -32021 || c == -32022; }
+
+enum { ERA_UNKNOWN, ERA_MODERN, ERA_LEGACY };
+
+/* eraOfDiscoverError: the era a failed server/discover names by itself. An unsupported-version error (-32022) means a
+ * handshake-era server only when its data.supported (all strings) lists a revision this client speaks there; a missing,
+ * malformed or future-only list stays modern (omp ac3b31acb8). */
+static int era_of_discover_error(int64_t code, const json_t *data) {
+    if (code != -32022) return modern_error_code(code) ? ERA_MODERN : ERA_UNKNOWN;
+    static const char *const LEGACY[] = {MCP_LEGACY_PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"};
+    const json_t *sup = json_is_obj(data) ? json_get(data, "supported") : NULL, *v;
+    bool all_str = json_is_arr(sup), handshake = false;
+    json_arr_foreach((json_t *)sup, i, v) {
+        if (!json_is_str(v)) all_str = false;
+        for (size_t k = 0; json_is_str(v) && k < ARRAY_LEN(LEGACY); k++) handshake = handshake || str_eq(json_sv(v), LEGACY[k]);
+    }
+    return all_str && handshake ? ERA_LEGACY : ERA_MODERN;
+}
 
 static pending_t *req_start(mcp_server_t *s, const char *method, json_t *params, char **err) {
     pending_t *p = xcalloc(1, sizeof *p);
@@ -1166,7 +1211,7 @@ static int era_handshake(mcp_server_t *s, char **err) {
         pthread_mutex_unlock(&s->mu);
         if (d_done) {
             const json_t *e = json_get_obj(dp->result, "error");
-            if (e) modern = modern_error_code(json_get_int(e, "code", 0));
+            if (e) modern = era_of_discover_error(json_get_int(e, "code", 0), json_get(e, "data")) == ERA_MODERN;
             else if (discover_result(json_get(dp->result, "result"))) {
                 modern = true;
                 discovered = json_clone(json_get(dp->result, "result"));
@@ -1207,10 +1252,14 @@ static int era_handshake(mcp_server_t *s, char **err) {
             discovered = r;
             r = NULL;
         } else if (!r) {
-            if (fail.set && !strcmp(fail.failure, "json_rpc") && fail.code && modern_error_code(strtoll(fail.code, NULL, 10))) modern = true;
-            else {
+            int era = fail.set && !strcmp(fail.failure, "json_rpc") && fail.code
+                          ? era_of_discover_error(strtoll(fail.code, NULL, 10), fail.rpc_data)
+                          : ERA_UNKNOWN;
+            if (era == ERA_MODERN) modern = true;
+            else if (era != ERA_LEGACY) {
                 /* anything but a server's own answer or the statuses a handshake-era endpoint gives an unknown POST is
-                 * the caller's to see: an auth challenge, an outage */
+                 * the caller's to see: an auth challenge, an outage. A server that lists a handshake-era revision asked
+                 * for the handshake, whatever status carried that. */
                 int st = s->http_status;
                 bool refused = st ? (st == 400 || st == 404 || st == 405) : (fail.set && !strcmp(fail.failure, "json_rpc"));
                 if (!refused) {

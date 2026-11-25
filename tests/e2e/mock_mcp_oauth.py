@@ -2,6 +2,8 @@
 """OAuth-protected streamable-HTTP MCP server for e2e tests (dev/test only).
 RFC 9728 resource metadata, RFC 8414 AS metadata, RFC 7591 registration, auth code + PKCE (S256 verified),
 refresh tokens. /authorize redirects straight back with a code (the test plays the browser with curl -L).
+/dd/mcp (no auth) is a handshake-era server that refuses server/discover with HTTP 422 carrying JSON-RPC -32022 and the
+revisions it speaks (data.supported), then serves initialize, tools/list and an echo tool.
 Like GitHub's, the token endpoint answers form-encoded unless the request accepts application/json."""
 import base64, hashlib, json, sys, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -72,6 +74,22 @@ class H(BaseHTTPRequestHandler):
                 tokens["tok-2"] = True
                 return self.send(200, {"access_token": "tok-2", "expires_in": 3600, "token_type": "Bearer"})
             return self.send(400, {"error": "unsupported_grant_type"})
+        if u.path == "/dd/mcp":
+            msg = json.loads(data)
+            if "id" not in msg: return self.send(202, None, raw=b"")
+            m = msg["method"]
+            if m == "server/discover":
+                return self.send(422, {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32022, "message": "Unsupported protocol version",
+                                       "data": {"supported": ["2025-06-18"], "requested": "2026-07-28"}}})
+            if m == "initialize":
+                res = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "dd-mock", "version": "1"}}
+            elif m == "tools/list":
+                res = {"tools": [{"name": "echo", "description": "echo", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]}
+            elif m == "tools/call":
+                res = {"content": [{"type": "text", "text": "dd echo: " + msg["params"]["arguments"].get("text", "")}]}
+            else:
+                res = {}
+            return self.send(200, {"jsonrpc": "2.0", "id": msg["id"], "result": res}, {"Mcp-Session-Id": "dd-1"} if m == "initialize" else None)
         if u.path == "/mcp":
             auth = self.headers.get("Authorization", "")
             if not (auth.startswith("Bearer ") and tokens.get(auth[7:])):
