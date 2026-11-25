@@ -522,11 +522,13 @@ Compaction requests are journaled the same way (usage only), under the method th
 
 `src/coding/planmode.c` holds the state; the TUI flow is in `src/modes/interactive.c` and the review
 overlay in `src/ui/planreview.c`. `/plan`, `plan.defaultOnStartup` (fresh interactive sessions only),
-omc's `--plan-mode` flag, ACP `session/set_mode` or the API option enter it. Entering appends a
-`mode_change` entry (`plan`, `data.planFilePath`, default `local://PLAN.md`) and, interactively,
-switches to the `plan` role model (restored on exit). Resuming re-enters the mode recorded by the last
-`mode_change` on the branch; `/new` (and RPC `new_session`) ends plan mode, enabled or paused, and restores the
-pre-plan model before the new session records it. The system prompt gains `plan-mode-active.md`, and the `before_tool` hook
+omc's `--plan-mode` flag, ACP `session/set_mode` or the API option enter it. Entering interactively first
+switches to the `plan` role model (restored on exit), then appends a `mode_change` entry (`plan`,
+`data.planFilePath`, default `local://PLAN.md`, plus `prePlanModelIdentity` / `prePlanThinkingLevel` when the plan role
+replaced a model). Resuming re-enters the mode recorded by the last `mode_change` on the branch and takes the pre-plan
+model and level from it, so ending plan mode in the resumed session restores them (an identity that names no available
+model restores nothing; an `@upstream` one names its aggregator base); `/new` (and RPC `new_session`) ends plan mode,
+enabled or paused, and restores the pre-plan model before the new session records it. The system prompt gains `plan-mode-active.md`, and the `before_tool` hook
 enforces a read-only working tree:
 
 - `write` only to `local://…` (the plan is submitted with the `propose` command);

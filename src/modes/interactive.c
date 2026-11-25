@@ -2736,8 +2736,7 @@ static bool handle_command_inner(ui_t *u, const char *line) {
         } else if (!settings_bool("plan.enabled", true)) {
             add_notice(u, "warning", "Plan mode is disabled. Enable it in settings (plan.enabled).");
         } else {
-            app_enter_plan_mode(a, NULL);
-            app_plan_apply_model(a);
+            app_enter_plan_mode(a, NULL, true);
             char *m = xasprintf("Plan mode enabled. Plan file: %s", a->plan_file);
             add_notice(u, "info", m);
             free(m);
@@ -3739,8 +3738,7 @@ int run_interactive_mode(app_t *a, const char *initial) {
     ui_chat_rebuild(&u);
     if (json_len(a->session->entries)) ui_plan_restore(&u);
     if (!a->plan_mode && !a->plan_yolo_target && app_plan_should_start(a)) { /* #applyPlanModeDefault */
-        app_enter_plan_mode(a, NULL);
-        app_plan_apply_model(a);
+        app_enter_plan_mode(a, NULL, true);
         char *m = xasprintf("Plan mode enabled. Plan file: %s", a->plan_file);
         add_notice(&u, "info", m);
         free(m);

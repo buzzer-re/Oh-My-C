@@ -965,6 +965,31 @@ static bool supports_upstream(const ai_model_t *m) {
            (m->base_url && (strstr(m->base_url, "openrouter.ai") || strstr(m->base_url, "ai-gateway.vercel")));
 }
 
+/* resolveExactModelIdentity: the available chat model whose `provider/id` is `identity`; a routed `@upstream` identity
+ * names its aggregator base (omc keeps no per-request pins: the base model serves) */
+const ai_model_t *mr_exact_identity(const char *identity) {
+    if (!identity || !*identity) return NULL;
+    mr_pool_t pool = {0};
+    mr_pool_available(&pool, "chat");
+    const ai_model_t *hit = NULL;
+    char *base = NULL, *up = NULL;
+    bool routed = false;
+    for (int pass = 0; pass < 2 && !hit; pass++) {
+        if (pass == 1 && !(routed = split_upstream(identity, &base, &up))) break;
+        for (size_t i = 0; i < pool.n && !hit; i++) {
+            char *k = mr_model_key(pool.v[i]);
+            if (!strcmp(k, pass ? base : identity) && (!pass || supports_upstream(pool.v[i]))) hit = pool.v[i];
+            free(k);
+        }
+    }
+    if (routed) {
+        free(base);
+        free(up);
+    }
+    mr_pool_free(&pool);
+    return hit;
+}
+
 static bool match_pattern(const char *pattern, const mr_pool_t *pool, const prefs_t *pf, mr_result_t *out) {
     if (parse_with(pattern, pool, pf, out)) return true;
     char *base, *up;

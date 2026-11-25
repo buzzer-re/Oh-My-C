@@ -4,6 +4,7 @@
 #include "tools/toolcmd.h"
 #include "coding/app.h"
 
+#include "config/model_resolver.h"
 #include "config/settings.h"
 #include "core/fs.h"
 #include "prompt/template.h"
@@ -328,17 +329,35 @@ char *app_plan_autosave(app_t *a, const char *title, const char *content, char *
 
 /* ---------- plan mode state ---------- */
 
+/* #planModeJournalData: the plan file, then the pre-plan model identity and configured thinking level a resume restores
+ * when planning ends (omp 05aca3f69c) */
+static json_t *plan_journal_data(const app_t *a, const char *plan_file) {
+    json_t *d = json_obj();
+    json_set_str(d, "planFilePath", plan_file);
+    const char *identity = a->plan_prev_set ? a->plan_prev_identity : NULL;
+    if (identity) {
+        json_set_str(d, "prePlanModelIdentity", identity);
+        if (a->plan_prev_has_level)
+            json_set_str(d, "prePlanThinkingLevel", a->plan_prev_auto ? "auto" : effort_name(a->plan_prev_thinking));
+    }
+    return d;
+}
+
 static void append_mode_change(app_t *a, const char *mode, const char *plan_file) {
     if (!a->session) return;
     json_t *e = json_obj();
     json_set_str(e, "type", "mode_change");
     json_set_str(e, "mode", mode);
-    if (plan_file) {
-        json_t *d = json_obj();
-        json_set_str(d, "planFilePath", plan_file);
-        json_set(e, "data", d);
-    }
+    if (plan_file) json_set(e, "data", plan_journal_data(a, plan_file));
     session_append_entry(a->session, e);
+}
+
+static void plan_prev_clear(app_t *a) {
+    a->plan_prev_set = false;
+    a->plan_prev_model = NULL;
+    free(a->plan_prev_identity);
+    a->plan_prev_identity = NULL;
+    a->plan_prev_has_level = a->plan_prev_auto = false;
 }
 
 static char *propose_review(tool_env_t *env, const char *title, bool *is_error, json_t **details);
@@ -352,7 +371,7 @@ static void install_propose(app_t *a) {
                                                : propose_auto;
 }
 
-void app_enter_plan_mode(app_t *a, const char *plan_file) {
+void app_enter_plan_mode(app_t *a, const char *plan_file, bool apply_model) {
     if (a->plan_mode) return;
     const char *pf = plan_file ? plan_file : a->plan_reference_path ? a->plan_reference_path : DEFAULT_PLAN_URL;
     char *p = xstrdup(pf);
@@ -368,6 +387,7 @@ void app_enter_plan_mode(app_t *a, const char *plan_file) {
     a->plan_reentry = a->plan_has_entered;
     a->plan_has_entered = true;
     install_propose(a);
+    if (apply_model) app_plan_apply_model(a);
     append_mode_change(a, "plan", p);
     app_rebuild_system_prompt(a);
 }
@@ -394,11 +414,14 @@ void app_plan_apply_model(app_t *a) {
     bool has_e = false;
     const ai_model_t *m = app_resolve_model_pattern(val, &e, &has_e);
     if (!m) return;
-    if (!a->plan_prev_set && a->model) {
-        a->plan_prev_set = true;
-        a->plan_prev_model = a->model;
-        a->plan_prev_thinking = a->thinking;
-    }
+    /* only an entry captures this: the model and configured thinking level planning ends on */
+    plan_prev_clear(a);
+    a->plan_prev_set = true;
+    a->plan_prev_model = a->model;
+    a->plan_prev_identity = a->model ? mr_model_key(a->model) : NULL;
+    a->plan_prev_thinking = a->thinking;
+    a->plan_prev_auto = a->auto_thinking;
+    a->plan_prev_has_level = true;
     if (m == a->model) {
         if (has_e) app_set_thinking(a, e);
         return;
@@ -416,15 +439,21 @@ void app_plan_apply_model(app_t *a) {
     set_model_temporary(a, m, has_e, e);
 }
 
-/* #restorePlanPreviousModel */
+/* #restorePlanPreviousModel: nothing without a model (a resumed identity that names none) */
 static void plan_restore_model(app_t *a) {
     if (!a->plan_prev_set) return;
-    a->plan_prev_set = false;
-    if (a->plan_prev_model == a->model) {
-        if (a->thinking != a->plan_prev_thinking) app_set_thinking(a, a->plan_prev_thinking);
+    const ai_model_t *m = a->plan_prev_model;
+    bool has = a->plan_prev_has_level, autolv = a->plan_prev_auto;
+    ai_effort_t lv = a->plan_prev_thinking;
+    plan_prev_clear(a);
+    if (!m) return;
+    if (m == a->model) { /* same model: only the thinking level may differ */
+        if (has && autolv && !a->auto_thinking) app_set_thinking_auto(a);
+        else if (has && !autolv && (a->auto_thinking || a->thinking != lv)) app_set_thinking(a, lv);
         return;
     }
-    set_model_temporary(a, a->plan_prev_model, true, a->plan_prev_thinking);
+    set_model_temporary(a, m, has && !autolv, lv);
+    if (has && autolv) app_set_thinking_auto(a);
 }
 
 void app_exit_plan_mode(app_t *a, bool paused) {
@@ -438,7 +467,7 @@ void app_exit_plan_mode(app_t *a, bool paused) {
 }
 
 void app_set_plan_mode(app_t *a, bool on) {
-    if (on) app_enter_plan_mode(a, NULL);
+    if (on) app_enter_plan_mode(a, NULL, false);
     else app_exit_plan_mode(a, false);
 }
 
@@ -768,9 +797,26 @@ int app_plan_restore_from_session(app_t *a) {
             json_set_str(n, "mode", "none");
             session_append_entry(a->session, n);
         } else if (str_eq(mode, "plan")) {
-            const char *pf = json_get_str(json_get(last, "data"), "planFilePath");
+            const json_t *data = json_get(last, "data");
+            const char *pf = json_get_str(data, "planFilePath");
             if (a->plan_mode) app_exit_plan_mode_silently(a);
-            app_enter_plan_mode(a, pf);
+            /* the pre-plan model and level the journal recorded come back when planning ends; the active plan model
+             * itself was restored with the session (preserveRestoredModel) */
+            const char *identity = json_get_str(data, "prePlanModelIdentity");
+            plan_prev_clear(a);
+            if (identity) {
+                a->plan_prev_set = true;
+                a->plan_prev_identity = xstrdup(identity);
+                a->plan_prev_model = mr_exact_identity(identity);
+                const char *lv = json_get_str(data, "prePlanThinkingLevel");
+                ai_effort_t pe;
+                if (str_eq(lv, "auto")) a->plan_prev_has_level = a->plan_prev_auto = true;
+                else if (lv && effort_parse(lv, &pe) == 0) {
+                    a->plan_prev_has_level = true;
+                    a->plan_prev_thinking = pe;
+                }
+            }
+            app_enter_plan_mode(a, pf, false);
             r = 1;
         } else {
             if (a->plan_mode) app_exit_plan_mode_silently(a);
@@ -792,16 +838,21 @@ int app_plan_restore_from_session(app_t *a) {
  * yet). Runs before the new session records its model, so the restore journals nothing in either session. */
 void app_plan_clear_transient(app_t *a) {
     if (!a->plan_mode && !a->plan_paused) return;
-    if (a->plan_prev_set) {
-        a->plan_prev_set = false;
+    if (a->plan_prev_set && a->plan_prev_model) {
         const ai_model_t *prev_model = a->model;
         const char *prev_wire = app_wire_thinking(a);
         a->model = a->plan_prev_model;
         agent_set_model(a->agent, a->model);
-        a->thinking = a->plan_prev_thinking;
-        a->agent->thinking = a->plan_prev_thinking;
+        if (a->plan_prev_has_level) {
+            a->auto_thinking = a->plan_prev_auto;
+            if (!a->plan_prev_auto) {
+                a->thinking = a->plan_prev_thinking;
+                a->agent->thinking = a->plan_prev_thinking;
+            }
+        }
         app_model_state_changed(a, prev_model, prev_wire);
     }
+    plan_prev_clear(a);
     free(a->plan_file);
     a->plan_file = NULL;
     a->plan_has_entered = false;

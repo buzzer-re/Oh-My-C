@@ -90,6 +90,9 @@ const ai_model_t *mr_match(const char *pattern, const mr_pool_t *pool, bool exac
 bool mr_parse_pattern(const char *pattern, const mr_pool_t *pool, mr_result_t *out);
 /* resolveModelRoleValue: pool NULL = available chat models */
 bool mr_resolve_value(const char *value, const mr_pool_t *pool, mr_result_t *out);
+/* resolveExactModelIdentity: the available chat model a journaled `provider/id` identity names (an `@upstream` one: its
+ * aggregator base), or NULL */
+const ai_model_t *mr_exact_identity(const char *identity);
 /* resolveModelFromString */
 const ai_model_t *mr_resolve_string(const char *value, const mr_pool_t *pool);
 /* resolveModelOverride(patterns): first pattern that resolves over the available pool */

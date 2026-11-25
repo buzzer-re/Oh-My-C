@@ -2481,6 +2481,7 @@ void app_free(app_t *a) {
     free(a->demoted_omitted_for);
     free(a->fixed_dead_end_session);
     free(a->plan_file);
+    free(a->plan_prev_identity);
     free(a->plan_reference_path);
     free(a->fallback.role);
     free(a->fallback.original);
