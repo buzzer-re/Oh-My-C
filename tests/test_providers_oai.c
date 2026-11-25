@@ -1343,7 +1343,10 @@ static void test_strict_schema(void) {
     json_free(s);
     const char *bad[] = {"{\"type\":\"object\"}", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":true}",
                          "{\"type\":\"object\",\"properties\":{\"x\":{\"oneOf\":[{\"type\":\"string\"}]}}}",
-                         "{\"type\":\"object\",\"properties\":{\"x\":{\"$ref\":\"#/$defs/y\",\"description\":\"d\"}}}"};
+                         "{\"type\":\"object\",\"properties\":{\"x\":{\"$ref\":\"#/$defs/y\",\"description\":\"d\"}}}",
+                         /* omp 008e054ba1: a bare object property is open, so the tool goes non-strict instead of
+                          * closing it to an empty-only object */
+                         "{\"type\":\"object\",\"properties\":{\"meta\":{\"type\":\"object\"}}}"};
     for (size_t i = 0; i < ARRAY_LEN(bad); i++) {
         s = J(bad[i]);
         r = oai_strict_schema(s);

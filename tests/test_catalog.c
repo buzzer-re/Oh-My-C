@@ -550,6 +550,14 @@ static void test_v1911_rules(void) {
     e = disabled_effort("openai", "gpt-6.1-sol");
     CHECK(str_eq(e, "low"));
     free(e);
+    /* omp 9af58ea411: Bedrock's Kimi K3.1 inference profiles take the documented low..max ladder, max by default */
+    bm = catalog_find("amazon-bedrock", "us.moonshotai.kimi-k3.1");
+    CHECK(bm && str_eq(json_get_str(bm->thinking, "mode"), "effort") && str_eq(json_get_str(bm->thinking, "defaultLevel"), "max"));
+    m = resolved("amazon-bedrock", "https://bedrock-runtime.eu-west-1.amazonaws.com",
+                 "{\"id\":\"eu.moonshotai.kimi-k3.1\",\"api\":\"bedrock-converse-stream\",\"reasoning\":true}");
+    check_json(json_get(m, "thinking"), "{\"mode\":\"effort\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"],"
+                                        "\"defaultLevel\":\"max\",\"requiresEffort\":true}", "bedrock kimi k3.1 thinking");
+    json_free(m);
 }
 
 int main(void) {
