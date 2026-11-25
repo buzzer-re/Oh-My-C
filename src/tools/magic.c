@@ -1,5 +1,6 @@
-/* magic.c - `edit.mode: magic` (see magic.h). Port of omp edit/magic.ts, magic-lines.ts, magic-view.ts and
- * tui tools/magic-sections.ts at v19.1.0. Lengths the model or a limit sees are UTF-16 units, like JS. */
+/* magic.c - `edit.mode: magic` (see magic.h). Port of omp edit/magic.ts, magic-tools.ts, magic-calls.ts,
+ * magic-view.ts and tui tools/magic-sections.ts at v19.1.1. Lengths the model or a limit sees are UTF-16 units, like
+ * JS. */
 #include "magic.h"
 
 #include "ai/ai.h"
@@ -21,7 +22,7 @@
 #include <unistd.h>
 
 /* ======================================================================================
- * JS string helpers (String.prototype.trim / \s, ASCII \w)
+ * JS string helpers (String.prototype.trim / \s, ASCII \w, UTF-16 lengths)
  * ====================================================================================== */
 
 /* bytes of the JS whitespace or line terminator at p, 0 if none */
@@ -69,6 +70,7 @@ static const char *trim_end_ptr(const char *s) {
         if ((unsigned char)*p >= 0x80) {
             uint32_t cp;
             n = utf8_decode(p, strnlen(p, 4), &cp);
+            if (n <= 0) n = 1;
         }
         p += n;
         end = p;
@@ -98,52 +100,67 @@ static char *squeeze(const char *s) {
     return sb_detach(&b);
 }
 
+/* every JS whitespace character removed (/\s+/g -> "") */
+static char *strip_ws(const char *s) {
+    sb_t b = SB_INIT;
+    for (const char *p = s; *p;) {
+        size_t w = ws_at(p);
+        if (w) p += w;
+        else sb_putc(&b, *p++);
+    }
+    return sb_detach(&b);
+}
+
 static bool word_ch(unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'; }
 static bool digit_ch(unsigned char c) { return c >= '0' && c <= '9'; }
 
-/* bytes of the longest prefix of s that is at most `units` UTF-16 units */
-static size_t utf16_prefix(const char *s, size_t units) {
-    size_t i = 0, u = 0, len = strlen(s);
-    while (i < len) {
-        uint32_t cp;
-        int n = utf8_decode(s + i, len - i, &cp);
-        size_t w = cp >= 0x10000 ? 2 : 1;
-        if (u + w > units) break;
-        u += w;
-        i += (size_t)n;
-    }
-    return i;
+/* bytes of the UTF-8 character at s (at most avail) */
+static size_t u8len(const char *s, size_t avail) {
+    unsigned char c = (unsigned char)*s;
+    size_t k = c < 0xC0 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    return k > avail ? (avail ? avail : 1) : k;
 }
 
-/* String.prototype.replaceAll(old, replacement) with a string pattern: GetSubstitution's $$, $&, $` and $' */
-static char *js_replace_all(const char *s, const char *old, const char *rep) {
-    sb_t b = SB_INIT;
-    size_t ol = strlen(old);
-    const char *p = s, *m;
-    while ((m = strstr(p, old))) {
-        sb_appendn(&b, p, (size_t)(m - p));
-        for (const char *r = rep; *r; r++) {
-            if (r[0] == '$' && r[1] == '$') {
-                sb_putc(&b, '$');
-                r++;
-            } else if (r[0] == '$' && r[1] == '&') {
-                sb_appendn(&b, m, ol);
-                r++;
-            } else if (r[0] == '$' && r[1] == '`') {
-                sb_appendn(&b, s, (size_t)(m - s));
-                r++;
-            } else if (r[0] == '$' && r[1] == '\'') {
-                sb_append(&b, m + ol);
-                r++;
-            } else {
-                sb_putc(&b, *r);
-            }
-        }
-        p = m + ol;
+/* UTF-16 units of s[0..n) */
+static size_t u16n(const char *s, size_t n) {
+    size_t u = 0;
+    for (size_t i = 0; i < n;) {
+        size_t k = u8len(s + i, n - i);
+        u += k == 4 ? 2 : 1;
+        i += k;
     }
-    sb_append(&b, p);
-    return sb_detach(&b);
+    return u;
 }
+
+/* byte offset `units` UTF-16 units after pos, clamped to len (a character is never split) */
+static size_t u16_fwd(const char *s, size_t len, size_t pos, double units) {
+    double u = 0;
+    while (pos < len) {
+        size_t k = u8len(s + pos, len - pos);
+        double w = k == 4 ? 2 : 1;
+        if (u + w > units) break;
+        u += w;
+        pos += k;
+    }
+    return pos;
+}
+
+/* byte offset `units` UTF-16 units before pos, clamped to 0 */
+static size_t u16_back(const char *s, size_t pos, double units) {
+    double u = 0;
+    while (pos > 0) {
+        size_t st = pos - 1;
+        while (st > 0 && ((unsigned char)s[st] & 0xC0) == 0x80) st--;
+        double w = pos - st == 4 ? 2 : 1;
+        if (u + w > units) break;
+        u += w;
+        pos = st;
+    }
+    return pos;
+}
+
+/* bytes of the longest prefix of s that is at most `units` UTF-16 units */
+static size_t utf16_prefix(const char *s, size_t units) { return u16_fwd(s, strlen(s), 0, (double)units); }
 
 /* fileLines: split on "\n", without the empty field after a final newline */
 static strvec_t file_lines(const char *content) {
@@ -160,6 +177,22 @@ static strvec_t file_lines(const char *content) {
     }
     if (*content && str_ends(content, "\n")) free(vec_pop(&v));
     return v;
+}
+
+/* normalizeToLF: "\r\n" -> "\n" */
+static char *to_lf(const char *s) { return strchr(s, '\r') ? str_replace(s, "\r\n", "\n") : xstrdup(s); }
+
+/* is position i a line start for /m `^` (start, or after \n, \r, U+2028, U+2029) */
+static bool line_start(const char *t, size_t i) {
+    if (!i || t[i - 1] == '\n' || t[i - 1] == '\r') return true;
+    return i >= 3 && (!strncmp(t + i - 3, "\xe2\x80\xa8", 3) || !strncmp(t + i - 3, "\xe2\x80\xa9", 3));
+}
+
+/* 1-based line of byte offset `at` (pre-edit newlines before it) */
+static int line_number_at(const char *text, size_t at) {
+    int line = 1;
+    for (size_t i = 0; i < at && text[i]; i++) line += text[i] == '\n';
+    return line;
 }
 
 /* ======================================================================================
@@ -293,24 +326,75 @@ void magic_sections_free(magic_sections_t *s) {
 }
 
 /* ======================================================================================
- * file views (edit/magic-view.ts)
+ * initial file views (edit/magic-view.ts)
  * ====================================================================================== */
 
 #define CONTEXT_LINES 12
+#define FALLBACK_HEAD_LINES 40
+#define FALLBACK_TAIL_LINES 20
 #define MAX_BLOCK_LINES 150
 #define MAX_DISTINCT_HITS 5
 #define NEAR_LINES 3
 #define REPEAT_SAMPLE 3
 #define MIN_FILE_LINES 200
 #define MIN_OMITTED_SHARE 0.5
+#define MIN_OMITTED_GAP 8
 
-typedef VEC(magic_span_t) spans_t;
+#define GUTTER "\xe2\x94\x82"   /* │ */
+#define ELLIPSIS "\xe2\x80\xa6" /* … */
+#define OMITTED "\xe2\x8b\xae"  /* ⋮ */
+
+typedef struct {
+    int from, to; /* inclusive, zero-based */
+} span_t;
+typedef VEC(span_t) spans_t;
 typedef VEC(int) ints_t;
+
+/* numberedLines: lines[from..to] as `N│text` (N = index + offset + 1) within `limit` UTF-16 units (limit < 0: none). A
+ * first line over the budget is cut with `…`, so a read always makes progress. */
+static void numbered_lines(char *const *lines, int from, int to, double limit, int offset, strvec_t *out) {
+    size_t start = out->n;
+    bool unlimited = limit < 0;
+    for (int i = from; i <= to; i++) {
+        char num[24];
+        int nl = snprintf(num, sizeof num, "%d", i + offset + 1);
+        const char *line = lines[i];
+        if (!unlimited) {
+            double plen = (double)nl + 1; /* `│` is one unit */
+            double llen = (double)fz_utf16_len(line);
+            double remaining = limit - plen;
+            if (llen > remaining) {
+                if (out->n == start && remaining > 1) {
+                    size_t keep = utf16_prefix(line, (size_t)(remaining - 1));
+                    strvec_push_own(out, xasprintf("%s" GUTTER "%.*s" ELLIPSIS, num, (int)keep, line));
+                }
+                break;
+            }
+            limit -= plen + llen + 1;
+        }
+        strvec_push_own(out, xasprintf("%s" GUTTER "%s", num, line));
+    }
+}
+
+/* OPENER /[[({]\s*$/ */
+static bool opener_end(const char *s) {
+    const char *te = trim_end_ptr(s);
+    return te > s && (te[-1] == '[' || te[-1] == '(' || te[-1] == '{');
+}
+
+/* CLOSER /^[\])}]/ on the trimmed line */
+static bool closer_start(const char *s) {
+    const char *b = s + ws_run(s);
+    return *b == ']' || *b == ')' || *b == '}';
+}
 
 /* blockEnd: last line of the block lines[start] opens (its deeper-indented lines and their closer) */
 static int block_end(char *const *lines, int n, int start, int max_lines) {
-    int indent = indent_of(lines[start]);
-    int limit = start + max_lines < n && start + max_lines > start ? start + max_lines : n;
+    const char *first = lines[start];
+    /* blank lines and pure closing lines never open a block */
+    if (is_blank(first) || (closer_start(first) && !opener_end(first))) return start;
+    int indent = indent_of(first);
+    int limit = n - start > max_lines ? start + max_lines : n;
     int end = start;
     for (int i = start + 1; i < limit; i++) {
         const char *line = lines[i];
@@ -320,30 +404,29 @@ static int block_end(char *const *lines, int n, int start, int max_lines) {
             end = i;
             continue;
         }
-        const char *body = line + ws_run(line);
-        if (depth < indent || end == start || !(*body == ']' || *body == ')' || *body == '}')) break;
+        if (depth < indent || end == start) break;
+        /* a bare `{` opens the body of a multi-line header */
+        const char *b = line + ws_run(line);
+        if (*b == '{' && trim_end_ptr(b) == b + 1) {
+            const char *pe = trim_end_ptr(lines[end]);
+            if (!(pe > lines[end] && pe[-1] == ';')) {
+                end = i;
+                continue;
+            }
+        }
+        if (!closer_start(line)) break;
         end = i;
         /* `} else {` closes one block and opens the next */
-        const char *te = trim_end_ptr(line);
-        if (!(te > line && (te[-1] == '[' || te[-1] == '(' || te[-1] == '{'))) break;
+        if (!opener_end(line)) break;
     }
     return end;
-}
-
-/* numbered: lines[from..to] behind their numbers; a line opening a block that ends within them shows `12-30` */
-static void numbered(char *const *lines, int n, int from, int to, strvec_t *out) {
-    for (int i = from; i <= to; i++) {
-        int end = is_blank(lines[i]) ? i : block_end(lines, n, i, n);
-        if (end > i && end <= to) strvec_push_own(out, xasprintf("%d-%d\t%s", i + 1, end + 1, lines[i]));
-        else strvec_push_own(out, xasprintf("%d\t%s", i + 1, lines[i]));
-    }
 }
 
 /* add(): split on /\.{3}|…/, squeeze, keep fragments with at least three ASCII word characters */
 static void add_fragment(strvec_t *found, const char *text) {
     const char *p = text;
     for (;;) {
-        const char *dots = strstr(p, "..."), *ell = strstr(p, "\xe2\x80\xa6");
+        const char *dots = strstr(p, "..."), *ell = strstr(p, ELLIPSIS);
         const char *cut = dots && (!ell || dots < ell) ? dots : ell;
         size_t len = cut ? (size_t)(cut - p) : strlen(p);
         char *part = xstrndup(p, len);
@@ -376,8 +459,9 @@ static bool next_code_span(const char *s, size_t *pos, size_t *a, size_t *b) {
 
 static bool id_start(unsigned char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '$'; }
 static bool id_char(unsigned char c) { return word_ch(c) || c == '$'; }
+static bool upper_ch(unsigned char c) { return c >= 'A' && c <= 'Z'; }
 
-/* IDENTIFIER at s[i]: camelCase | snake_case | dotted.name; match end or 0 */
+/* IDENTIFIER at s[i]: camelCase | snake_case | dotted / `::`-qualified name; match end or 0 */
 static size_t identifier_at(const char *s, size_t i) {
     unsigned char c = (unsigned char)s[i];
     if (!id_start(c)) return 0;
@@ -386,21 +470,78 @@ static size_t identifier_at(const char *s, size_t i) {
     /* [A-Za-z_$][\w$]*[a-z0-9][A-Z][\w$]* */
     for (size_t k = i + 1; k + 1 < r; k++) {
         unsigned char x = (unsigned char)s[k], y = (unsigned char)s[k + 1];
-        if (((x >= 'a' && x <= 'z') || digit_ch(x)) && y >= 'A' && y <= 'Z') return r;
+        if (((x >= 'a' && x <= 'z') || digit_ch(x)) && upper_ch(y)) return r;
     }
     /* [A-Za-z$][\w$]*_[\w$]+ */
     if (c != '_')
         for (size_t k = i + 1; k + 1 < r; k++)
             if (s[k] == '_') return r;
-    /* [A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+ */
+    /* [A-Za-z_$][\w$]*(?:(?:\.|::)[A-Za-z_$][\w$]*)+ */
     size_t e = r;
     bool group = false;
-    while (s[e] == '.' && id_start((unsigned char)s[e + 1])) {
-        e += 2;
+    for (;;) {
+        size_t sep = s[e] == '.' ? 1 : (s[e] == ':' && s[e + 1] == ':') ? 2 : 0;
+        if (!sep || !id_start((unsigned char)s[e + sep])) break;
+        e += sep + 1;
         while (id_char((unsigned char)s[e])) e++;
         group = true;
     }
     return group ? e : 0;
+}
+
+/* QUALIFIED_SCOPE /^(?:[A-Za-z_$][\w$]*::)+([A-Za-z_$][\w$]*)$/, else QUALIFIED_TYPE_MEMBER
+ * /^[A-Z][\w$]*\.([A-Za-z_$][\w$]*)$/: the member (borrowed from s) or NULL */
+static const char *qualified_member(const char *s) {
+    size_t i = 0;
+    int groups = 0;
+    for (;;) {
+        if (!id_start((unsigned char)s[i])) break;
+        size_t st = i++;
+        while (id_char((unsigned char)s[i])) i++;
+        if (s[i] == ':' && s[i + 1] == ':') {
+            groups++;
+            i += 2;
+            continue;
+        }
+        if (!s[i] && groups) return s + st;
+        break;
+    }
+    if (!upper_ch((unsigned char)s[0])) return NULL;
+    i = 1;
+    while (id_char((unsigned char)s[i])) i++;
+    if (s[i] != '.' || !id_start((unsigned char)s[i + 1])) return NULL;
+    size_t st = ++i;
+    i++;
+    while (id_char((unsigned char)s[i])) i++;
+    return s[i] ? NULL : s + st;
+}
+
+/* DISTINCTIVE_MEMBER /[a-z0-9][A-Z]|_|^[A-Z][A-Z0-9_]+$/ */
+static bool distinctive_member(const char *m) {
+    for (size_t k = 0; m[k]; k++) {
+        unsigned char x = (unsigned char)m[k];
+        if (x == '_') return true;
+        if (((x >= 'a' && x <= 'z') || digit_ch(x)) && upper_ch((unsigned char)m[k + 1])) return true;
+    }
+    if (!upper_ch((unsigned char)m[0]) || !m[1]) return false;
+    for (size_t k = 1; m[k]; k++)
+        if (!upper_ch((unsigned char)m[k]) && !digit_ch((unsigned char)m[k]) && m[k] != '_') return false;
+    return true;
+}
+
+/* addQualified: `Line::blank` and `Parser.parseLine` name `blank(` / `parseLine(`, and a distinctive member itself */
+static void add_qualified(strvec_t *found, const char *name) {
+    char *t = js_trim(name);
+    char *paren = strchr(t, '(');
+    if (paren) *paren = 0; /* replace(/\(.*$/, "") on a one-line name */
+    const char *member = qualified_member(t);
+    if (member) {
+        char *call = xasprintf("%s(", member);
+        add_fragment(found, call);
+        free(call);
+        if (distinctive_member(member)) add_fragment(found, member);
+    }
+    free(t);
 }
 
 /* namedFragments: code spans, whole lines and identifiers in prose that may quote the file */
@@ -412,6 +553,7 @@ static void named_fragments(const char *change, strvec_t *found) {
     while (next_code_span(change, &pos, &a, &b)) {
         char *span = xstrndup(change + a, b - a);
         add_fragment(found, span);
+        add_qualified(found, span);
         /* `drain()` names `function drain(queue)` too */
         if (str_ends(span, ")")) {
             const char *paren = strchr(span, '(');
@@ -437,6 +579,7 @@ static void named_fragments(const char *change, strvec_t *found) {
         if (e) {
             char *name = xstrndup(p + i, e - i);
             add_fragment(found, name);
+            add_qualified(found, name);
             free(name);
             i = e;
         } else {
@@ -487,18 +630,19 @@ static void line_spans(const char *s, size_t len, int nlines, spans_t *out) {
         }
         double from = fmin(first, last), to = fmax(first, last);
         if (from >= 1 && from <= nlines) {
-            magic_span_t sp = {(int)from - 1, (int)fmin(to, nlines) - 1};
+            span_t sp = {(int)from - 1, (int)fmin(to, nlines) - 1};
             vec_push(out, sp);
         }
     }
     free(t);
 }
 
-/* numberedSpans: LINE_REFERENCE /\blines?\s+(\d+(?:\s*(?:,|-|–|to|through|and)\s*\d+)*)/gi */
+/* numberedSpans: LINE_REFERENCE /\b(?:lines?|lns?)\s+(\d+(?:\s*(?:,|-|–|to|through|and)\s*\d+)*)/gi */
 static void numbered_spans(const char *change, int nlines, spans_t *out) {
     for (size_t i = 0; change[i];) {
-        if ((i == 0 || !word_ch((unsigned char)change[i - 1])) && match_ci(change + i, "line")) {
-            size_t p = i + 4;
+        size_t word = (i == 0 || !word_ch((unsigned char)change[i - 1])) ? (match_ci(change + i, "line") ? 4 : match_ci(change + i, "ln") ? 2 : 0) : 0;
+        if (word) {
+            size_t p = i + word;
             if (change[p] == 's' || change[p] == 'S') p++;
             size_t w = ws_run(change + p);
             if (w && digit_ch((unsigned char)change[p + w])) {
@@ -542,7 +686,7 @@ static void named_spans(char *const *lines, int n, const char *change, spans_t *
         if (found.n > MAX_DISTINCT_HITS) few = false;
         vec_push(&hits, found);
     }
-#define SPAN_OF(line) ((magic_span_t){(line), block_end(lines, n, (line), MAX_BLOCK_LINES)})
+#define SPAN_OF(line) ((span_t){(line), block_end(lines, n, (line), MAX_BLOCK_LINES)})
     if (few) {
         for (size_t h = 0; h < hits.n; h++)
             for (size_t k = 0; k < hits.v[h].n; k++) vec_push(out, SPAN_OF(hits.v[h].v[k]));
@@ -600,17 +744,12 @@ static void named_spans(char *const *lines, int n, const char *change, spans_t *
     strvec_free(&frags);
 }
 
-static int span_cmp(const void *a, const void *b) {
-    const magic_span_t *x = a, *y = b;
-    return (x->from > y->from) - (x->from < y->from);
-}
-
 /* stable sort by `from` (JS Array.prototype.sort is stable) */
 static void spans_sort(spans_t *s) {
     for (size_t i = 1; i < s->n; i++) {
-        magic_span_t t = s->v[i];
+        span_t t = s->v[i];
         size_t j = i;
-        while (j > 0 && span_cmp(&s->v[j - 1], &t) > 0) {
+        while (j > 0 && s->v[j - 1].from > t.from) {
             s->v[j] = s->v[j - 1];
             j--;
         }
@@ -618,7 +757,7 @@ static void spans_sort(spans_t *s) {
     }
 }
 
-/* excerpt: the numbered lines the change names, or false */
+/* excerpt: the numbered lines the change names, or false when it names nothing or too much of a file this short */
 static bool excerpt(char *const *lines, int n, const char *change, magic_view_t *view) {
     int last = n - 1;
     if (n < MIN_FILE_LINES) return false;
@@ -631,20 +770,20 @@ static bool excerpt(char *const *lines, int n, const char *change, magic_view_t 
     }
     spans_t spans = {0};
     for (size_t i = 0; i < named.n; i++) {
-        magic_span_t s = {named.v[i].from - CONTEXT_LINES < 0 ? 0 : named.v[i].from - CONTEXT_LINES,
-                          named.v[i].to + CONTEXT_LINES > last ? last : named.v[i].to + CONTEXT_LINES};
+        span_t s = {named.v[i].from - CONTEXT_LINES < 0 ? 0 : named.v[i].from - CONTEXT_LINES,
+                    named.v[i].to + CONTEXT_LINES > last ? last : named.v[i].to + CONTEXT_LINES};
         vec_push(&spans, s);
     }
     vec_free(&named);
     /* the head and tail anchor changes placed by position: imports, a new last function */
-    magic_span_t head = {0, CONTEXT_LINES - 1}, tail = {last - CONTEXT_LINES + 1, last};
+    span_t head = {0, CONTEXT_LINES - 1}, tail = {last - CONTEXT_LINES + 1, last};
     vec_push(&spans, head);
     vec_push(&spans, tail);
     spans_sort(&spans);
     spans_t shown = {0};
     for (size_t i = 0; i < spans.n; i++) {
-        /* a gap of one line costs as much to mark as to show */
-        if (shown.n && spans.v[i].from <= vec_last(&shown).to + 2) {
+        /* small gaps cost as much to mark as to show */
+        if (shown.n && spans.v[i].from <= vec_last(&shown).to + MIN_OMITTED_GAP + 1) {
             if (spans.v[i].to > vec_last(&shown).to) vec_last(&shown).to = spans.v[i].to;
         } else {
             vec_push(&shown, spans.v[i]);
@@ -657,18 +796,20 @@ static bool excerpt(char *const *lines, int n, const char *change, magic_view_t 
         vec_free(&shown);
         return false;
     }
+    /* renderExcerpt */
     strvec_t out = {0};
     int next = 0;
     for (size_t i = 0; i < shown.n; i++) {
-        if (shown.v[i].from > next) strvec_push_own(&out, xasprintf("\xe2\x8b\xae lines %d-%d not shown", next + 1, shown.v[i].from));
-        numbered(lines, n, shown.v[i].from, shown.v[i].to, &out);
+        if (shown.v[i].from > next) strvec_push_own(&out, xasprintf(OMITTED " lines %d-%d not shown", next + 1, shown.v[i].from));
+        numbered_lines(lines, shown.v[i].from, shown.v[i].to, -1, 0, &out);
         next = shown.v[i].to + 1;
     }
+    if (next < n) strvec_push_own(&out, xasprintf(OMITTED " lines %d-%d not shown", next + 1, n));
+    vec_free(&shown);
     view->text = strvec_join(&out, "\n");
     strvec_free(&out);
+    view->total_lines = n;
     view->partial = true;
-    view->shown = shown.v;
-    view->nshown = shown.n;
     return true;
 }
 
@@ -676,921 +817,1378 @@ void magic_file_views(const char *content, const char *change, double limit, mag
     memset(out, 0, sizeof(*out));
     strvec_t lines = file_lines(content);
     int n = (int)lines.n;
-    magic_views_t all = {0};
+    bool unlimited = limit < 0;
     magic_view_t part = {0};
-    if (excerpt(lines.v, n, change, &part)) vec_push(&all, part);
-    strvec_t whole = {0};
-    numbered(lines.v, n, 0, n - 1, &whole);
-    magic_view_t w = {strvec_join(&whole, "\n"), false, NULL, 0};
-    strvec_free(&whole);
-    vec_push(&all, w);
-    for (size_t i = 0; i < all.n; i++) {
-        if (limit < 0 || (double)fz_utf16_len(all.v[i].text) <= limit) {
-            vec_push(out, all.v[i]);
+    if (excerpt(lines.v, n, change, &part)) {
+        if (unlimited || (double)fz_utf16_len(part.text) <= limit) vec_push(out, part);
+        else free(part.text);
+    }
+    if (unlimited || (double)fz_utf16_len(content) <= limit) {
+        strvec_t whole = {0};
+        numbered_lines(lines.v, 0, n - 1, -1, 0, &whole);
+        char *text = strvec_join(&whole, "\n");
+        strvec_free(&whole);
+        if (unlimited || (double)fz_utf16_len(text) <= limit) {
+            magic_view_t w = {text, n, false};
+            vec_push(out, w);
         } else {
-            free(all.v[i].text);
-            free(all.v[i].shown);
+            free(text);
         }
     }
-    vec_free(&all);
+    if (!out->n) {
+        /* nothing named fits: head and tail, the model opens the rest with read and search */
+        strvec_t h = {0}, t = {0};
+        numbered_lines(lines.v, 0, (n < FALLBACK_HEAD_LINES ? n : FALLBACK_HEAD_LINES) - 1, limit / 2, 0, &h);
+        int tail_from = n - FALLBACK_TAIL_LINES > FALLBACK_HEAD_LINES ? n - FALLBACK_TAIL_LINES : FALLBACK_HEAD_LINES;
+        numbered_lines(lines.v, tail_from, n - 1, limit / 2, 0, &t);
+        char *head = strvec_join(&h, "\n"), *tail = strvec_join(&t, "\n");
+        sb_t b = SB_INIT;
+        const char *parts[3] = {head, OMITTED " Open more of the file with read or search.", tail};
+        for (int i = 0; i < 3; i++) {
+            if (!*parts[i]) continue;
+            if (b.len) sb_putc(&b, '\n');
+            sb_append(&b, parts[i]);
+        }
+        free(head);
+        free(tail);
+        strvec_free(&h);
+        strvec_free(&t);
+        char *text = sb_detach(&b);
+        if ((double)fz_utf16_len(text) > limit) {
+            free(text);
+            text = xstrdup("");
+        }
+        magic_view_t f = {text, n, true};
+        vec_push(out, f);
+    }
     strvec_free(&lines);
 }
 
 void magic_views_free(magic_views_t *v) {
-    for (size_t i = 0; i < v->n; i++) {
-        free(v->v[i].text);
-        free(v->v[i].shown);
-    }
+    for (size_t i = 0; i < v->n; i++) free(v->v[i].text);
     vec_free(v);
 }
 
 /* ======================================================================================
- * line operations (edit/magic-lines.ts)
+ * draft tools (edit/magic-tools.ts)
  * ====================================================================================== */
 
-static const char *const OP_NAMES[] = {"delete", "replace", "sub", "insert", "move", "swap", "indent", "dedent"};
-static const char *const OP_FORMS[] = {
-    "[\"delete\", first, last]",
-    "[\"replace\", first, last, \"text\"]",
-    "[\"sub\", line or \"all\", \"old\", \"new\"]",
-    "[\"insert\", \"before\" or \"after\", line, \"text\"]",
-    "[\"move\", first, last, \"before\" or \"after\", line]",
-    "[\"swap\", first, last, first2, last2]",
-    "[\"indent\", first, last, spaces or \"tab\"]",
-    "[\"dedent\", first, last, spaces or \"tab\"]",
-};
-enum { OP_DELETE, OP_REPLACE, OP_SUB, OP_INSERT, OP_MOVE, OP_SWAP, OP_INDENT, OP_DEDENT, OP_COUNT };
+#define MAX_READ_LINES 160
+#define MAX_TEXT_CHARS 8000
+#define MAX_SEARCH_HITS 20
+#define REPLACE_CONTEXT_LINES 2
+#define MAX_REPLACE_PREVIEW_LINES 9
+#define MAX_REPLACE_PREVIEW_CHARS 1600
+#define MAX_REPLACE_MATCH_LINES 10
 
-static int op_index(const json_t *name) {
-    if (!json_is_str(name)) return -1;
-    for (int i = 0; i < OP_COUNT; i++)
-        if (!strcmp(name->u.str.s, OP_NAMES[i])) return i;
-    return -1;
+/* APPLY_TOOLS, as omptype turns their schemas into wire JSON */
+json_t *magic_apply_tools(void) {
+    return json_parse_str(
+        "[{\"name\":\"read\",\"description\":\"Read numbered lines from the current draft.\",\"parameters\":{\"type\":"
+        "\"object\",\"properties\":{\"start_line\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"First line, "
+        "1-based.\"},\"end_line\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Last line, inclusive.\"}},"
+        "\"required\":[\"start_line\",\"end_line\"],\"additionalProperties\":false}},"
+        "{\"name\":\"search\",\"description\":\"Find lines containing a literal substring in the current draft.\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,"
+        "\"description\":\"Literal substring to find.\"}},\"required\":[\"query\"],\"additionalProperties\":false}},"
+        "{\"name\":\"replace\",\"description\":\"Replace exact text in the current draft.\",\"parameters\":{\"type\":"
+        "\"object\",\"properties\":{\"old_string\":{\"type\":\"string\",\"minLength\":1,\"description\":\"Exact text, "
+        "including any whitespace you want to match.\"},\"new_string\":{\"type\":\"string\",\"description\":"
+        "\"Replacement text; empty to delete.\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"Default false. "
+        "Set true only to replace every occurrence in the draft.\"}},\"required\":[\"old_string\",\"new_string\"],"
+        "\"additionalProperties\":false}}]");
 }
 
-/* NUMBERS: positions holding line numbers or counts (quoted ones are converted) */
-static const int *op_numbers(int op, size_t *n) {
-    static const int del[] = {1, 2}, sub[] = {1}, ins[] = {2}, mov[] = {1, 2, 4}, swp[] = {1, 2, 3, 4}, ind[] = {1, 2, 3};
-    switch (op) {
-    case OP_DELETE:
-    case OP_REPLACE: *n = 2; return del;
-    case OP_SUB: *n = 1; return sub;
-    case OP_INSERT: *n = 1; return ins;
-    case OP_MOVE: *n = 3; return mov;
-    case OP_SWAP: *n = 4; return swp;
-    case OP_INDENT:
-    case OP_DEDENT: *n = 3; return ind;
-    default: *n = 0; return NULL;
+#define READ_START_DESC "First line, 1-based."
+#define READ_END_DESC "Last line, inclusive."
+#define SEARCH_QUERY_DESC "Literal substring to find."
+#define REPLACE_OLD_DESC "Exact text, including any whitespace you want to match."
+#define REPLACE_NEW_DESC "Replacement text; empty to delete."
+#define REPLACE_ALL_DESC "Default false. Set true only to replace every occurrence in the draft."
+
+/* ---------- omptype validation failures (errors.ts) ---------- */
+
+typedef struct {
+    const char *path;     /* the property */
+    const char *expected; /* `.describe()` replaces the expectation */
+    char *actual;         /* describeValue; NULL: missing */
+    double num;           /* the failing number (the summary's shared-data form) */
+    bool is_num;
+} vfail_t;
+typedef VEC(vfail_t) vfails_t;
+
+/* describeKind */
+static char *describe_kind(const json_t *v) {
+    switch (v->type) {
+    case JSON_NULL: return xstrdup("null");
+    case JSON_BOOL: return xstrdup("boolean");
+    case JSON_NUMBER: return xstrdup(isnan(v->u.num.d) ? "NaN" : "a number");
+    case JSON_STRING: return xstrdup("a string");
+    default: return xstrdup("an object");
     }
 }
 
-static json_t *op_at(const json_t *op, size_t i) { return i < json_len(op) ? json_at(op, i) : NULL; }
+/* describeValue for a non-domain failure */
+static char *describe_value(const json_t *v) {
+    sb_t b = SB_INIT;
+    switch (v->type) {
+    case JSON_NULL: sb_append(&b, "null"); break;
+    case JSON_BOOL: sb_append(&b, v->u.b ? "true" : "false"); break;
+    case JSON_NUMBER: json_js_num_sb(&b, v->u.num.d); break;
+    case JSON_STRING:
+        if (u16n(v->u.str.s, v->u.str.len) <= 40) json_js_quote_sb(&b, v->u.str.s, v->u.str.len);
+        else sb_appendf(&b, "a string (length %zu)", u16n(v->u.str.s, v->u.str.len));
+        break;
+    case JSON_ARRAY: sb_append(&b, "an array"); break;
+    default: json_dump_js_sb(&b, v); break;
+    }
+    return sb_detach(&b);
+}
 
-static void op_set(json_t *op, size_t i, json_t *v) {
-    if (i < json_len(op)) {
-        json_free(json_arr_remove(op, i));
-        json_arr_insert(op, i, v);
+static void vfail_push(vfails_t *f, const char *path, const char *expected, char *actual, const json_t *v) {
+    vfail_t e = {path, expected, actual, json_is_num(v) ? v->u.num.d : 0, json_is_num(v)};
+    vec_push(f, e);
+}
+
+/* OmpErrors.summary: one message per failure, or `path (data) must be...` when every failure shares path and data */
+static char *vsummary(vfails_t *f) {
+    sb_t b = SB_INIT;
+    bool shared = f->n > 1;
+    for (size_t i = 1; i < f->n && shared; i++)
+        shared = !strcmp(f->v[i].path, f->v[0].path) && f->v[i].is_num && f->v[0].is_num && f->v[i].num == f->v[0].num;
+    if (shared) {
+        sb_appendf(&b, "%s (", f->v[0].path);
+        json_js_num_sb(&b, f->v[0].num);
+        sb_append(&b, ") must be...");
+        for (size_t i = 0; i < f->n; i++) sb_appendf(&b, "\n  \xe2\x97\xa6 %s", f->v[i].expected);
     } else {
-        json_push(op, v);
-    }
-}
-
-/* `{` opening an operation written with braces: /^\{\s*"[a-z]+"\s*,/ on the next 40 characters */
-static bool braced_operation(const char *p) {
-    char *t = xstrndup(p, utf16_prefix(p, 40));
-    const char *q = t + 1;
-    bool ok = false;
-    if (t[0] == '{') {
-        q += ws_run(q);
-        if (*q == '"') {
-            q++;
-            const char *a = q;
-            while (*q >= 'a' && *q <= 'z') q++;
-            if (q > a && *q == '"') {
-                q++;
-                q += ws_run(q);
-                ok = *q == ',';
-            }
+        for (size_t i = 0; i < f->n; i++) {
+            if (i) sb_putc(&b, '\n');
+            if (!f->v[i].actual) sb_appendf(&b, "%s must be %s (was missing)", f->v[i].path, f->v[i].expected);
+            else if (!*f->v[i].actual) sb_appendf(&b, "%s must be %s", f->v[i].path, f->v[i].expected);
+            else sb_appendf(&b, "%s must be %s (was %s)", f->v[i].path, f->v[i].expected, f->v[i].actual);
         }
     }
-    free(t);
-    return ok;
+    for (size_t i = 0; i < f->n; i++) free(f->v[i].actual);
+    vec_free(f);
+    return sb_detach(&b);
 }
 
-/* index of the bracket closing the one at text[start] ([ or {), or -1 */
-static long bracket_end(const char *text, size_t len, size_t start) {
+/* `number.integer >= 1` */
+static void v_line(vfails_t *f, const json_t *args, const char *key, const char *desc) {
+    const json_t *v = json_get(args, key);
+    if (!v) {
+        vfail_push(f, key, desc, NULL, NULL);
+        return;
+    }
+    if (!json_is_num(v) || !isfinite(v->u.num.d)) { /* "an integer": a divisor failure shows the value */
+        vfail_push(f, key, desc, describe_value(v), v);
+        return;
+    }
+    double d = v->u.num.d;
+    if (d != floor(d)) vfail_push(f, key, desc, describe_value(v), v);
+    if (d < 1) vfail_push(f, key, desc, describe_value(v), v);
+}
+
+/* `string` (nonempty: `string > 0`) */
+static void v_string(vfails_t *f, const json_t *args, const char *key, const char *desc, bool nonempty) {
+    const json_t *v = json_get(args, key);
+    if (!v) vfail_push(f, key, desc, NULL, NULL);
+    else if (!json_is_str(v)) vfail_push(f, key, desc, describe_kind(v), NULL); /* "a string": a domain failure */
+    else if (nonempty && !v->u.str.len) vfail_push(f, key, desc, xstrdup("0"), NULL); /* the length is the data */
+}
+
+/* ---------- replace ---------- */
+
+void magic_steps_free(magic_steps_t *s) {
+    for (size_t i = 0; i < s->n; i++) {
+        free(s->v[i].old_s);
+        free(s->v[i].rep);
+    }
+    vec_free(s);
+}
+
+/* spliceReplacement: the edit replayed literally (every match for replace_all) */
+static char *splice_replacement(const char *text, const magic_step_t *st) {
+    size_t ol = strlen(st->old_s);
+    if (!st->all) return xasprintf("%.*s%s%s", (int)st->at, text, st->rep, text + st->at + ol);
+    sb_t b = SB_INIT;
+    const char *p = text, *m;
+    while ((m = strstr(p, st->old_s))) {
+        sb_appendn(&b, p, (size_t)(m - p));
+        sb_append(&b, st->rep);
+        p = m + ol;
+    }
+    sb_append(&b, p);
+    return sb_detach(&b);
+}
+
+/* draftAnchor: numbered draft lines of a 1-based inclusive window, bounded for previews */
+static char *draft_anchor(char *const *lines, int nlines, int from, int to) {
+    int start = from - 1;
+    int end = nlines < to ? nlines : to;
+    if (start + MAX_READ_LINES < end) end = start + MAX_READ_LINES;
+    strvec_t out = {0};
+    numbered_lines(lines, start, end - 1, MAX_TEXT_CHARS, 0, &out);
+    char *j = strvec_join(&out, "\n");
+    bool more = (int)out.n < to - from + 1;
+    strvec_free(&out);
+    if (!more) return j;
+    char *r = xasprintf("%s\n" OMITTED " Use read for more draft lines.", j);
+    free(j);
+    return r;
+}
+
+/* findGutterMatch: `old` located with the line-number gutter it copied from a view removed; unique matches only */
+static bool find_gutter_match(const char *text, const char *old, size_t *at_out, size_t *len_out) {
+    /* /^(?:\d*│|\d*\t)/m: some line of old starts with a gutter or a tab */
+    bool any = false;
+    for (size_t i = 0; old[i] && !any; i++) {
+        if (!line_start(old, i)) continue;
+        size_t k = i;
+        while (digit_ch((unsigned char)old[k])) k++;
+        any = str_starts(old + k, GUTTER) || old[k] == '\t';
+    }
+    if (!any) return false;
+    strvec_t lines = str_split(old, "\n");
+    size_t n = lines.n;
+    const char **lit = xcalloc(n ? n : 1, sizeof(char *));
+    bool *tab = xcalloc(n ? n : 1, sizeof(bool));
+    bool boundary = false;
+    for (size_t i = 0; i < n; i++) {
+        const char *line = lines.v[i];
+        /* EXPLICIT_GUTTER /^\d*│|^\d+\t/ */
+        size_t k = 0, glen = 0;
+        while (digit_ch((unsigned char)line[k])) k++;
+        if (str_starts(line + k, GUTTER)) glen = k + 3;
+        else if (k && line[k] == '\t') glen = k + 1;
+        /* a bare tab may be real indentation on one line and leaked on the next */
+        tab[i] = !glen && line[0] == '\t';
+        if (i == 0 && (glen || tab[i])) boundary = true;
+        lit[i] = line + (glen ? glen : tab[i] ? 1 : 0);
+    }
+    size_t tlen = strlen(text);
+    size_t found = 0, flen = 0;
+    int matches = 0;
+    for (size_t start = 0; start <= tlen && matches < 2; start++) {
+        if (boundary && start && text[start - 1] != '\n') continue;
+        if (matches == 1 && start < found + 1) continue;
+        size_t pos = start;
+        bool ok = true;
+        for (size_t i = 0; i < n && ok; i++) {
+            size_t ll = strlen(lit[i]);
+            bool last = i + 1 == n;
+            /* `\t?` is greedy: the tab is taken when the rest of the line still matches */
+            if (tab[i] && pos < tlen && text[pos] == '\t' && tlen - pos - 1 >= ll && !memcmp(text + pos + 1, lit[i], ll) &&
+                (last || text[pos + 1 + ll] == '\n')) {
+                pos += 1 + ll;
+            } else if (tlen - pos >= ll && !memcmp(text + pos, lit[i], ll) && (last || text[pos + ll] == '\n')) {
+                pos += ll;
+            } else {
+                ok = false;
+                break;
+            }
+            if (!last) pos++;
+        }
+        if (!ok) continue;
+        if (!matches) {
+            found = start;
+            flen = pos - start;
+            if (!flen) break; /* a zero-length match locates nothing */
+        }
+        matches++;
+    }
+    free(lit);
+    free(tab);
+    strvec_free(&lines);
+    if (matches != 1 || !flen) return false;
+    *at_out = found;
+    *len_out = flen;
+    return true;
+}
+
+/* whitespaceLead: a unique whitespace-insensitive match, mapped back to the draft lines it covers (owned) or NULL */
+static char *whitespace_lead(const char *text, const char *old) {
+    char *compact = strip_ws(old);
+    if (!*compact) {
+        free(compact);
+        return NULL;
+    }
+    char *flat = strip_ws(text);
+    const char *hit = strstr(flat, compact);
+    char *r = NULL;
+    if (hit && !strstr(hit + 1, compact)) {
+        size_t at = (size_t)(hit - flat), clen = strlen(compact);
+        strvec_t lines = file_lines(text);
+        size_t offset = 0;
+        int from = 0;
+        for (size_t i = 0; i < lines.n; i++) {
+            char *s = strip_ws(lines.v[i]);
+            offset += strlen(s);
+            free(s);
+            if (from == 0 && offset > at) from = (int)i + 1;
+            if (offset >= at + clen) {
+                r = draft_anchor(lines.v, (int)lines.n, from, (int)i + 1);
+                break;
+            }
+        }
+        strvec_free(&lines);
+    }
+    free(flat);
+    free(compact);
+    return r;
+}
+
+/* missingAnchor: the likeliest reason an exact old_string lookup failed */
+static char *missing_anchor(const char *text, const char *old, const char *rep) {
+    size_t gat, glen;
+    if (find_gutter_match(text, old, &gat, &glen)) {
+        strvec_t lines = file_lines(text);
+        char *a = draft_anchor(lines.v, (int)lines.n, line_number_at(text, gat), line_number_at(text, gat + glen - 1));
+        char *r = xasprintf("old_string not found. The line-number gutter was copied. Remove it from both strings and copy "
+                            "only the text after " GUTTER ":\n%s",
+                            a);
+        free(a);
+        strvec_free(&lines);
+        return r;
+    }
+    char *lead = whitespace_lead(text, old);
+    if (lead) {
+        char *r = xasprintf("old_string not found. Whitespace differs. Copy the exact text after " GUTTER ":\n%s", lead);
+        free(lead);
+        return r;
+    }
+    if (*rep) {
+        const char *m = strstr(text, rep);
+        if (m)
+            return xasprintf("old_string not found. new_string is already present on line %d. Check if this change was "
+                             "already applied.",
+                             line_number_at(text, (size_t)(m - text)));
+    }
+    return xstrdup("old_string not found. Search for a short fragment, then read and copy the exact text.");
+}
+
+/* replaceAllWithLocations: every match replaced, the original lines of the first few listed */
+static char *replace_all_with_locations(const char *text, const magic_step_t *st, char **message) {
+    size_t ol = strlen(st->old_s);
+    int count = 0, line = st->line;
+    const char *newline = strchr(text + st->at, '\n');
+    ints_t lines = {0};
+    sb_t b = SB_INIT;
+    const char *p = text, *m;
+    while ((m = strstr(p, st->old_s))) {
+        count++;
+        if (lines.n <= MAX_REPLACE_MATCH_LINES) {
+            while (newline && newline < m) {
+                line++;
+                newline = strchr(newline + 1, '\n');
+            }
+            if (!lines.n || vec_last(&lines) != line) vec_push(&lines, line);
+        }
+        sb_appendn(&b, p, (size_t)(m - p));
+        sb_append(&b, st->rep);
+        p = m + ol;
+    }
+    sb_append(&b, p);
+    bool capped = lines.n > MAX_REPLACE_MATCH_LINES;
+    if (capped) lines.n--;
+    sb_t msg = SB_INIT;
+    sb_appendf(&msg, "Replaced %d %s (original %s ", count, count == 1 ? "match" : "matches", lines.n == 1 ? "line" : "lines");
+    for (size_t i = 0; i < lines.n; i++) sb_appendf(&msg, "%s%d", i ? ", " : "", lines.v[i]);
+    sb_appendf(&msg, "%s).", capped ? ", " ELLIPSIS : "");
+    vec_free(&lines);
+    *message = sb_detach(&msg);
+    return sb_detach(&b);
+}
+
+/* replacementPreview: numbered lines of the first edited region in the post-edit draft */
+static char *replacement_preview(const char *content, const magic_step_t *st) {
+    size_t len = strlen(content);
+    if (!len) return xstrdup("The draft is empty.");
+    size_t at = st->at, rl = strlen(st->rep);
+    size_t els = 0; /* the edited line's start */
+    for (size_t i = at; i > 0; i--)
+        if (content[i - 1] == '\n') {
+            els = i;
+            break;
+        }
+    /* crop huge leading indentation on very long lines so the edit stays visible */
+    bool cropped = (double)u16n(content + els, at - els) > MAX_REPLACE_PREVIEW_CHARS / 2;
+    size_t from = cropped ? u16_back(content, at, MAX_REPLACE_PREVIEW_CHARS / 4) : els;
+    int first = st->line - 1;
+    for (int i = 0; i < REPLACE_CONTEXT_LINES && from > 0 && !cropped; i++) {
+        size_t previous = 0;
+        if (from > 1)
+            for (size_t k = from - 1; k > 0; k--)
+                if (content[k - 1] == '\n') {
+                    previous = k;
+                    break;
+                }
+        if ((double)u16n(content + previous, els - previous) > MAX_REPLACE_PREVIEW_CHARS / 3.0) break;
+        from = previous;
+        first--;
+    }
+    size_t to = from;
+    int after = 0;
+    size_t limit = u16_fwd(content, len, from, MAX_REPLACE_PREVIEW_CHARS + 1);
+    for (int i = 0; i < MAX_REPLACE_PREVIEW_LINES && to < limit; i++) {
+        if (to > at && to >= at + rl && after++ >= REPLACE_CONTEXT_LINES) break;
+        const char *nl = memchr(content + to, '\n', len - to);
+        to = !nl ? limit : ((size_t)(nl - content) + 1 < limit ? (size_t)(nl - content) + 1 : limit);
+    }
+    char *slice = xstrndup(content + from, to - from);
+    strvec_t lines = file_lines(slice);
+    free(slice);
+    if (cropped && lines.n) {
+        char *c = xasprintf(ELLIPSIS "%s", lines.v[0]);
+        free(lines.v[0]);
+        lines.v[0] = c;
+    }
+    strvec_t out = {0};
+    numbered_lines(lines.v, 0, (int)lines.n - 1, MAX_REPLACE_PREVIEW_CHARS, first, &out);
+    char *r = strvec_join(&out, "\n");
+    strvec_free(&out);
+    strvec_free(&lines);
+    return r;
+}
+
+bool magic_apply_replace(const char *text, const json_t *args, char **content, magic_step_t *step, char **message,
+                         char **error) {
+    const json_t *ns = json_get(args, "new_string");
+    if (json_is_null(ns)) {
+        *error = xstrdup("new_string is required; pass \"\" to delete.");
+        return false;
+    }
+    vfails_t f = {0};
+    v_string(&f, args, "old_string", REPLACE_OLD_DESC, true);
+    v_string(&f, args, "new_string", REPLACE_NEW_DESC, false);
+    const json_t *all_v = json_get(args, "replace_all");
+    /* a described boolean fails with its description as the raw expectation: a predicate code, the value shown */
+    if (all_v && !json_is_bool(all_v)) vfail_push(&f, "replace_all", REPLACE_ALL_DESC, describe_value(all_v), all_v);
+    if (f.n) {
+        *error = vsummary(&f);
+        return false;
+    }
+    vec_free(&f);
+    const json_t *os = json_get(args, "old_string");
+    if (strlen(os->u.str.s) != os->u.str.len || strlen(ns->u.str.s) != ns->u.str.len) {
+        *error = xstrdup("NUL bytes are not allowed in text edits.");
+        return false;
+    }
+    char *old = to_lf(os->u.str.s), *rep = to_lf(ns->u.str.s);
+    bool all = all_v && all_v->u.b;
+    const char *fail = NULL;
+    if (all && is_blank(old)) fail = "replace_all cannot be used on whitespace-only old_string.";
+    else if (!strcmp(old, rep)) fail = "old_string and new_string are identical.";
+    if (fail) {
+        *error = xstrdup(fail);
+        free(old);
+        free(rep);
+        return false;
+    }
+    const char *m = strstr(text, old);
+    if (!m) {
+        *error = missing_anchor(text, old, rep);
+        free(old);
+        free(rep);
+        return false;
+    }
+    size_t at = (size_t)(m - text);
+    int line = line_number_at(text, at);
+    if (!all && strstr(m + strlen(old), old)) {
+        *error = xasprintf("old_string matches more than once (first on line %d). Include more context or pass "
+                           "replace_all: true.",
+                           line);
+        free(old);
+        free(rep);
+        return false;
+    }
+    magic_step_t st = {old, rep, all, at, line};
+    char *msg = NULL;
+    char *next = all ? replace_all_with_locations(text, &st, &msg) : splice_replacement(text, &st);
+    if (!all) msg = xasprintf("Replaced text on line %d.", line);
+    char *preview = replacement_preview(next, &st);
+    *message = xasprintf("%s\nDraft near the %sedit:\n%s", msg, all ? "first " : "", preview);
+    free(preview);
+    free(msg);
+    *content = next;
+    *step = st;
+    return true;
+}
+
+char *magic_read_lines(const char *text, const json_t *args, bool *is_error) {
+    vfails_t f = {0};
+    v_line(&f, args, "start_line", READ_START_DESC);
+    v_line(&f, args, "end_line", READ_END_DESC);
+    *is_error = f.n > 0;
+    if (f.n) return vsummary(&f);
+    vec_free(&f);
+    if (!*text) return xstrdup("The draft is empty.");
+    strvec_t lines = file_lines(text);
+    double start = json_get_num(args, "start_line", 1) - 1, end_line = json_get_num(args, "end_line", 1);
+    int n = (int)lines.n;
+    if (start >= n || end_line <= start) {
+        *is_error = true;
+        strvec_free(&lines);
+        return xasprintf("Invalid range for %d lines.", n);
+    }
+    int s = (int)start;
+    int end = end_line < n ? (int)end_line : n;
+    if (s + MAX_READ_LINES < end) end = s + MAX_READ_LINES;
+    strvec_t out = {0};
+    numbered_lines(lines.v, s, end - 1, MAX_TEXT_CHARS, 0, &out);
+    int last = s + (int)out.n;
+    char *body = strvec_join(&out, "\n");
+    int upto = end_line < n ? (int)end_line : n;
+    char *r = last < upto ? xasprintf("Lines %d-%d of %d:\n%s\n" OMITTED " Read again starting at line %d.", s + 1, last, n, body, last + 1)
+                          : xasprintf("Lines %d-%d of %d:\n%s", s + 1, last, n, body);
+    free(body);
+    strvec_free(&out);
+    strvec_free(&lines);
+    return r;
+}
+
+char *magic_search(const char *text, const json_t *args, bool *is_error) {
+    vfails_t f = {0};
+    v_string(&f, args, "query", SEARCH_QUERY_DESC, true);
+    *is_error = f.n > 0;
+    if (f.n) return vsummary(&f);
+    vec_free(&f);
+    const json_t *qv = json_get(args, "query");
+    const char *query = qv->u.str.s;
+    strvec_t lines = file_lines(text);
+    strvec_t matches = {0};
+    int total = 0;
+    for (size_t i = 0; i < lines.n; i++) {
+        const char *line = lines.v[i];
+        /* a query holding NUL or a line break never matches one line */
+        const char *m = strlen(query) == qv->u.str.len ? strstr(line, query) : NULL;
+        if (!m) continue;
+        total++;
+        if ((int)matches.n >= MAX_SEARCH_HITS) continue;
+        size_t ll = strlen(line);
+        double at = (double)u16n(line, (size_t)(m - line));
+        double from_u = at - 100 > 0 ? at - 100 : 0;
+        size_t from = u16_fwd(line, ll, 0, from_u);
+        size_t to = u16_fwd(line, ll, from, 300);
+        strvec_push_own(&matches, xasprintf("%zu" GUTTER "%s%.*s%s", i + 1, from > 0 ? ELLIPSIS : "", (int)(to - from), line + from,
+                                            to < ll ? ELLIPSIS : ""));
+    }
+    char *r;
+    if (total) {
+        char *j = strvec_join(&matches, "\n");
+        r = xasprintf("%d matches:\n%s", total, j);
+        free(j);
+    } else {
+        r = xstrdup("No matches.");
+    }
+    strvec_free(&matches);
+    strvec_free(&lines);
+    return r;
+}
+
+char *magic_diagnose_syntax(const char *original, const char *working, const magic_step_t *applied, size_t n,
+                            bool (*parses)(const char *code, void *ud), void *ud) {
+    char *draft = xstrdup(original);
+    long last_good = -1;
+    for (size_t i = 0; i + 1 < n; i++) {
+        char *next = splice_replacement(draft, &applied[i]);
+        free(draft);
+        draft = next;
+        if (parses(draft, ud)) last_good = (long)i;
+    }
+    free(draft);
+    if (!n) return xstrdup("The draft no longer parses.");
+    const magic_step_t *st = &applied[last_good + 1];
+    strvec_t lines = file_lines(working);
+    int nl = (int)lines.n;
+    int near = st->line - 1 < nl - 1 ? st->line - 1 : nl - 1;
+    strvec_t ctx = {0};
+    numbered_lines(lines.v, near - 3 > 0 ? near - 3 : 0, nl - 1 < near + 5 ? nl - 1 : near + 5, MAX_TEXT_CHARS, 0, &ctx);
+    char *j = strvec_join(&ctx, "\n");
+    char *r = xasprintf("The draft first stopped parsing after replace #%ld (then at line %d). Current lines near that "
+                        "location:\n%s",
+                        last_good + 2, st->line, j);
+    free(j);
+    strvec_free(&ctx);
+    strvec_free(&lines);
+    return r;
+}
+
+/* ======================================================================================
+ * written tool calls (edit/magic-calls.ts)
+ * ====================================================================================== */
+
+typedef struct {
+    const char *key;
+    char type; /* 'i' integer, 's' string, 'b' boolean */
+    bool optional;
+} tparam_t;
+
+static const tparam_t READ_PARAMS[] = {{"start_line", 'i', false}, {"end_line", 'i', false}};
+static const tparam_t SEARCH_PARAMS[] = {{"query", 's', false}};
+static const tparam_t REPLACE_PARAMS[] = {{"old_string", 's', false}, {"new_string", 's', false}, {"replace_all", 'b', true}};
+
+/* TOOL_PARAMETERS.get(name) */
+static const tparam_t *tool_params(const char *name, size_t *n) {
+    if (str_eq(name, "read")) return *n = 2, READ_PARAMS;
+    if (str_eq(name, "search")) return *n = 1, SEARCH_PARAMS;
+    if (str_eq(name, "replace")) return *n = 3, REPLACE_PARAMS;
+    *n = 0;
+    return NULL;
+}
+static bool apply_tool(const char *name) { return str_eq(name, "read") || str_eq(name, "search") || str_eq(name, "replace"); }
+
+/* repeatedJsonObject: some providers duplicate argument deltas; recover only when every complete object agrees */
+static json_t *repeated_json_object(const char *raw) {
+    size_t len = strlen(raw), start = 0;
     int depth = 0;
-    bool quoted = false;
-    for (size_t i = start; i < len; i++) {
-        char c = text[i];
-        if (quoted) {
+    bool quoted = false, repeated = false;
+    json_t *first = NULL;
+    for (size_t i = 0; i < len; i++) {
+        char c = raw[i];
+        if (depth == 0) {
+            size_t w = ws_at(raw + i);
+            if (w) {
+                i += w - 1;
+                continue;
+            }
+            if (c != '{') goto fail;
+            start = i;
+            depth = 1;
+        } else if (quoted) {
             if (c == '\\') i++;
             else if (c == '"') quoted = false;
         } else if (c == '"') {
             quoted = true;
-        } else if (c == '[' || c == '{') {
+        } else if (c == '{') {
             depth++;
-        } else if ((c == ']' || c == '}') && --depth == 0) {
-            return (long)i;
+        } else if (c == '}' && --depth == 0) {
+            json_t *v = json_parse(raw + start, i + 1 - start, NULL);
+            if (!json_is_obj(v)) {
+                json_free(v);
+                goto fail;
+            }
+            if (first) {
+                bool same = json_equal(first, v);
+                json_free(v);
+                if (!same) goto fail;
+                repeated = true;
+            } else {
+                first = v;
+            }
         }
     }
-    return -1;
+    if (depth == 0 && repeated) return first;
+fail:
+    json_free(first);
+    return NULL;
 }
 
-/* readOperations: the operations a reply holds (owned array) and whether commentary follows them; NULL when the
- * reply is unusable */
-static json_t *read_operations(const char *reply, size_t len, bool *commented_out, int depth) {
-    if (depth > 64) return NULL;
-    json_t *ops = json_arr();
-    bool commented = false;
-    size_t index = 0;
-    while (index < len) {
-        char c = reply[index];
-        size_t w = ws_at(reply + index);
-        if (w || c == ',' || c == ']') {
-            index += w ? w : 1;
-            continue;
-        }
-        bool braced = c == '{' && braced_operation(reply + index);
-        if (c != '[' && !braced) {
-            /* a fence line, or commentary: neither holds an operation */
-            if (!(len - index >= 3 && !strncmp(reply + index, "```", 3)) && json_len(ops) > 0) commented = true;
-            const char *nl = memchr(reply + index, '\n', len - index);
-            index = nl ? (size_t)(nl - reply) + 1 : len;
-            continue;
-        }
-        long end = bracket_end(reply, len, index);
-        if (end < 0 || commented) {
-            json_free(ops);
+/* INTEGER_STRING /^[+-]?\d+$/ as a safe integer */
+static bool integer_string(const char *s, double *out) {
+    const char *p = s;
+    if (*p == '+' || *p == '-') p++;
+    if (!*p) return false;
+    for (const char *q = p; *q; q++)
+        if (!digit_ch((unsigned char)*q)) return false;
+    double v = strtod(p, NULL);
+    if (v > 9007199254740991.0) return false;
+    *out = *s == '-' ? -v : v;
+    return true;
+}
+
+json_t *magic_normalize_args(const json_t *call, bool *repaired, char **error) {
+    const char *name = json_get_str(call, "name");
+    const json_t *args = json_get(call, "arguments");
+    json_t *out = NULL;
+    *repaired = false;
+    if (json_is_obj(args) && (json_get(args, "__parseError") || json_get(args, "__rawJson"))) {
+        const char *raw = json_get_str(args, "__rawJson");
+        json_t *rec = raw ? repeated_json_object(raw) : NULL;
+        if (!rec || json_get(rec, "__parseError") || json_get(rec, "__rawJson")) {
+            const char *pe = json_get_str(args, "__parseError");
+            *error = xasprintf("Malformed %s arguments: %s\nSend one JSON object per call.", name ? name : "",
+                               pe && *pe ? pe : "Invalid JSON.");
+            json_free(rec);
             return NULL;
         }
-        size_t inner_len = (size_t)end - index - 1;
-        sb_t src = SB_INIT;
-        sb_putc(&src, '[');
-        sb_appendn(&src, reply + index + 1, inner_len);
-        sb_putc(&src, ']');
-        char *perr = NULL;
-        json_t *value = json_parse(src.s, src.len, &perr);
-        free(perr);
-        sb_free(&src);
-        if (!value) {
-            /* an outer array of braced operations: read its inside the same way, once */
-            bool icomm = false;
-            json_t *inner = reply[index] == '[' ? read_operations(reply + index + 1, inner_len, &icomm, depth + 1) : NULL;
-            const char *in = reply + index + 1;
-            char *head = xstrndup(in, inner_len);
-            bool brace = head[ws_run(head)] == '{';
-            free(head);
-            if (!inner || icomm || !brace) {
-                json_free(inner);
-                json_free(ops);
-                return NULL;
-            }
-            value = inner;
-        }
-        bool all_arrays = json_is_arr(value);
-        for (size_t i = 0; all_arrays && i < json_len(value); i++) all_arrays = json_is_arr(json_at(value, i));
-        json_t *found;
-        if (all_arrays) {
-            found = value;
-        } else {
-            found = json_arr();
-            json_push(found, value);
-        }
-        while (json_len(found)) {
-            json_t *op = json_arr_remove(found, 0);
-            if (!json_is_arr(op) || !json_len(op)) {
-                json_free(op);
-                continue;
-            }
-            size_t nn;
-            const int *pos = op_numbers(op_index(json_at(op, 0)), &nn);
-            for (size_t k = 0; k < nn; k++) {
-                json_t *v = op_at(op, (size_t)pos[k]);
-                if (!json_is_str(v) || !v->u.str.len) continue;
-                bool digits = true;
-                for (size_t q = 0; q < v->u.str.len && digits; q++) digits = digit_ch((unsigned char)v->u.str.s[q]);
-                if (digits) op_set(op, (size_t)pos[k], json_num(strtod(v->u.str.s, NULL)));
-            }
-            json_push(ops, op);
-        }
-        json_free(found);
-        index = (size_t)end + 1;
+        out = rec;
+        *repaired = json_get(args, "__rawJson") != NULL;
+    } else {
+        out = json_is_obj(args) ? json_clone(args) : json_obj();
     }
-    *commented_out = commented;
-    return ops;
-}
-
-/* JS === between operation items (arrays/objects only equal themselves) */
-static bool js_strict_eq(const json_t *a, const json_t *b) {
-    if (!a || !b) return a == b;
-    if (a->type != b->type) return false;
-    switch (a->type) {
-    case JSON_NULL: return true;
-    case JSON_BOOL: return a->u.b == b->u.b;
-    case JSON_NUMBER: return a->u.num.d == b->u.num.d;
-    case JSON_STRING: return a->u.str.len == b->u.str.len && !memcmp(a->u.str.s, b->u.str.s, a->u.str.len);
-    default: return a == b;
-    }
-}
-
-/* detectIndentFromContent (lsp/format-options.ts): *insert_spaces -1 unknown, 0 tabs, 1 spaces; *tab_size 0 unknown */
-static void detect_indent(const char *content, int *insert_spaces, int *tab_size) {
-    *insert_spaces = -1;
-    *tab_size = 0;
-    if (!*content) return;
-    bool in_block = false;
-    int prev = 0;
-    int counts[512] = {0};
-    strvec_t lines = str_split(content, "\n");
-    for (size_t i = 0; i < lines.n; i++) {
-        const char *line = lines.v[i];
-        char *body = js_trim(line);
-        if (!*body) {
-            free(body);
-            continue;
-        }
-        if (in_block) {
-            if (strstr(body, "*/")) in_block = false;
-            free(body);
-            continue;
-        }
-        if (str_starts(body, "/*") && !strstr(body + 2, "*/")) in_block = true;
-        free(body);
-        if (line[0] == '\t') {
-            if (*insert_spaces < 0) *insert_spaces = 0;
-            continue;
-        }
-        int width = 0;
-        while (line[width] == ' ') width++;
-        if (width > 0 && *insert_spaces < 0) *insert_spaces = 1;
-        if (width > prev) {
-            int step = width - prev;
-            if (step < 512) counts[step]++;
-        }
-        prev = width;
-    }
-    strvec_free(&lines);
-    if (*insert_spaces == 1) {
-        int best = 0, best_count = 0;
-        for (int s = 1; s < 512; s++)
-            if (counts[s] > best_count) {
-                best = s;
-                best_count = counts[s];
-            }
-        if (best > 0) *tab_size = best;
-    }
-}
-
-/* normalize: near-miss forms rewritten in place */
-static void normalize_op(json_t *op, const char *content) {
-    json_t *n0 = op_at(op, 0);
-    if (json_is_str(n0) && !strcmp(n0->u.str.s, "remove")) op_set(op, 0, json_str("delete"));
-    int name = op_index(op_at(op, 0));
-    size_t len = json_len(op);
-    json_t *a = op_at(op, 1), *b = op_at(op, 2), *c = op_at(op, 3), *d = op_at(op, 4);
-    if (name == OP_DELETE && len == 2) {
-        json_push(op, json_clone(a));
-    } else if (name == OP_SWAP && (len == 3 || (len == 5 && js_strict_eq(a, d) && js_strict_eq(b, c) && !js_strict_eq(a, b)))) {
-        json_t *ca = json_clone(a), *cb = json_clone(b);
-        while (json_len(op) > 1) json_free(json_arr_remove(op, json_len(op) - 1));
-        json_push(op, json_clone(ca));
-        json_push(op, ca);
-        json_push(op, json_clone(cb));
-        json_push(op, cb);
-    } else if (name == OP_INDENT || name == OP_DEDENT) {
-        if (len == 3) {
-            int spaces, size;
-            detect_indent(content, &spaces, &size);
-            if (spaces == 0) json_push(op, json_str("tab"));
-            else if (size > 0) json_push(op, json_num(size));
-        } else if (json_is_num(c) && c->u.num.d < 0) {
-            double amount = -c->u.num.d;
-            op_set(op, 0, json_str(name == OP_INDENT ? "dedent" : "indent"));
-            op_set(op, 3, json_num(amount));
+    size_t np;
+    const tparam_t *ps = tool_params(name, &np);
+    for (size_t i = 0; i < np; i++) {
+        json_t *v = json_get(out, ps[i].key);
+        if (v && v->type == JSON_NULL && ps[i].optional) {
+            json_del(out, ps[i].key);
+        } else if (json_is_str(v)) {
+            double d;
+            if (ps[i].type == 'b' && (str_eq(v->u.str.s, "true") || str_eq(v->u.str.s, "false")))
+                json_set_bool(out, ps[i].key, str_eq(v->u.str.s, "true"));
+            else if (ps[i].type == 'i' && integer_string(v->u.str.s, &d))
+                json_set(out, ps[i].key, json_num(d));
         }
     }
-}
-
-static bool shown_within(const magic_view_t *view, int from, int to) {
-    if (!view->partial) return true;
-    for (size_t i = 0; i < view->nshown; i++)
-        if (from >= view->shown[i].from && to <= view->shown[i].to) return true;
-    return false;
-}
-
-char *magic_block_hints(const char *content, int (*ranges)[2], size_t nr, const magic_view_t *view) {
-    strvec_t lv = file_lines(content);
-    char **lines = lv.v;
-    int n = (int)lv.n;
-    strvec_t hints = {0};
-    for (size_t r = 0; r < nr; r++) {
-        int start = ranges[r][0] - 1, stop = ranges[r][1] - 1;
-        if (start < 0 || stop >= n) continue;
-        while (start < stop && is_blank(lines[start])) start++;
-        while (stop > start && is_blank(lines[stop])) stop--;
-        /* blank lines open nothing */
-        if (is_blank(lines[start])) continue;
-        int end = block_end(lines, n, start, n);
-        if (end == start || end == stop || !shown_within(view, start, end)) continue;
-        /* unwrapping: the opening line goes alone, and another range takes the line that closes its block */
-        if (start == stop) {
-            bool unwrap = false;
-            for (size_t k = 0; k < nr && !unwrap; k++) unwrap = ranges[k][0] == end + 1 && ranges[k][1] == end + 1;
-            if (unwrap) continue;
-        }
-        bool whole = stop > end;
-        for (int at = end + 1; whole && at <= stop; at++) {
-            if (is_blank(lines[at])) continue;
-            int unit = block_end(lines, n, at, n);
-            whole = unit > at && unit <= stop && shown_within(view, at, unit);
-            at = unit;
-        }
-        if (whole) continue;
-        char *text = js_trim(lines[stop]);
-        size_t cut = utf16_prefix(text, 60);
-        char *shown = text[cut] ? xasprintf("%.*s\xe2\x80\xa6", (int)cut, text) : xstrdup(text);
-        strvec_push_own(&hints, xasprintf("line %d opens a block that ends on line %d, but the range ends on line %d (`%s`)",
-                                          start + 1, end + 1, stop + 1, shown));
-        free(shown);
-        free(text);
-    }
-    char *out = strvec_join(&hints, "; ");
-    strvec_free(&hints);
-    strvec_free(&lv);
     return out;
 }
 
-typedef struct {
-    int from, to; /* half-open, zero-based */
-    strvec_t lines;
-    size_t seq;
-} splice_t;
-typedef VEC(splice_t) splices_t;
-
-typedef struct {
-    int from, to;
-    char *prefix;
-    bool dedent;
-    size_t seq;
-} shift_t;
-typedef VEC(shift_t) shifts_t;
-
-typedef struct {
-    char **lines;
-    int n;
-    const magic_view_t *view;
-} cctx_t;
-
-static bool cvisible(const cctx_t *c, int from, int to) { return shown_within(c->view, from, to); }
-/* blank lines separate blocks; only shown lines count */
-static bool cblank(const cctx_t *c, int i) { return is_blank(c->lines[i]) && cvisible(c, i, i); }
-
-static bool opens_block(const char *line) {
-    const char *te = trim_end_ptr(line);
-    return te > line && strchr("[({:", te[-1]) && te[-1];
-}
-
-static bool closes_block(const char *line) {
-    const char *p = line + ws_run(line);
-    return *p == ']' || *p == ')' || *p == '}';
-}
-
-/* withSeparator: the lines that leave with [from, to), one run of blank lines included when set off on both sides */
-static void with_separator(const cctx_t *c, int from, int to, int *f, int *t, int *carried) {
-    *f = from;
-    *t = to;
-    *carried = 0;
-    if (from == to || cblank(c, from) || cblank(c, to - 1)) return;
-    int above = 0, below = 0;
-    while (from - above > 0 && cblank(c, from - above - 1)) above++;
-    while (to + below < c->n && cblank(c, to + below)) below++;
-    bool top = from - above == 0 || (above == 0 && opens_block(c->lines[from - 1]));
-    bool bottom = to + below == c->n || (below == 0 && closes_block(c->lines[to]));
-    if (above > 0 && below > 0) {
-        *carried = above < below ? above : below;
-        *t = to + *carried;
-    } else if (below > 0 && top) {
-        *t = to + below;
-        *carried = below;
-    } else if (above > 0 && bottom) {
-        *f = from - above;
-        *carried = above;
+/* JSON_PYTHON_LITERALS: Python's True/False/None outside strings as JSON's (the text when nothing is translated) */
+static char *translate_python_literals(const char *text, bool *changed) {
+    sb_t b = SB_INIT;
+    *changed = false;
+    for (size_t i = 0; text[i];) {
+        if (text[i] == '"') {
+            size_t k = i + 1;
+            while (text[k] && text[k] != '"') k += text[k] == '\\' && text[k + 1] ? 2 : 1;
+            if (text[k] == '"') { /* a whole string token stays as written */
+                sb_appendn(&b, text + i, k + 1 - i);
+                i = k + 1;
+                continue;
+            }
+        }
+        bool left = i == 0 || !word_ch((unsigned char)text[i - 1]);
+        static const char *const PY[3][2] = {{"True", "true"}, {"False", "false"}, {"None", "null"}};
+        bool done = false;
+        for (int w = 0; w < 3 && left && !done; w++) {
+            size_t n = strlen(PY[w][0]);
+            if (!strncmp(text + i, PY[w][0], n) && !word_ch((unsigned char)text[i + n])) {
+                sb_append(&b, PY[w][1]);
+                i += n;
+                done = *changed = true;
+            }
+        }
+        if (!done) sb_putc(&b, text[i++]);
     }
+    return sb_detach(&b);
 }
 
-static void core_range(const cctx_t *c, int *from, int *to) {
-    while (*from < *to && cblank(c, *from)) (*from)++;
-    while (*to > *from && cblank(c, *to - 1)) (*to)--;
+/* parseWrittenJson: JSON, else JSON with Python's literals outside strings translated; NULL when neither parses */
+static json_t *parse_written_json(const char *text) {
+    json_t *v = json_parse(text, strlen(text), NULL);
+    if (v) return v;
+    bool changed;
+    char *norm = translate_python_literals(text, &changed);
+    if (changed) v = json_parse(norm, strlen(norm), NULL);
+    free(norm);
+    return v;
 }
 
-static bool is_line_v(const json_t *v, int n) {
-    return json_is_num(v) && v->u.num.d == floor(v->u.num.d) && v->u.num.d >= 1 && v->u.num.d <= n;
-}
-static int line_of(const json_t *v) { return (int)v->u.num.d; }
-static bool is_text_v(const json_t *v) {
-    return json_is_str(v) && !memchr(v->u.str.s, '\r', v->u.str.len) && !memchr(v->u.str.s, 0, v->u.str.len) &&
-           strlen(v->u.str.s) == v->u.str.len;
-}
-static bool is_side_v(const json_t *v) { return json_is_str(v) && (!strcmp(v->u.str.s, "before") || !strcmp(v->u.str.s, "after")); }
-
-static void split_text(const char *s, strvec_t *out) {
-    strvec_t parts = str_split(s, "\n");
-    if (!parts.n) strvec_push(&parts, "");
-    for (size_t i = 0; i < parts.n; i++) strvec_push(out, parts.v[i]);
-    strvec_free(&parts);
+static json_t *written_call_new(const char *name, const json_t *params) {
+    json_t *c = json_obj();
+    json_set_str(c, "name", name);
+    json_set(c, "arguments", json_clone(params));
+    return c;
 }
 
-static int splice_cmp(const splice_t *a, const splice_t *b) {
-    if (a->from != b->from) return a->from < b->from ? -1 : 1;
-    if (a->to != b->to) return a->to < b->to ? -1 : 1;
-    return (a->seq > b->seq) - (a->seq < b->seq);
-}
-
-static int splice_qcmp(const void *a, const void *b) { return splice_cmp(a, b); }
-
-static int shift_qcmp(const void *a, const void *b) {
-    const shift_t *x = a, *y = b;
-    if (x->from != y->from) return x->from < y->from ? -1 : 1;
-    return (x->seq > y->seq) - (x->seq < y->seq);
-}
-
-static void push_range(magic_compiled_t *out, int first, int last) {
-    out->ranges = xrealloc(out->ranges, (out->nranges + 1) * sizeof(*out->ranges));
-    out->ranges[out->nranges][0] = first;
-    out->ranges[out->nranges][1] = last;
-    out->nranges++;
-}
-
-void magic_compiled_free(magic_compiled_t *c) {
-    free(c->old_s);
-    free(c->new_s);
-    free(c->ranges);
-    free(c->problem);
-    memset(c, 0, sizeof(*c));
-}
-
-void magic_compile(const char *reply, const char *content, const magic_view_t *view, bool cut, magic_compiled_t *out) {
-    memset(out, 0, sizeof(*out));
-    bool commented = false;
-    json_t *parsed = read_operations(reply, strlen(reply), &commented, 0);
-    /* a reply cut at the output limit counts only if commentary shows the model had finished its list */
-    if (!parsed || !json_len(parsed) || (cut && !commented)) {
-        json_free(parsed);
-        out->problem = xstrdup("Output only JSON operation arrays, one per line, and nothing else.");
-        return;
+/* writtenToolCall: one call spelled as JSON ({name, arguments}, {function, parameters}, the tool name as the only key,
+ * Gemma's arguments beside `function`), or NULL */
+static json_t *written_tool_call(const json_t *entry, int depth) {
+    if (!json_is_obj(entry) || depth > 32) return NULL;
+    const json_t *fn = json_get(entry, "function"), *name = json_get(entry, "name");
+    if (json_is_obj(fn)) return written_tool_call(fn, depth + 1);
+    const char *tool = json_is_str(name) ? name->u.str.s : json_is_str(fn) ? fn->u.str.s : NULL;
+    if (!tool) {
+        if (json_len(entry) != 1) return NULL;
+        const char *only = entry->u.obj.keys[0];
+        const json_t *params = entry->u.obj.vals[0];
+        return apply_tool(only) && json_is_obj(params) ? written_call_new(only, params) : NULL;
     }
-    if (!*content) {
-        json_free(parsed);
-        out->problem = xstrdup("Cannot anchor an edit in an empty file; use write instead.");
-        return;
+    /* parameters ?? arguments ?? the other keys */
+    const json_t *params = json_get(entry, "parameters");
+    if (json_is_null(params)) params = json_get(entry, "arguments");
+    json_t *owned = NULL;
+    if (json_is_null(params)) {
+        owned = json_obj();
+        const char *k;
+        json_t *v;
+        json_obj_foreach(entry, i, k, v) {
+            if (str_eq(k, "function") || str_eq(k, "name") || str_eq(k, "parameters") || str_eq(k, "arguments")) continue;
+            json_set(owned, k, json_clone(v));
+        }
+        params = owned;
     }
-    /* a repeated operation is the same request twice */
-    json_t *ops = json_arr();
-    strvec_t seen = {0};
-    while (json_len(parsed)) {
-        json_t *op = json_arr_remove(parsed, 0);
-        char *key = json_dump_js(op);
-        if (strvec_contains(&seen, key)) {
-            free(key);
-            json_free(op);
+    if (json_is_str(params)) {
+        json_t *parsed = parse_written_json(params->u.str.s);
+        json_free(owned);
+        owned = parsed;
+        params = parsed;
+    }
+    json_t *r = apply_tool(tool) && json_is_obj(params) ? written_call_new(tool, params) : NULL;
+    json_free(owned);
+    return r;
+}
+
+/* ---------- PythonCalls: a restricted literal grammar; never evaluates or recovers a partial call ---------- */
+
+typedef struct {
+    const char *s;
+    size_t len, at;
+} pyp_t;
+
+static void py_space(pyp_t *p) {
+    size_t w;
+    while (p->at < p->len && (w = ws_at(p->s + p->at))) p->at += w;
+}
+
+static bool py_take(pyp_t *p, const char *tok) {
+    py_space(p);
+    size_t n = strlen(tok);
+    if (p->len - p->at < n || memcmp(p->s + p->at, tok, n)) return false;
+    p->at += n;
+    return true;
+}
+
+/* IDENTIFIER /[A-Za-z_]\w*\/y (owned) or NULL */
+static char *py_ident(pyp_t *p) {
+    unsigned char c = (unsigned char)p->s[p->at];
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')) return NULL;
+    size_t st = p->at++;
+    while (p->at < p->len && word_ch((unsigned char)p->s[p->at])) p->at++;
+    return xstrndup(p->s + st, p->at - st);
+}
+
+static int hexv(char c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+static void put_cp(sb_t *b, uint32_t cp) {
+    if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD; /* a lone surrogate has no UTF-8 form */
+    char u[4];
+    int n = utf8_encode(cp, u);
+    sb_appendn(b, u, (size_t)n);
+}
+
+/* a Python string literal: '…', "…", '''…''' or """…""" (owned json string, NUL bytes kept) or NULL */
+static json_t *py_string(pyp_t *p, char quote) {
+    char triple[4] = {quote, quote, quote, 0};
+    size_t dl = p->len - p->at >= 3 && !memcmp(p->s + p->at, triple, 3) ? 3 : 1;
+    p->at += dl;
+    sb_t b = SB_INIT;
+    while (p->at < p->len) {
+        if (p->len - p->at >= dl && !memcmp(p->s + p->at, triple, dl)) {
+            p->at += dl;
+            json_t *v = json_strn(b.s ? b.s : "", b.len);
+            sb_free(&b);
+            return v;
+        }
+        char c = p->s[p->at];
+        if (c == '\\') {
+            size_t q = p->at + 1;
+            if (q >= p->len) break;
+            char e = p->s[q];
+            if (e == '\r' && q + 1 < p->len && p->s[q + 1] == '\n') { /* a line continuation */
+                p->at = q + 2;
+                continue;
+            }
+            if (e == '\n') {
+                p->at = q + 1;
+                continue;
+            }
+            if (e >= '0' && e <= '7') {
+                uint32_t v = 0;
+                size_t k = q;
+                while (k < p->len && k < q + 3 && p->s[k] >= '0' && p->s[k] <= '7') v = v * 8 + (uint32_t)(p->s[k++] - '0');
+                put_cp(&b, v);
+                p->at = k;
+                continue;
+            }
+            if (e == 'x' || e == 'u' || e == 'U') {
+                size_t need = e == 'x' ? 2 : e == 'u' ? 4 : 8, k = q + 1;
+                uint64_t v = 0;
+                while (k < p->len && k < q + 1 + need && hexv(p->s[k]) >= 0) v = v * 16 + (uint64_t)hexv(p->s[k++]);
+                if (k != q + 1 + need || v > 0x10FFFF) break; /* `\x` without its digits, or past Unicode */
+                put_cp(&b, (uint32_t)v);
+                p->at = k;
+                continue;
+            }
+            if (e == 'N') break; /* named Unicode escapes need Python's name table */
+            static const char SIMPLE[] = "abfnrtv'\"\\";
+            static const char MAPPED[] = "\a\b\f\n\r\t\v'\"\\";
+            const char *hit = e ? strchr(SIMPLE, e) : NULL;
+            size_t el = u8len(p->s + q, p->len - q);
+            if (hit) sb_putc(&b, MAPPED[hit - SIMPLE]);
+            else sb_appendn(&b, p->s + p->at, 1 + el); /* an unknown escape stays as written */
+            p->at = q + el;
             continue;
         }
-        strvec_push_own(&seen, key);
-        json_push(ops, op);
+        if (dl == 1 && (c == '\n' || c == '\r')) break;
+        sb_putc(&b, c);
+        p->at++;
     }
-    strvec_free(&seen);
+    sb_free(&b);
+    return NULL;
+}
+
+/* INTEGER /[+-]?(?:0x_?[\da-f](?:_?[\da-f])*|0o…|0b…|\d(?:_?\d)*)/iy as a safe integer, or false */
+static bool py_integer(pyp_t *p, double *out) {
+    size_t i = p->at;
+    int sign = 1;
+    if (i < p->len && (p->s[i] == '+' || p->s[i] == '-')) sign = p->s[i++] == '-' ? -1 : 1;
+    int base = 10;
+    if (i + 1 < p->len && p->s[i] == '0') {
+        char k = (char)tolower((unsigned char)p->s[i + 1]);
+        base = k == 'x' ? 16 : k == 'o' ? 8 : k == 'b' ? 2 : 10;
+    }
+    size_t j = i;
+    uint64_t v = 0;
+    bool over = false;
+    if (base != 10) {
+        size_t k = i + 2;
+        if (k < p->len && p->s[k] == '_') k++;
+        int d = k < p->len ? hexv(p->s[k]) : -1;
+        if (d < 0 || d >= base) base = 10; /* `0b2`: the prefix does not form a literal; `0` does */
+        else {
+            j = k;
+            for (;;) {
+                d = j < p->len ? hexv(p->s[j]) : -1;
+                if (d < 0 || d >= base) {
+                    if (j + 1 < p->len && p->s[j] == '_' && (d = hexv(p->s[j + 1])) >= 0 && d < base) {
+                        j++;
+                        continue;
+                    }
+                    break;
+                }
+                if (v > (UINT64_MAX - (uint64_t)d) / (uint64_t)base) over = true;
+                else v = v * (uint64_t)base + (uint64_t)d;
+                j++;
+            }
+        }
+    }
+    if (base == 10) {
+        j = i;
+        if (j >= p->len || !digit_ch((unsigned char)p->s[j])) return false;
+        for (;;) {
+            if (j < p->len && digit_ch((unsigned char)p->s[j])) {
+                uint64_t d = (uint64_t)(p->s[j] - '0');
+                if (v > (UINT64_MAX - d) / 10) over = true;
+                else v = v * 10 + d;
+                j++;
+            } else if (j + 1 < p->len && p->s[j] == '_' && digit_ch((unsigned char)p->s[j + 1]) && j > i) {
+                j++;
+            } else {
+                break;
+            }
+        }
+    }
+    if (over || v > 9007199254740991ULL) return false;
+    p->at = j;
+    *out = sign * (double)v;
+    return true;
+}
+
+/* a literal: string, True/False/None (or true/false/null), safe integer; NULL for anything else */
+static json_t *py_literal(pyp_t *p) {
+    py_space(p);
+    if (p->at >= p->len) return NULL;
+    char q = p->s[p->at];
+    if (q == '"' || q == '\'') return py_string(p, q);
+    char *word = py_ident(p);
+    if (word) {
+        json_t *v = NULL;
+        if (str_eq(word, "True") || str_eq(word, "true")) v = json_bool(true);
+        else if (str_eq(word, "False") || str_eq(word, "false")) v = json_bool(false);
+        else if (str_eq(word, "None") || str_eq(word, "null")) v = json_null();
+        free(word);
+        return v;
+    }
+    double d;
+    return py_integer(p, &d) ? json_num(d) : NULL;
+}
+
+static json_t *py_call(pyp_t *p) {
+    char *name = py_ident(p);
+    if (!name || !apply_tool(name) || !py_take(p, "(")) {
+        free(name);
+        return NULL;
+    }
+    json_t *args = json_obj();
+    while (!py_take(p, ")")) {
+        char *key = py_ident(p);
+        if (!key || json_get(args, key) || !py_take(p, "=")) {
+            free(key);
+            json_free(args);
+            free(name);
+            return NULL;
+        }
+        json_t *v = py_literal(p);
+        if (!v) {
+            free(key);
+            json_free(args);
+            free(name);
+            return NULL;
+        }
+        json_set(args, key, v);
+        free(key);
+        if (py_take(p, ")")) break;
+        if (!py_take(p, ",")) {
+            json_free(args);
+            free(name);
+            return NULL;
+        }
+    }
+    json_t *c = json_obj();
+    json_set_str(c, "name", name);
+    json_set(c, "arguments", args);
+    free(name);
+    return c;
+}
+
+/* PythonCalls.parse: the whole text is one call or a list of calls (owned array) or NULL */
+static json_t *py_parse(const char *text, size_t len) {
+    pyp_t p = {text, len, 0};
+    bool list = py_take(&p, "[");
+    json_t *calls = json_arr();
+    for (;;) {
+        if (list && py_take(&p, "]")) break;
+        json_t *c = py_call(&p);
+        if (!c) {
+            json_free(calls);
+            return NULL;
+        }
+        json_push(calls, c);
+        if (!list || py_take(&p, "]")) break;
+        if (!py_take(&p, ",")) {
+            json_free(calls);
+            return NULL;
+        }
+    }
+    py_space(&p);
+    if (p.at != p.len) {
+        json_free(calls);
+        return NULL;
+    }
+    return calls;
+}
+
+/* PYTHON_START /^\s*(?:\[\s*)?(?:read|search|replace)\s*\(/ */
+static bool python_start(const char *s) {
+    s += ws_run(s);
+    if (*s == '[') {
+        s++;
+        s += ws_run(s);
+    }
+    size_t n = str_starts(s, "read") ? 4 : str_starts(s, "search") ? 6 : str_starts(s, "replace") ? 7 : 0;
+    if (!n) return false;
+    s += n;
+    s += ws_run(s);
+    return *s == '(';
+}
+
+/* JSON_START /^\s*(?:\[\s*)?\{\s*"(?:name|function|arguments|parameters|read|search|replace)"/ */
+static bool json_start(const char *s) {
+    s += ws_run(s);
+    if (*s == '[') {
+        s++;
+        s += ws_run(s);
+    }
+    if (*s++ != '{') return false;
+    s += ws_run(s);
+    if (*s++ != '"') return false;
+    static const char *const KEYS[] = {"name", "function", "arguments", "parameters", "read", "search", "replace"};
+    for (size_t i = 0; i < sizeof KEYS / sizeof *KEYS; i++) {
+        size_t n = strlen(KEYS[i]);
+        if (!strncmp(s, KEYS[i], n) && s[n] == '"') return true;
+    }
+    return false;
+}
+
+static void push_calls(json_t *calls, json_t *parsed) {
+    if (!parsed) return;
+    while (json_len(parsed)) json_push(calls, json_arr_remove(parsed, 0));
     json_free(parsed);
+}
 
-    strvec_t lv = file_lines(content);
-    int n = (int)lv.n;
-    cctx_t c = {lv.v, n, view};
-    splices_t splices = {0};
-    shifts_t shifts = {0};
-    VEC(magic_span_t) moved = {0};
-    char **subs = xcalloc((size_t)n + 1, sizeof(char *));
-    ints_t sub_order = {0};
-    strvec_t *inserts = xcalloc((size_t)n + 2, sizeof(strvec_t));
-    ints_t ins_order = {0};
-    size_t seq = 0;
-    char *problem = NULL;
+/* bare lines outside fences: a Python call line runs; a JSON-looking line only counts as an attempt */
+static void parse_bare(const char *s, size_t n, json_t *calls, bool *attempted) {
+    char *outside = xstrndup(s, n);
+    strvec_t lines = str_split(outside, "\n");
+    for (size_t i = 0; i < lines.n; i++) {
+        if (python_start(lines.v[i])) {
+            *attempted = true;
+            push_calls(calls, py_parse(lines.v[i], strlen(lines.v[i])));
+        } else if (json_start(lines.v[i])) {
+            *attempted = true;
+        }
+    }
+    strvec_free(&lines);
+    free(outside);
+}
 
-    for (size_t index = 0; index < json_len(ops) && !problem; index++) {
-        json_t *op = json_at(ops, index);
-        /* problems quote the operation as the model wrote it */
-        char *written = json_dump_js(op);
-#define PROBLEM(...)                                                                                                   \
-    do {                                                                                                               \
-        char *reason_ = xasprintf(__VA_ARGS__);                                                                        \
-        problem = xasprintf("Operation %zu (%s): %s", index + 1, written, reason_);                                    \
-        free(reason_);                                                                                                 \
-    } while (0)
-        if (!json_is_arr(op)) {
-            PROBLEM("expected an operation array.");
-            free(written);
-            break;
-        }
-        normalize_op(op, content);
-        int name = op_index(op_at(op, 0));
-        if (name < 0) {
-            PROBLEM("unknown operation; use one of delete, replace, sub, insert, move, swap, indent, dedent.");
-            free(written);
-            break;
-        }
-        const char *form = OP_FORMS[name];
-        size_t len = json_len(op);
-#define MALFORMED() PROBLEM("expected %s.", form)
-        /* range(first, last): half-open zero-based span, recorded for blockHints when it deletes/moves/swaps */
-#define RANGE(fv, lv_, ok_, f_, t_)                                                                                     \
-    do {                                                                                                               \
-        ok_ = is_line_v(fv, n) && is_line_v(lv_, n) && line_of(fv) <= line_of(lv_);                                    \
-        if (ok_) {                                                                                                     \
-            f_ = line_of(fv) - 1;                                                                                      \
-            t_ = line_of(lv_);                                                                                         \
-            if (name == OP_DELETE || name == OP_MOVE || name == OP_SWAP) push_range(out, line_of(fv), line_of(lv_));   \
-        }                                                                                                              \
-    } while (0)
-#define HIDDEN(f_, t_) (!cvisible(&c, (f_), (t_) - 1))
-        switch (name) {
-        case OP_DELETE: {
-            bool ok = false;
-            int f = 0, t = 0;
-            if (len == 3) RANGE(op_at(op, 1), op_at(op, 2), ok, f, t);
-            if (!ok) {
-                MALFORMED();
-                break;
+/* FENCE_LINE /^[\t ]*(`{3,}|~{3,})([^\r\n]*)\r?$/gm from `from`: match start, length, marker and tag span */
+static bool next_fence(const char *t, size_t len, size_t from, size_t *idx, size_t *mlen, size_t *ma, size_t *mb,
+                       size_t *ta, size_t *tb) {
+    for (size_t i = from; i < len; i++) {
+        if (!line_start(t, i)) continue;
+        size_t k = i;
+        while (k < len && (t[k] == ' ' || t[k] == '\t')) k++;
+        char c = t[k];
+        if (c != '`' && c != '~') continue;
+        size_t m = k;
+        while (m < len && t[m] == c) m++;
+        if (m - k < 3) continue;
+        size_t e = m;
+        while (e < len && t[e] != '\r' && t[e] != '\n') e++;
+        size_t end = e;
+        if (e < len && t[e] == '\r' && (e + 1 >= len || t[e + 1] == '\n')) end = e + 1;
+        *idx = i;
+        *mlen = end - i;
+        *ma = k;
+        *mb = m;
+        *ta = m;
+        *tb = e;
+        return true;
+    }
+    return false;
+}
+
+json_t *magic_parse_written_calls(const char *text, bool *attempted) {
+    json_t *calls = json_arr();
+    *attempted = false;
+    size_t len = strlen(text), from = 0, pos = 0;
+    bool fenced = false, tool_fence = false;
+    size_t fma = 0, fmb = 0; /* the open fence's marker */
+    size_t idx, mlen, ma, mb, ta, tb;
+    while (next_fence(text, len, pos, &idx, &mlen, &ma, &mb, &ta, &tb)) {
+        pos = idx + mlen;
+        char *tagraw = xstrndup(text + ta, tb - ta);
+        char *tag = js_trim(tagraw);
+        free(tagraw);
+        if (!fenced) {
+            parse_bare(text + (from < idx ? from : idx), from < idx ? idx - from : 0, calls, attempted);
+            fenced = true;
+            fma = ma;
+            fmb = mb;
+            tool_fence = str_eq(tag, "tool_code") || str_eq(tag, "tool_response");
+        } else {
+            /* a closing fence repeats the opening marker (or a longer run of it) and carries no tag */
+            bool closes = mb - ma >= fmb - fma && text[ma] == text[fma] && !*tag;
+            if (!closes) {
+                free(tag);
+                continue;
             }
-            if (HIDDEN(f, t)) {
-                PROBLEM("range includes lines not shown.");
-                break;
-            }
-            int sf, st, carried;
-            with_separator(&c, f, t, &sf, &st, &carried);
-            splice_t s = {sf, st, {0}, seq++};
-            vec_push(&splices, s);
-            break;
-        }
-        case OP_REPLACE: {
-            bool ok = false;
-            int f = 0, t = 0;
-            if (len == 4) RANGE(op_at(op, 1), op_at(op, 2), ok, f, t);
-            if (!ok || !is_text_v(op_at(op, 3))) {
-                MALFORMED();
-                break;
-            }
-            if (HIDDEN(f, t)) {
-                PROBLEM("range includes lines not shown.");
-                break;
-            }
-            splice_t s = {f, t, {0}, seq++};
-            split_text(op_at(op, 3)->u.str.s, &s.lines);
-            vec_push(&splices, s);
-            break;
-        }
-        case OP_SUB: {
-            json_t *line = op_at(op, 1), *old = op_at(op, 2), *rep = op_at(op, 3);
-            bool all = json_is_str(line) && !strcmp(line->u.str.s, "all");
-            if (len != 4 || (!all && !is_line_v(line, n)) || !is_text_v(old) || !old->u.str.len || !is_text_v(rep)) {
-                MALFORMED();
-                break;
-            }
-            const char *os = old->u.str.s, *rs = rep->u.str.s;
-            if (strchr(os, '\n') || strchr(rs, '\n')) {
-                PROBLEM("sub changes text within one line.");
-                break;
-            }
-#define CURRENT(at) (subs[at] ? subs[at] : c.lines[at])
-#define SET_SUB(at)                                                                                                    \
-    do {                                                                                                               \
-        char *next_ = js_replace_all(CURRENT(at), os, rs);                                                             \
-        if (!subs[at]) vec_push(&sub_order, (at));                                                                     \
-        free(subs[at]);                                                                                                \
-        subs[at] = next_;                                                                                              \
-    } while (0)
-            if (all) {
-                bool found = false;
-                for (int at = 0; at < n; at++) {
-                    if (!strstr(CURRENT(at), os)) continue;
-                    SET_SUB(at);
-                    found = true;
-                }
-                if (!found) {
-                    sb_t q = SB_INIT;
-                    json_js_quote_sb(&q, os, strlen(os));
-                    PROBLEM("the file does not contain %s.", q.s);
-                    sb_free(&q);
-                }
-                break;
-            }
-            int ln = line_of(line);
-            if (HIDDEN(ln - 1, ln)) {
-                PROBLEM("line is not shown.");
-                break;
-            }
-            if (!strstr(CURRENT(ln - 1), os)) {
-                ints_t holders = {0};
-                for (int at = 0; at < n; at++)
-                    if (strstr(c.lines[at], os) && cvisible(&c, at, at)) vec_push(&holders, at);
-                /* the line number is a hint: text that only one shown line holds is meant there */
-                if (holders.n == 1) {
-                    int at = holders.v[0];
-                    SET_SUB(at);
-                    vec_free(&holders);
-                    break;
-                }
-                int gap = INT32_MAX;
-                for (size_t k = 0; k < holders.n; k++) {
-                    int g = abs(holders.v[k] + 1 - ln);
-                    if (g < gap) gap = g;
-                }
-                sb_t where = SB_INIT;
-                for (size_t k = 0; k < holders.n; k++)
-                    if (abs(holders.v[k] + 1 - ln) == gap)
-                        sb_appendf(&where, "%s%d", where.len ? " or " : "; the nearest line that does is ", holders.v[k] + 1);
-                sb_t q = SB_INIT;
-                json_js_quote_sb(&q, os, strlen(os));
-                PROBLEM("line %d does not contain %s%s.", ln, q.s, sb_cstr(&where));
-                sb_free(&q);
-                sb_free(&where);
-                vec_free(&holders);
-                break;
-            }
-            SET_SUB(ln - 1);
-#undef SET_SUB
-#undef CURRENT
-            break;
-        }
-        case OP_INSERT: {
-            json_t *side = op_at(op, 1), *line = op_at(op, 2), *text = op_at(op, 3);
-            if (len != 4 || !is_side_v(side) || !is_line_v(line, n) || !is_text_v(text)) {
-                MALFORMED();
-                break;
-            }
-            int ln = line_of(line);
-            if (HIDDEN(ln - 1, ln)) {
-                PROBLEM("anchor line is not shown.");
-                break;
-            }
-            int at = !strcmp(side->u.str.s, "before") ? ln - 1 : ln;
-            if (!inserts[at].n && !inserts[at].v) vec_push(&ins_order, at);
-            if (!inserts[at].v) inserts[at].v = xcalloc(1, sizeof(char *)), inserts[at].cap = 1;
-            split_text(text->u.str.s, &inserts[at]);
-            break;
-        }
-        case OP_MOVE: {
-            json_t *first = op_at(op, 1), *last = op_at(op, 2), *side = op_at(op, 3), *line = op_at(op, 4);
-            bool ok = false;
-            int f = 0, t = 0;
-            if (len == 5 && is_side_v(side) && is_line_v(line, n)) RANGE(first, last, ok, f, t);
-            if (!ok) {
-                MALFORMED();
-                break;
-            }
-            int ln = line_of(line);
-            if (HIDDEN(f, t) || HIDDEN(ln - 1, ln)) {
-                PROBLEM("range or destination is not shown.");
-                break;
-            }
-            int bf = f, bt = t;
-            core_range(&c, &bf, &bt);
-            if (bf == bt) {
-                PROBLEM("the range holds only blank lines.");
-                break;
-            }
-            int sf, st, carried;
-            with_separator(&c, bf, bt, &sf, &st, &carried);
-            bool before = !strcmp(side->u.str.s, "before");
-            int at = before ? ln - 1 : ln;
-            if (at > sf && at < st) {
-                PROBLEM("the destination is inside the moved lines.");
-                break;
-            }
-            if (at == sf || at == st) {
-                PROBLEM("lines %d-%d are already %s line %d (blank lines between blocks stay as separators), so nothing "
-                        "moves; to exchange two blocks, use swap.",
-                        line_of(first), line_of(last), side->u.str.s, ln);
-                break;
-            }
-            /* a block set off by blank lines is set off again where it lands, except right inside a block */
-            int pad_above = carried > 0 && at - 1 >= 0 && at - 1 < n && !cblank(&c, at - 1) && !opens_block(c.lines[at - 1]) ? carried : 0;
-            int pad_below = carried > 0 && at >= 0 && at < n && !cblank(&c, at) && !closes_block(c.lines[at]) ? carried : 0;
-            splice_t rm = {sf, st, {0}, seq++};
-            vec_push(&splices, rm);
-            splice_t ins = {at, at, {0}, seq++};
-            for (int k = 0; k < pad_above; k++) strvec_push(&ins.lines, "");
-            for (int k = bf; k < bt; k++) strvec_push(&ins.lines, c.lines[k]);
-            for (int k = 0; k < pad_below; k++) strvec_push(&ins.lines, "");
-            vec_push(&splices, ins);
-            magic_span_t mv = {sf, st};
-            vec_push(&moved, mv);
-            break;
-        }
-        case OP_SWAP: {
-            bool ok1 = false, ok2 = false;
-            int f1 = 0, t1 = 0, f2 = 0, t2 = 0;
-            if (len == 5) {
-                RANGE(op_at(op, 1), op_at(op, 2), ok1, f1, t1);
-                RANGE(op_at(op, 3), op_at(op, 4), ok2, f2, t2);
-            }
-            if (!ok1 || !ok2) {
-                MALFORMED();
-                break;
-            }
-            if (HIDDEN(f1, t1) || HIDDEN(f2, t2)) {
-                PROBLEM("a range includes lines not shown.");
-                break;
-            }
-            /* blank lines at the edges are separators, not content: they stay in place */
-            core_range(&c, &f1, &t1);
-            core_range(&c, &f2, &t2);
-            if (f2 < f1) {
-                int tf = f1, tt = t1;
-                f1 = f2;
-                t1 = t2;
-                f2 = tf;
-                t2 = tt;
-            }
-            if (f1 == t1 || f2 == t2) {
-                PROBLEM("a range holds only blank lines.");
-                break;
-            }
-            if (f2 < t1) {
-                PROBLEM("the two ranges overlap.");
-                break;
-            }
-            splice_t s1 = {f1, t1, {0}, seq++}, s2 = {f2, t2, {0}, seq++};
-            for (int k = f2; k < t2; k++) strvec_push(&s1.lines, c.lines[k]);
-            for (int k = f1; k < t1; k++) strvec_push(&s2.lines, c.lines[k]);
-            vec_push(&splices, s1);
-            vec_push(&splices, s2);
-            magic_span_t m1 = {f1, t1}, m2 = {f2, t2};
-            vec_push(&moved, m1);
-            vec_push(&moved, m2);
-            break;
-        }
-        case OP_INDENT:
-        case OP_DEDENT: {
-            json_t *amount = op_at(op, 3);
-            bool ok = false;
-            int f = 0, t = 0;
-            if (len == 4) RANGE(op_at(op, 1), op_at(op, 2), ok, f, t);
-            bool tab = json_is_str(amount) && !strcmp(amount->u.str.s, "tab");
-            bool spaces = json_is_num(amount) && amount->u.num.d == floor(amount->u.num.d) && amount->u.num.d >= 1 &&
-                          amount->u.num.d <= 64;
-            if (!ok || (!tab && !spaces)) {
-                MALFORMED();
-                break;
-            }
-            if (HIDDEN(f, t)) {
-                PROBLEM("range includes lines not shown.");
-                break;
-            }
-            shift_t s = {f, t, NULL, name == OP_DEDENT, seq++};
-            if (tab) {
-                s.prefix = xstrdup("\t");
+            char *body = xstrndup(text + (from < idx ? from : idx), from < idx ? idx - from : 0);
+            if (python_start(body)) {
+                *attempted = true;
+                push_calls(calls, py_parse(body, strlen(body)));
             } else {
-                int k = (int)amount->u.num.d;
-                s.prefix = xmalloc((size_t)k + 1);
-                memset(s.prefix, ' ', (size_t)k);
-                s.prefix[k] = 0;
+                if (tool_fence || json_start(body)) *attempted = true;
+                json_t *v = parse_written_json(body);
+                if (json_is_arr(v)) {
+                    json_t *e;
+                    json_arr_foreach(v, i, e) {
+                        json_t *c = written_tool_call(e, 0);
+                        if (c) json_push(calls, c);
+                    }
+                } else if (v) {
+                    json_t *c = written_tool_call(v, 0);
+                    if (c) json_push(calls, c);
+                }
+                json_free(v);
             }
-            vec_push(&shifts, s);
+            free(body);
+            fenced = false;
+        }
+        free(tag);
+        from = idx + mlen + 1;
+    }
+    const char *rest = text + (from < len ? from : len);
+    if (fenced) {
+        if (tool_fence || python_start(rest) || json_start(rest)) *attempted = true;
+    } else {
+        parse_bare(rest, strlen(rest), calls, attempted);
+    }
+    return calls;
+}
+
+/* ======================================================================================
+ * syntax: tree-sitter-json's grammar (omp's parseCodeStatus for `.json`)
+ * ====================================================================================== */
+
+/* extras: ASCII whitespace (omp's parser takes no Unicode space between tokens) and comments (`// …`, block
+ * comments); false on an unterminated comment */
+static bool tsj_skip(const char *s, size_t len, size_t *i) {
+    for (;;) {
+        if (*i >= len) return true;
+        unsigned char c = (unsigned char)s[*i];
+        if (c == ' ' || (c >= 9 && c <= 13)) {
+            (*i)++;
+            continue;
+        }
+        if (c == '/' && *i + 1 < len && s[*i + 1] == '/') {
+            while (*i < len && s[*i] != '\n') (*i)++;
+            continue;
+        }
+        if (c == '/' && *i + 1 < len && s[*i + 1] == '*') {
+            size_t k = *i + 2;
+            while (k + 1 < len && !(s[k] == '*' && s[k + 1] == '/')) k++;
+            if (k + 1 >= len) return false;
+            *i = k + 2;
+            continue;
+        }
+        return true;
+    }
+}
+
+/* string: `"` (string_content /[^\\"\n]+/ | escape_sequence /\\["\\\/bfnrtu]/)* `"` */
+static bool tsj_string(const char *s, size_t len, size_t *i) {
+    size_t k = *i + 1;
+    while (k < len) {
+        char c = s[k];
+        if (c == '"') {
+            *i = k + 1;
+            return true;
+        }
+        if (c == '\n') return false;
+        if (c == '\\') {
+            if (k + 1 >= len || !strchr("\"\\/bfnrtu", s[k + 1]) || !s[k + 1]) return false;
+            k += 2;
+            continue;
+        }
+        k++;
+    }
+    return false;
+}
+
+/* number: -?(0|[1-9]\d*)(\.\d*)?([eE]-?\d+)? as one token (longest match; `1e+5` is not one) */
+static bool tsj_number(const char *s, size_t len, size_t *i) {
+    size_t k = *i;
+    if (k < len && s[k] == '-') k++;
+    if (k >= len || !digit_ch((unsigned char)s[k])) return false;
+    if (s[k] == '0') k++;
+    else
+        while (k < len && digit_ch((unsigned char)s[k])) k++;
+    if (k < len && s[k] == '.') {
+        k++;
+        while (k < len && digit_ch((unsigned char)s[k])) k++;
+    }
+    if (k < len && (s[k] == 'e' || s[k] == 'E')) {
+        size_t e = k + 1;
+        if (e < len && s[e] == '-') e++;
+        if (e < len && digit_ch((unsigned char)s[e])) {
+            while (e < len && digit_ch((unsigned char)s[e])) e++;
+            k = e;
+        }
+    }
+    *i = k;
+    return true;
+}
+
+static bool tsj_scalar(const char *s, size_t len, size_t *i) {
+    char c = s[*i];
+    if (c == '"') return tsj_string(s, len, i);
+    static const char *const WORDS[] = {"true", "false", "null"};
+    for (int w = 0; w < 3; w++) {
+        size_t n = strlen(WORDS[w]);
+        if (len - *i >= n && !memcmp(s + *i, WORDS[w], n)) {
+            *i += n;
+            return true;
+        }
+    }
+    return tsj_number(s, len, i);
+}
+
+/* document: repeat(value) without an ERROR or MISSING node */
+static bool tsjson_parses(const char *s, size_t len) {
+    enum { W_VALUE, W_VALUE_OR_CLOSE, W_KEY_OR_CLOSE, W_KEY, W_COLON, W_COMMA_OR_CLOSE };
+    VEC(char) st = {0};
+    int want = W_VALUE;
+    size_t i = 0;
+    bool ok = true;
+    for (;;) {
+        if (!tsj_skip(s, len, &i)) {
+            ok = false;
             break;
         }
+        if (i >= len) {
+            ok = st.n == 0;
+            break;
         }
-#undef HIDDEN
-#undef RANGE
-#undef MALFORMED
-#undef PROBLEM
-        free(written);
+        char c = s[i];
+        if (want == W_VALUE_OR_CLOSE && c == ']') {
+            st.n--;
+            i++;
+            want = st.n ? W_COMMA_OR_CLOSE : W_VALUE;
+            continue;
+        }
+        if (want == W_KEY_OR_CLOSE && c == '}') {
+            st.n--;
+            i++;
+            want = st.n ? W_COMMA_OR_CLOSE : W_VALUE;
+            continue;
+        }
+        if (want == W_VALUE || want == W_VALUE_OR_CLOSE) {
+            if (c == '{' || c == '[') {
+                vec_push(&st, c);
+                i++;
+                want = c == '{' ? W_KEY_OR_CLOSE : W_VALUE_OR_CLOSE;
+                continue;
+            }
+            if (!tsj_scalar(s, len, &i)) {
+                ok = false;
+                break;
+            }
+            want = st.n ? W_COMMA_OR_CLOSE : W_VALUE;
+            continue;
+        }
+        if (want == W_KEY || want == W_KEY_OR_CLOSE) {
+            if (c != '"' || !tsj_string(s, len, &i)) {
+                ok = false;
+                break;
+            }
+            want = W_COLON;
+            continue;
+        }
+        if (want == W_COLON) {
+            if (c != ':') {
+                ok = false;
+                break;
+            }
+            i++;
+            want = W_VALUE;
+            continue;
+        }
+        /* W_COMMA_OR_CLOSE */
+        char top = vec_last(&st);
+        if (c == ',') {
+            i++;
+            want = top == '{' ? W_KEY : W_VALUE;
+            continue;
+        }
+        if ((c == '}' && top == '{') || (c == ']' && top == '[')) {
+            st.n--;
+            i++;
+            want = st.n ? W_COMMA_OR_CLOSE : W_VALUE;
+            continue;
+        }
+        ok = false;
+        break;
     }
+    vec_free(&st);
+    return ok;
+}
 
-    if (!problem) {
-        for (size_t k = 0; k < sub_order.n; k++) {
-            int at = sub_order.v[k];
-            splice_t s = {at, at + 1, {0}, seq++};
-            strvec_push(&s.lines, subs[at]);
-            vec_push(&splices, s);
-        }
-        for (size_t k = 0; k < ins_order.n; k++) {
-            int at = ins_order.v[k];
-            splice_t s = {at, at, inserts[at], seq++};
-            inserts[at] = (strvec_t){0};
-            vec_push(&splices, s);
-        }
-        if (splices.n) qsort(splices.v, splices.n, sizeof(splice_t), splice_qcmp);
-        for (size_t i = 1; i < splices.n && !problem; i++) {
-            splice_t *prev = &splices.v[i - 1], *next = &splices.v[i];
-            if (next->from < prev->to || (next->from == next->to && prev->from == next->from))
-                problem = xstrdup("Two operations touch the same lines or insert at the same place. Give each line at "
-                                  "most one operation, numbered against the original file.");
-        }
-    }
-    if (!problem) {
-        if (shifts.n) qsort(shifts.v, shifts.n, sizeof(shift_t), shift_qcmp);
-        for (size_t i = 0; i < shifts.n && !problem; i++) {
-            if (i > 0 && shifts.v[i].from < shifts.v[i - 1].to) problem = xstrdup("Indentation ranges overlap.");
-            for (size_t k = 0; k < moved.n && !problem; k++)
-                if (moved.v[k].from < shifts.v[i].to && moved.v[k].to > shifts.v[i].from)
-                    problem = xstrdup("Indentation ranges must not overlap lines that move or swap.");
-        }
-    }
-    if (!problem) {
-        /* keep one neighbouring line at each end to anchor empty lines and insertions; fall back to the complete
-         * snapshot if that span occurs more than once */
-        int lo = splices.n ? splices.v[0].from : n, slo = shifts.n ? shifts.v[0].from : n;
-        int hi = splices.n ? vec_last(&splices).to : 0, shi = shifts.n ? vec_last(&shifts).to : 0;
-        int from = (lo < slo ? lo : slo) - 1;
-        if (from < 0) from = 0;
-        int to = (hi > shi ? hi : shi) + 1;
-        if (to > n) to = n;
-        bool final_nl = str_ends(content, "\n");
-        sb_t old = SB_INIT;
-        for (int i = from; i < to; i++) {
-            if (i > from) sb_putc(&old, '\n');
-            sb_append(&old, c.lines[i]);
-        }
-        if (to < n || final_nl) sb_putc(&old, '\n');
-        const char *first = old.len ? strstr(content, old.s) : NULL;
-        if (!old.len || !first || strstr(first + 1, old.s)) {
-            from = 0;
-            to = n;
-            sb_clear(&old);
-            sb_append(&old, content);
-        }
-        strvec_t rep = {0};
-        int cursor = from;
-        size_t si = 0;
-        splice_t sentinel = {to, to, {0}, 0};
-        for (size_t k = 0; k <= splices.n && !problem; k++) {
-            const splice_t *sp = k < splices.n ? &splices.v[k] : &sentinel;
-            while (cursor < sp->from) {
-                const char *line = c.lines[cursor];
-                while (si < shifts.n && shifts.v[si].to <= cursor) si++;
-                const shift_t *sh = si < shifts.n ? &shifts.v[si] : NULL;
-                if (!sh || sh->from > cursor || is_blank(line)) strvec_push(&rep, line);
-                else if (!sh->dedent) strvec_push_own(&rep, xasprintf("%s%s", sh->prefix, line));
-                else if (str_starts(line, sh->prefix)) strvec_push(&rep, line + strlen(sh->prefix));
-                else {
-                    problem = xasprintf("Line %d does not have the specified indentation to remove.", cursor + 1);
-                    break;
-                }
-                cursor++;
-            }
-            if (problem) break;
-            for (size_t j = 0; j < sp->lines.n; j++) strvec_push(&rep, sp->lines.v[j]);
-            cursor = sp->to;
-        }
-        if (!problem) {
-            sb_t next = SB_INIT;
-            for (size_t j = 0; j < rep.n; j++) {
-                if (j) sb_putc(&next, '\n');
-                sb_append(&next, rep.v[j]);
-            }
-            if (rep.n && (to < n || final_nl)) sb_putc(&next, '\n');
-            if (!strcmp(old.s ? old.s : "", sb_cstr(&next))) {
-                problem = xstrdup("The operations produce no changes.");
-                sb_free(&next);
-            } else {
-                out->old_s = sb_detach(&old);
-                out->new_s = sb_detach(&next);
-            }
-        }
-        strvec_free(&rep);
-        sb_free(&old);
-    }
-
-    for (size_t i = 0; i < splices.n; i++) strvec_free(&splices.v[i].lines);
-    vec_free(&splices);
-    for (size_t i = 0; i < shifts.n; i++) free(shifts.v[i].prefix);
-    vec_free(&shifts);
-    vec_free(&moved);
-    for (int i = 0; i < n; i++) free(subs[i]);
-    free(subs);
-    for (int i = 0; i <= n; i++) strvec_free(&inserts[i]);
-    free(inserts);
-    vec_free(&sub_order);
-    vec_free(&ins_order);
-    strvec_free(&lv);
-    json_free(ops);
-    if (problem) {
-        free(out->ranges);
-        out->ranges = NULL;
-        out->nranges = 0;
-        out->problem = problem;
-    }
+int magic_parse_status(const char *path, const char *code) {
+    /* SupportLang::from_path: the extension after the last dot of the file name, ASCII case-insensitive */
+    const char *base = strrchr(path, '/');
+#ifdef _WIN32
+    const char *bs = strrchr(path, '\\');
+    if (bs && (!base || bs > base)) base = bs;
+#endif
+    base = base ? base + 1 : path;
+    const char *dot = strrchr(base, '.');
+    if (!dot || dot == base || strcasecmp(dot + 1, "json")) return -1;
+    /* parseCodeStatus({code: code === "" ? "\n" : code}): an empty document parses */
+    return tsjson_parses(code, strlen(code)) ? 1 : 0;
 }
 
 /* ======================================================================================
  * applyDescribedChange (edit/magic.ts)
  * ====================================================================================== */
 
-#define MAX_ATTEMPTS 3
-#define OUTPUT_TOKENS_PER_CHAR 0.5
-#define OUTPUT_SLACK_TOKENS 256
-
-/* normalizeToLF: "\r\n" -> "\n" */
-static char *to_lf(const char *s) { return strchr(s, '\r') ? str_replace(s, "\r\n", "\n") : xstrdup(s); }
+#define MAX_TURNS 12
 
 /* REFUSAL /^CANNOT:\s*(.*)/i: the reason (owned, up to the first line terminator), or NULL */
 static char *refusal(const char *reply) {
@@ -1602,120 +2200,322 @@ static char *refusal(const char *reply) {
     return xstrndup(p, (size_t)(e - p));
 }
 
-static char *result_text(const pe_result_t *r) { return xstrdup(r->text ? r->text : ""); }
+/* /^DONE[.!]?$/i */
+static bool done_reply(const char *t) {
+    if (strncasecmp(t, "DONE", 4)) return false;
+    return !t[4] || ((t[4] == '.' || t[4] == '!') && !t[5]);
+}
+
+static json_t *user_message(const char *text) {
+    json_t *u = json_obj();
+    json_set_str(u, "role", "user");
+    json_set_str(u, "content", text);
+    json_set_int(u, "timestamp", now_ms());
+    return u;
+}
+
+static json_t *tool_result(const json_t *call, const char *text, bool is_error) {
+    json_t *m = json_obj();
+    json_set_str(m, "role", "toolResult");
+    json_set_str(m, "toolCallId", json_get_str(call, "id") ? json_get_str(call, "id") : "");
+    json_set_str(m, "toolName", json_get_str(call, "name") ? json_get_str(call, "name") : "");
+    json_t *content = json_arr(), *t = json_obj();
+    json_set_str(t, "type", "text");
+    json_set_str(t, "text", text);
+    json_push(content, t);
+    json_set(m, "content", content);
+    json_set_bool(m, "isError", is_error);
+    json_set_int(m, "timestamp", now_ms());
+    return m;
+}
+
+/* the reply's text blocks joined and trimmed (owned) */
+static char *reply_text(const json_t *msg) {
+    sb_t b = SB_INIT;
+    json_t *blk;
+    json_arr_foreach(json_get_arr(msg, "content"), i, blk) if (str_eq(json_get_str(blk, "type"), "text"))
+        sb_append(&b, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
+    char *t = js_trim(sb_cstr(&b));
+    sb_free(&b);
+    return t;
+}
+
+typedef struct {
+    json_t *args; /* normalized arguments */
+    char *error;  /* NULL: applied */
+} attempt_t;
+typedef VEC(attempt_t) attempts_t;
+
+static const attempt_t *attempt_find(const attempts_t *a, const json_t *args) {
+    for (size_t i = 0; i < a->n; i++)
+        if (json_equal(a->v[i].args, args)) return &a->v[i];
+    return NULL;
+}
+
+typedef struct {
+    const char *path;
+} parse_ctx_t;
+
+static bool parses_cb(const char *code, void *ud) {
+    const parse_ctx_t *c = ud;
+    return magic_parse_status(c->path, *code ? code : "\n") == 1;
+}
 
 bool magic_apply_described(const char *path, const char *change, const char *content, const magic_views_t *views,
                            magic_io_t *io, pe_result_t *res, char **err) {
     memset(res, 0, sizeof(*res));
-    size_t view = 0;
-    char *previous = NULL, *rejection = xstrdup("");
-    /* a change whose ranges were doubted once; repeating it confirms it */
-    char *doubted_old = NULL, *doubted_new = NULL;
-    bool ok = false, done = false;
-    for (int attempt = 1; attempt <= MAX_ATTEMPTS && !done; attempt++) {
-        const magic_view_t *cur = &views->v[view];
-        /* whatever goes wrong against an excerpt, the next attempt sees more of the file */
-        bool wider = view < views->n - 1;
-        if (wider) view++;
+    if (!*content) {
+        *err = xasprintf("%s is empty; use write instead.", path);
+        return false;
+    }
+    parse_ctx_t pc = {path};
+    bool parsed = parses_cb(content, &pc);
+    json_t *tools = magic_apply_tools();
+    attempts_t attempts = {0}; /* replaceAttempts: every exact replace tried, across views */
+    bool ok = false, finished = false;
+    for (size_t vi = 0; vi < views->n && !finished; vi++) {
+        const magic_view_t *view = &views->v[vi];
+        char *working = xstrdup(content);
+        magic_steps_t applied = {0};
+        bool inspected = false, failed_replacement = false, widen = false;
+        char *last_feedback = NULL;
+        json_t *messages = json_arr();
         json_t *ctx = json_obj();
         json_set_str(ctx, "path", path);
-        json_set_str(ctx, "file", cur->text);
-        json_set_bool(ctx, "partial", cur->partial);
         json_set_str(ctx, "change", change);
-        if (previous) json_set_str(ctx, "previous", previous);
-        json_set_str(ctx, "rejection", rejection);
+        json_set_str(ctx, "file", view->text);
+        json_set_bool(ctx, "partial", view->partial);
+        json_set_int(ctx, "totalLines", view->total_lines);
         char *request = prompt_render("coding-agent/edit/magic-apply.md", ctx);
         json_free(ctx);
-        int64_t max_tokens = (int64_t)ceil((double)(fz_utf16_len(cur->text) + fz_utf16_len(change)) * OUTPUT_TOKENS_PER_CHAR) +
-                             OUTPUT_SLACK_TOKENS;
-        bool truncated = false;
-        char *cerr = NULL;
-        char *reply = io->complete(io, request ? request : "", max_tokens, &truncated, &cerr);
+        json_push(messages, user_message(request ? request : ""));
         free(request);
-        if (!reply) {
-            *err = cerr ? cerr : xstrdup("The edit failed.");
-            done = true;
-            break;
-        }
-        char *trimmed = js_trim(reply);
-        char *reason = refusal(trimmed);
-        if (reason) {
-            /* the model may have missed lines the excerpt left out: ask afresh */
-            if (wider) {
-                free(reason);
-                free(trimmed);
-                free(reply);
-                continue;
+        for (int turn = 1; turn <= MAX_TURNS && !finished && !widen; turn++) {
+            char *cerr = NULL;
+            json_t *response = io->complete(io, messages, tools, &cerr);
+            if (!response) {
+                *err = cerr ? cerr : xstrdup("The edit failed.");
+                finished = true;
+                break;
             }
-            char *why = js_trim(reason);
-            if (!*why) {
-                free(why);
-                why = xstrdup("no reason given");
-            }
-            *err = cur->partial ? xasprintf("No change was made to %s: %s\nThe model saw only the lines your description "
-                                            "names: quote the lines to change, or give their line numbers.",
-                                            path, why)
-                                : xasprintf("No change was made to %s: %s", path, why);
-            free(why);
-            free(reason);
-            free(trimmed);
-            free(reply);
-            done = true;
-            break;
-        }
-        char *lf = to_lf(trimmed);
-        free(trimmed);
-        magic_compiled_t compiled;
-        magic_compile(lf, content, cur, truncated, &compiled);
-        free(lf);
-        bool edit = compiled.old_s != NULL;
-        char *hints = edit ? magic_block_hints(content, compiled.ranges, compiled.nranges, cur) : xstrdup("");
-        /* omp also refuses a change after which a parsing file no longer parses (native parseCodeStatus); omc has
-         * no parser to ask, so a range that cuts a block reaches the model through the block hints below */
-        bool same = edit && doubted_old && !strcmp(doubted_old, compiled.old_s) && !strcmp(doubted_new, compiled.new_s);
-        if (*hints && !same) {
-            /* a range that does not match the block it starts may be off by a line: the model confirms it */
-            free(doubted_old);
-            free(doubted_new);
-            doubted_old = xstrdup(compiled.old_s);
-            doubted_new = xstrdup(compiled.new_s);
-            free(rejection);
-            rejection = xasprintf("Nothing was applied: %s. Correct the range, or send the same operations again if that "
-                                  "is intended.",
-                                  hints);
-        } else if (edit) {
-            pe_result_t r;
-            io->apply(io, compiled.old_s, compiled.new_s, true, &r);
-            if (!r.is_error) {
-                *res = r;
-                ok = done = true;
+            bool truncated = false, call_format = false, failed = false;
+            char *syntax = NULL;
+            if (str_eq(json_get_str(response, "stopReason"), "length")) {
+                /* providers may expose partly parsed tool calls on a truncated turn: neither staged nor replayed */
+                truncated = true;
+                failed_replacement = true;
+                json_free(response);
             } else {
-                free(rejection);
-                rejection = result_text(&r);
-                pe_result_free(&r);
+                json_t *reply = response; /* owned; replaced by the written-call form */
+                json_t *calls = json_arr(); /* borrowed-shape clones of the reply's tool calls */
+                json_t *blk;
+                json_arr_foreach(json_get_arr(reply, "content"), i, blk) if (str_eq(json_get_str(blk, "type"), "toolCall"))
+                    json_push(calls, json_clone(blk));
+                char *text = xstrdup("");
+                if (!json_len(calls)) {
+                    free(text);
+                    text = reply_text(response);
+                    bool attempted = false;
+                    json_t *written = magic_parse_written_calls(text, &attempted);
+                    if (!json_len(written)) {
+                        call_format = attempted;
+                    } else {
+                        /* withWrittenToolCalls: replayed as native calls instead of the text or its Responses items */
+                        json_t *w;
+                        json_arr_foreach(written, n, w) {
+                            json_t *c = json_obj();
+                            json_set_str(c, "type", "toolCall");
+                            char *id = xasprintf("written_%d_%zu", turn, n);
+                            json_set_str(c, "id", id);
+                            free(id);
+                            json_set_str(c, "name", json_get_str(w, "name"));
+                            json_set(c, "arguments", json_clone(json_get(w, "arguments")));
+                            json_push(calls, c);
+                        }
+                        reply = json_clone(response);
+                        json_del(reply, "providerPayload");
+                        json_t *kept = json_arr();
+                        json_arr_foreach(json_get_arr(response, "content"), i, blk) if (!str_eq(json_get_str(blk, "type"), "text"))
+                            json_push(kept, json_clone(blk));
+                        json_arr_foreach(calls, i, blk) json_push(kept, json_clone(blk));
+                        json_set(reply, "content", kept);
+                        json_set_str(reply, "stopReason", "toolUse");
+                        json_free(response);
+                        response = NULL;
+                    }
+                    json_free(written);
+                }
+                if (json_len(calls)) {
+                    size_t reply_index = json_len(messages);
+                    json_push(messages, reply);
+                    bool replaced = false, call_failed = false, repaired_any = false;
+                    json_t *repaired_args = json_arr(); /* per call: the repaired arguments or null */
+                    json_t *call;
+                    json_arr_foreach(calls, ci, call) {
+                        const char *name = json_get_str(call, "name");
+                        bool repaired = false;
+                        char *aerr = NULL;
+                        json_t *args = magic_normalize_args(call, &repaired, &aerr);
+                        if (!args) {
+                            if (!str_eq(name, "read") && !str_eq(name, "search")) call_failed = true;
+                            json_push(messages, tool_result(call, aerr, true));
+                            free(aerr);
+                            json_push(repaired_args, json_null());
+                            continue;
+                        }
+                        json_push(repaired_args, repaired ? json_clone(args) : json_null());
+                        repaired_any = repaired_any || repaired;
+                        if (str_eq(name, "replace")) {
+                            const attempt_t *prev = attempt_find(&attempts, args);
+                            if (prev) {
+                                if (!prev->error) {
+                                    json_push(messages, tool_result(call, "This exact replace was already applied. Do not repeat it.", true));
+                                } else {
+                                    call_failed = true;
+                                    char *t = xasprintf("This exact replace already failed: %s", prev->error);
+                                    json_push(messages, tool_result(call, t, true));
+                                    free(t);
+                                }
+                                json_free(args);
+                                continue;
+                            }
+                            char *next = NULL, *msg = NULL, *rerr = NULL;
+                            magic_step_t st;
+                            if (!magic_apply_replace(working, args, &next, &st, &msg, &rerr)) {
+                                call_failed = true;
+                                attempt_t a = {args, xstrdup(rerr)};
+                                vec_push(&attempts, a);
+                                json_push(messages, tool_result(call, rerr, true));
+                                free(rerr);
+                            } else {
+                                replaced = true;
+                                attempt_t a = {args, NULL};
+                                vec_push(&attempts, a);
+                                free(working);
+                                working = next;
+                                vec_push(&applied, st);
+                                json_push(messages, tool_result(call, msg, false));
+                                free(msg);
+                            }
+                        } else if (str_eq(name, "read") || str_eq(name, "search")) {
+                            bool is_error = false;
+                            char *out = str_eq(name, "read") ? magic_read_lines(working, args, &is_error)
+                                                             : magic_search(working, args, &is_error);
+                            if (!is_error) inspected = true;
+                            json_push(messages, tool_result(call, out, is_error));
+                            free(out);
+                            json_free(args);
+                        } else {
+                            call_failed = true;
+                            json_push(messages, tool_result(call, "Available tools: replace, read, search.", true));
+                            json_free(args);
+                        }
+                    }
+                    if (repaired_any) { /* the reply replays the recovered arguments, without its native payload */
+                        json_t *r = json_at(messages, reply_index);
+                        json_del(r, "providerPayload");
+                        size_t k = 0;
+                        json_arr_foreach(json_get_arr(r, "content"), i, blk) {
+                            if (!str_eq(json_get_str(blk, "type"), "toolCall")) continue;
+                            json_t *ra = json_at(repaired_args, k++);
+                            if (ra && !json_is_null(ra)) json_set(blk, "arguments", json_clone(ra));
+                        }
+                    }
+                    json_free(repaired_args);
+                    if (replaced || call_failed) failed_replacement = call_failed;
+                    if (replaced) {
+                        free(last_feedback);
+                        last_feedback = NULL;
+                    }
+                    json_free(calls);
+                    free(text);
+                    continue;
+                }
+                json_free(calls);
+                char *reason = refusal(text);
+                if (reason) {
+                    if (!inspected && !applied.n && vi + 1 < views->n) { /* declined on an excerpt: afresh, wider */
+                        free(reason);
+                        free(text);
+                        json_free(reply);
+                        widen = true;
+                        break;
+                    }
+                    char *why = js_trim(reason);
+                    *err = xasprintf("No change was made to %s: %s", path, *why ? why : "no reason given");
+                    free(why);
+                    free(reason);
+                    free(text);
+                    json_free(reply);
+                    finished = true;
+                    break;
+                }
+                if (failed_replacement) {
+                    failed = true;
+                } else if (done_reply(text) && strcmp(working, content)) {
+                    if (parsed && !parses_cb(working, &pc)) {
+                        syntax = magic_diagnose_syntax(content, working, applied.v, applied.n, parses_cb, &pc);
+                    } else {
+                        pe_result_t r;
+                        io->apply(io, content, working, &r);
+                        if (!r.is_error) {
+                            *res = r;
+                            ok = finished = true;
+                        } else if (str_eq(r.error_kind, "write_failed")) { /* thrown by the write: as it is */
+                            *err = xstrdup(r.text ? r.text : "");
+                            finished = true;
+                            pe_result_free(&r);
+                        } else {
+                            *err = xasprintf("The change to %s could not be applied: %s", path, r.text ? r.text : "");
+                            finished = true;
+                            pe_result_free(&r);
+                        }
+                        if (finished) {
+                            free(text);
+                            json_free(reply);
+                            break;
+                        }
+                    }
+                }
+                json_push(messages, reply);
+                free(text);
             }
-        } else if (truncated) {
-            *err = xasprintf("The model ran out of output before finishing the change to %s; the file is unchanged. Split "
-                             "the change into smaller calls.",
-                             path);
-            done = true;
-        } else {
-            free(rejection);
-            rejection = xstrdup(compiled.problem);
+            json_t *fb = json_obj();
+            if (truncated) json_set_bool(fb, "truncated", true);
+            if (syntax) json_set_str(fb, "syntax", syntax);
+            if (failed) json_set_bool(fb, "failed", true);
+            if (call_format) json_set_bool(fb, "callFormat", true);
+            free(syntax);
+            char *rendered = prompt_render("coding-agent/edit/magic-apply-feedback.md", fb);
+            json_free(fb);
+            char *correction = js_trim(rendered ? rendered : "");
+            free(rendered);
+            if (turn == MAX_TURNS || (last_feedback && !strcmp(correction, last_feedback))) {
+                *err = xasprintf("The change to %s did not finish; the file is unchanged. %s", path, correction);
+                free(correction);
+                finished = true;
+                break;
+            }
+            free(last_feedback);
+            last_feedback = correction;
+            json_push(messages, user_message(correction));
         }
-        free(hints);
-        magic_compiled_free(&compiled);
-        free(previous);
-        previous = reply;
+        if (!finished && !widen) {
+            *err = xasprintf("The change to %s did not finish within %d turns; the file is unchanged.", path, MAX_TURNS);
+            finished = true;
+        }
+        free(last_feedback);
+        json_free(messages);
+        magic_steps_free(&applied);
+        free(working);
     }
-    if (!done)
-        *err = xasprintf("The change to %s could not be applied in %d attempts; the file is unchanged. Last rejection:\n%s\n"
-                         "Describe the change more exactly: quote the lines it touches.",
-                         path, MAX_ATTEMPTS, rejection);
-    free(previous);
-    free(rejection);
-    free(doubted_old);
-    free(doubted_new);
+    if (!finished) *err = xasprintf("The change to %s could not be applied; the file is unchanged.", path);
+    for (size_t i = 0; i < attempts.n; i++) {
+        json_free(attempts.v[i].args);
+        free(attempts.v[i].error);
+    }
+    vec_free(&attempts);
+    json_free(tools);
     return ok;
 }
 
@@ -1767,20 +2567,15 @@ static void *magic_watch(void *arg) {
     return NULL;
 }
 
-static char *mc_complete(magic_io_t *io, const char *request, int64_t max_tokens, bool *truncated, char **err) {
+/* one turn: the conversation so far with the apply tools; the assistant message or NULL with *err */
+static json_t *mc_complete(magic_io_t *io, const json_t *messages, const json_t *tools, char **err) {
     magic_job_t *job = io->ud;
     magic_call_t *mc = job->mc;
     const ai_model_t *m = mc->model;
     int64_t ceiling = m->max_tokens > 0 && m->max_tokens < COMPLETION_MAX_TOKENS ? m->max_tokens : COMPLETION_MAX_TOKENS;
     json_t *sys = json_arr();
     json_push_str(sys, mc->system);
-    json_t *msgs = json_arr();
-    json_t *u = json_obj();
-    json_set_str(u, "role", "user");
-    json_set_str(u, "content", request);
-    json_set_int(u, "timestamp", now_ms());
-    json_push(msgs, u);
-    ai_context_t ctx = {.system_prompt = sys, .messages = msgs};
+    ai_context_t ctx = {.system_prompt = sys, .messages = (json_t *)messages, .tools = (json_t *)tools};
     json_t *r = NULL;
     /* retryTransientCompletion: up to three attempts of a transient failure, 500 ms doubling (capped 8 s) */
     for (int attempt = 1;; attempt++) {
@@ -1789,7 +2584,7 @@ static char *mc_complete(magic_io_t *io, const char *request, int64_t max_tokens
         ai_stream_opts_init(&o);
         o.api_key = mc->api_key;
         o.session_id = mc->session_id;
-        o.max_tokens = m->reasoning ? ceiling : (max_tokens < ceiling ? max_tokens : ceiling);
+        o.max_tokens = ceiling;
         o.reasoning = mc->has_effort ? model_clamp_effort(m, mc->effort) : EFFORT_OFF;
         o.disable_reasoning = !mc->has_effort;
         o.cancel = &mc->cancel;
@@ -1808,30 +2603,26 @@ static char *mc_complete(magic_io_t *io, const char *request, int64_t max_tokens
         }
     }
     json_free(sys);
-    json_free(msgs);
     const char *stop = json_get_str(r, "stopReason");
-    char *text = NULL;
     if (!r || mc->cancel || str_eq(stop, "aborted")) {
         /* an abort resolves with empty content rather than rejecting */
         *err = mc->timed_out ? xasprintf("The edit timed out after %ds waiting on %s; the file is unchanged.",
                                          APPLY_TIMEOUT_MS / 1000, mc->name)
                              : xstrdup("The edit was aborted; the file is unchanged.");
-    } else if (str_eq(stop, "error")) {
+        json_free(r);
+        return NULL;
+    }
+    if (str_eq(stop, "error")) {
         const char *em = json_get_str(r, "errorMessage");
         *err = xasprintf("%s failed while writing the edit: %s", mc->name, em ? em : "unknown error");
-    } else {
-        sb_t b = SB_INIT;
-        json_t *blk;
-        json_arr_foreach(json_get_arr(r, "content"), i, blk) if (str_eq(json_get_str(blk, "type"), "text"))
-            sb_append(&b, json_get_str(blk, "text") ? json_get_str(blk, "text") : "");
-        text = sb_detach(&b);
-        *truncated = str_eq(stop, "length");
+        json_free(r);
+        return NULL;
     }
-    json_free(r);
-    return text;
+    return r;
 }
 
-static void mc_apply(magic_io_t *io, const char *old_s, const char *new_s, bool check_snapshot, pe_result_t *r) {
+/* the finished draft as one replace_all edit of the whole snapshot (always checked against the raw file) */
+static void mc_apply(magic_io_t *io, const char *old_s, const char *new_s, pe_result_t *r) {
     magic_job_t *job = io->ud;
     magic_call_t *mc = job->mc;
     json_t *args = json_obj();
@@ -1839,13 +2630,12 @@ static void mc_apply(magic_io_t *io, const char *old_s, const char *new_s, bool 
     json_t *edits = json_arr(), *e = json_obj();
     json_set_str(e, "old_string", old_s);
     json_set_str(e, "new_string", new_s);
+    json_set_bool(e, "replace_all", true);
     json_push(edits, e);
     json_set(args, "edits", edits);
     pe_opts_t o = *mc->base;
-    if (check_snapshot) {
-        o.raw_snapshot = job->raw;
-        o.raw_snapshot_len = job->raw_len;
-    }
+    o.raw_snapshot = job->raw;
+    o.raw_snapshot_len = job->raw_len;
     /* completions overlap; writes go one at a time, as within any other edit call */
     pthread_mutex_lock(&mc->env->mu);
     pe_run(PE_REPLACE, args, &o, r);
@@ -1853,7 +2643,7 @@ static void mc_apply(magic_io_t *io, const char *old_s, const char *new_s, bool 
     json_free(args);
 }
 
-/* applySection: read the file, have the apply model write the change, apply it against the snapshot */
+/* applySection: read the file, run the draft loop against it, commit against the snapshot */
 static void *magic_section_run(void *arg) {
     magic_job_t *job = arg;
     magic_call_t *mc = job->mc;
@@ -1893,14 +2683,8 @@ static void *magic_section_run(void *arg) {
     double limit = window > 0 ? (double)window * MAX_CONTEXT_SHARE * CHARS_PER_TOKEN : -1;
     magic_views_t views;
     magic_file_views(content, job->section->change, limit, &views);
-    if (!views.n) {
-        job->err = xasprintf("%s is too large for %s to read whole, and the change names no part of it to show instead: "
-                             "quote the lines to change, or give their line numbers.",
-                             target, mc->name);
-    } else {
-        magic_io_t io = {mc_complete, mc_apply, job};
-        job->ok = magic_apply_described(target, job->section->change, content, &views, &io, &job->res, &job->err);
-    }
+    magic_io_t io = {mc_complete, mc_apply, job};
+    job->ok = magic_apply_described(target, job->section->change, content, &views, &io, &job->res, &job->err);
     magic_views_free(&views);
     free(content);
     return NULL;
@@ -1985,8 +2769,11 @@ void magic_edit_run(tool_env_t *env, volatile sig_atomic_t *cancel, const char *
         magic_sections_free(&sections);
         return;
     }
-    mc.system = prompt_load_or("coding-agent/edit/magic-apply-system.md", "");
-    /* one budget across every attempt: the calling agent's turn blocks on the edit */
+    json_t *sctx = json_obj();
+    mc.system = prompt_render("coding-agent/edit/magic-apply-system.md", sctx);
+    json_free(sctx);
+    if (!mc.system) mc.system = xstrdup("");
+    /* one budget across every turn: the calling agent's turn blocks on the edit */
     mc.deadline = now_ms() + APPLY_TIMEOUT_MS;
     pthread_t watcher;
     bool watching = pthread_create(&watcher, NULL, magic_watch, &mc) == 0;

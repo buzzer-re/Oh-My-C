@@ -650,6 +650,13 @@ static char *bash_body(bgjob_t *x, void *ud, bool *failed) {
 
 static bgjob_t *bash_job_new(jobs_t *j, const char *cmd, const char *cwd, int64_t timeout_ms, const char *label, const char *intent) {
     bgjob_t *x = job_new(j, "bash", label ? label : cmd);
+    if (!label) { /* formatAsyncJobLabel(command): the command as written, without the session's shellCommandPrefix line */
+        const char *prefix = settings_str("shellCommandPrefix", "");
+        size_t pl = prefix ? strlen(prefix) : 0;
+        const char *own = pl && !strncmp(cmd, prefix, pl) && cmd[pl] == '\n' ? cmd + pl + 1 : cmd;
+        free(x->label);
+        x->label = job_format_label(own);
+    }
     x->intent = job_clean_intent(intent);
     x->timeout_sec = timeout_ms / 1000;
     x->bash = xcalloc(1, sizeof(bashx_t));

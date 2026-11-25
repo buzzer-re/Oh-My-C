@@ -2419,7 +2419,11 @@ static json_t *read_doc_topics(agent_tool_t *self) {
 
 agent_tool_t *tool_read_new(tool_env_t *env) {
     json_t *ctx = json_obj();
-    json_set_bool(ctx, "IS_HL_MODE", str_eq(env->edit_mode, "hashline"));
+    /* resolveFileDisplayMode: hashline anchors, and line-number prefixes (anchors or readLineNumbers); the `:raw`
+     * help names only what the session actually prefixes */
+    bool hl = str_eq(env->edit_mode, "hashline");
+    json_set_bool(ctx, "IS_HL_MODE", hl);
+    json_set_bool(ctx, "HAS_LINE_NUMBERS", hl || settings_bool("readLineNumbers", false));
     char *desc = tool_prompt("read", ctx);
     json_free(ctx);
     char *fixed = str_replace(desc, ", executable metadata, video", ", video");

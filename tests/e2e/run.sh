@@ -543,6 +543,8 @@ if command -v python3 >/dev/null; then
     check "eval cell source" $'Tool said: def g():\n    return 41'  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"import inspect\ndef g():\n    return 41\nprint(inspect.getsource(g))"}'
     check "eval cell frames" $'Traceback (most recent call last):\n  File "<cell-4>", line 1, in <module>\n    1/0'  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"1/0"}'
     check "eval wait number" "TypeError: wait() takes agent or completion handles; it is not a sleep."  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"wait(3)"}'
+    # a timeout that moves under the 1-3600 s range or tools.maxTimeout leads the result (omp eval.ts timeoutNotice)
+    check "eval timeout clamp" $'Tool said: Eval timeout clamped from 5000s to 3600s.\n\n42'  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"6*7","timeout":5000}'
     # sh(): a command run to completion on the eval session's shell; a failure raises ShellError (omp d013a0a269)
     check "eval sh"        "Tool said: 'hi\\n/tmp\\n' 3 'bad\\n'"  "$B" --model mock/mock-1 -p 'call:eval:{"language":"py","code":"x = sh(\"echo hi; pwd\", cwd=\"/tmp\")\ntry:\n    sh(\"echo bad; exit 3\")\nexcept ShellError as e:\n    print(repr(x), e.exit_code, repr(e.output))"}'
     # the bridge (omp 3967d6bcc6, 6b4d6f3122): a FREEFORM tool takes its raw text (`tool.apply_patch(...)` is edit's
@@ -752,7 +754,7 @@ check "acp forget"     "Remembered approvals forgotten; the next read or write a
 # ACP parity (WP-16): `omc acp`, session lifecycle (load replay / resume / fork / close), configOptions, steering,
 # stop reasons, usage_update, and the fs / terminal / elicitation client bridges and client mcpServers
 timeout 120 python3 -I "$ROOT/tests/e2e/acp_session.py" "$B" "$ROOT/tests/e2e/mock_mcp.py" > "$T/acp_session.out" 2>&1 </dev/null
-for c in init configOptions bootstrap "fs read" "fs write" terminal usage_update "turn usage" "steering idle" \
+for c in init configOptions bootstrap "fs read" "fs write" "fs write unpersisted" terminal usage_update "turn usage" "steering idle" \
          set_config_option refusal "fork close" "load replay" resume elicitation "mcp servers" "mcp details"; do
     check "acp $c" "ok $c" cat "$T/acp_session.out"
 done

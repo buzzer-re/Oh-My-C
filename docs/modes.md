@@ -275,7 +275,9 @@ frames, `diff` content from edit results, `terminal` content, merged result text
 reminders, `current_mode_update` and `config_option_update` when the mode, model or thinking level changes.
 
 **Client bridges.** When the client advertises them, the read tool reads through `fs/read_text_file` (unsaved
-editor buffers), write and edit write through `fs/write_text_file` (session artifacts stay local), bash runs in
+editor buffers), write and edit write through `fs/write_text_file` (session artifacts stay local; a write the client
+acknowledged while the file on disk kept its pre-image fails with `write through the editor appeared successful but file
+content did not change on disk: <path>`, and the text read back afterwards is what the tools report), bash runs in
 a client terminal (`terminal/create`, `wait_for_exit`, polled `terminal/output`, `kill` on timeout or abort,
 `release`), and with form elicitation the `ask` tool and plan approval ask through `elicitation/create` (the ask form is one
 elicitation: its sections and context blocks as the message, a property per named field with the preselected

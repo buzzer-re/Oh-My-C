@@ -668,6 +668,21 @@ static void interrupt_cell(eval_state_t *st, kernel_t *k, int64_t cell) {
     }
 }
 
+/* TOOL_TIMEOUTS.eval: default 30 s, 1-3600 s; tools.maxTimeout (seconds, <= 0: none) caps the resolved value */
+#define EVAL_TIMEOUT_DEFAULT 30
+#define EVAL_TIMEOUT_MIN 1
+#define EVAL_TIMEOUT_MAX 3600
+
+/* clampTimeout("eval", raw, tools.maxTimeout): an absent raw takes the default */
+static double eval_clamp_timeout_ex(bool given, double raw, double max_timeout) {
+    double t = given ? raw : EVAL_TIMEOUT_DEFAULT;
+    if (max_timeout > 0 && max_timeout < t) t = max_timeout;
+    return t < EVAL_TIMEOUT_MIN ? EVAL_TIMEOUT_MIN : t > EVAL_TIMEOUT_MAX ? EVAL_TIMEOUT_MAX : t;
+}
+static double eval_clamp_timeout(bool given, double raw) {
+    return eval_clamp_timeout_ex(given, raw, settings_num("tools.maxTimeout", 0));
+}
+
 static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args, tool_result_t *out) {
     eval_state_t *st = self->ud;
     const char *lang = json_get_str(args, "language");
@@ -680,9 +695,21 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         tool_result_error(out, "Only the Python runtime (language: \"py\") is available in omc");
         return 0;
     }
-    double tsec = json_get_num(args, "timeout", 30);
-    if (tsec > 0 && tsec < 1) tsec = 1;
-    if (tsec > 3600) tsec = 3600;
+    /* clampTimeout("eval", timeout, tools.maxTimeout); 0 disables the deadline. A timeout that moved leads the
+     * result as a notice (eval.ts timeoutNotice). */
+    const json_t *treq = json_get(args, "timeout");
+    bool tgiven = treq && json_is_num(treq);
+    double tsec = tgiven && treq->u.num.d == 0 ? 0 : eval_clamp_timeout(tgiven, tgiven ? treq->u.num.d : 0);
+    char *tnotice = NULL;
+    if (tgiven && treq->u.num.d != tsec) {
+        sb_t nb = SB_INIT;
+        sb_append(&nb, "Eval timeout clamped from ");
+        json_js_num_sb(&nb, treq->u.num.d);
+        sb_append(&nb, "s to ");
+        json_js_num_sb(&nb, tsec);
+        sb_append(&nb, "s.");
+        tnotice = sb_detach(&nb);
+    }
     int64_t tms = tsec > 0 ? (int64_t)(tsec * 1000) : 0;
     pthread_mutex_lock(&st->mu);
     const char *sid = ctx && ctx->agent && ctx->agent->session_id ? ctx->agent->session_id : "";
@@ -706,6 +733,7 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     if (kernel_start(st, &err) != 0) {
         tool_result_error(out, "%s", err);
         free(err);
+        free(tnotice);
         pthread_mutex_unlock(&st->mu);
         return 0;
     }
@@ -846,7 +874,13 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
         sb_append(&b, eof ? "Python kernel exited (state lost); re-run setup." : "Python kernel stopped responding (state lost).");
         out->is_error = true;
     }
-    tool_result_text(out, sb_cstr(&b));
+    if (tnotice) { /* `${notice}\n\n${outputText}` */
+        char *t = b.len ? xasprintf("%s\n\n%s", tnotice, sb_cstr(&b)) : xstrdup(tnotice);
+        tool_result_text(out, t);
+        free(t);
+    } else {
+        tool_result_text(out, sb_cstr(&b));
+    }
     /* omp EvalToolDetails: one cell for the transcript's code-cell card */
     out->details = json_obj();
     json_t *cells = json_arr(), *cj = json_obj();
@@ -864,6 +898,8 @@ static int eval_execute(agent_tool_t *self, tool_ctx_t *ctx, const json_t *args,
     json_push_str(langs, "python");
     json_set(out->details, "languages", langs);
     if (out->is_error) json_set_bool(out->details, "isError", true);
+    if (tnotice) json_set_str(out->details, "notice", tnotice);
+    free(tnotice);
     /* summarizeFinal: shown = the trimmed cell output; totals add what the raw capture lost */
     out_summary_t fin = rs;
     fin.output_lines = clen ? (int64_t)out_count_nl(combined, clen) + 1 : 0;
@@ -913,6 +949,8 @@ static void eval_destroy(agent_tool_t *t) {
 
 /* ---------- description & doc topics ---------- */
 
+static json_t *eval_schema(void);
+
 static bool names_have(const json_t *names, const char *n) {
     json_t *x;
     json_arr_foreach(names, i, x) if (str_eq(json_sv(x), n)) return true;
@@ -932,6 +970,11 @@ static json_t *template_ctx(const json_t *tool_names) {
     json_set_bool(ctx, "waitTool", tool_names ? names_have(tool_names, "wait") : true);
     json_set_bool(ctx, "autoBackgroundEnabled", false);
     json_set_bool(ctx, "autoProvision", true);
+    /* the deadline an omitted `timeout` resolves to under tools.maxTimeout, and whether a larger one is possible */
+    double max_timeout = settings_num("tools.maxTimeout", 0);
+    double def = eval_clamp_timeout_ex(false, 0, max_timeout);
+    json_set(ctx, "timeoutDefault", json_num(def));
+    json_set_bool(ctx, "timeoutRaisable", eval_clamp_timeout_ex(true, EVAL_TIMEOUT_MAX, max_timeout) > def);
     return ctx;
 }
 
@@ -980,6 +1023,9 @@ void eval_set_tool_names(agent_tool_t *t, const json_t *names) {
     char *d = eval_description(names);
     free(t->description);
     t->description = d;
+    /* the timeout default follows tools.maxTimeout (EvalTool.parameters reads the session settings) */
+    json_free(t->parameters);
+    t->parameters = eval_schema();
 }
 
 /* omp 345271b1b4: kernels are keyed by session; a session transition (/new, resume, fork) releases the previous
@@ -996,18 +1042,40 @@ void eval_release_session(agent_tool_t *t) {
     pthread_mutex_unlock(&st->shmu);
 }
 
+/* evalTimeoutSchema(tools.maxTimeout): the timeout field's description states the default and any configured ceiling */
+static char *eval_timeout_description(void) {
+    double max_timeout = settings_num("tools.maxTimeout", 0);
+    sb_t b = SB_INIT;
+    sb_append(&b, "Cell deadline in seconds (default ");
+    json_js_num_sb(&b, eval_clamp_timeout_ex(false, 0, max_timeout));
+    sb_appendf(&b, "); nonzero values clamp to %d\xe2\x80\x93%d; 0 disables it.", EVAL_TIMEOUT_MIN, EVAL_TIMEOUT_MAX);
+    if (max_timeout > 0) {
+        sb_append(&b, " Configured tools.maxTimeout: ");
+        json_js_num_sb(&b, max_timeout);
+        sb_append(&b, "s (effective ceiling ");
+        json_js_num_sb(&b, eval_clamp_timeout_ex(true, EVAL_TIMEOUT_MAX, max_timeout));
+        sb_append(&b, "s).");
+    }
+    return sb_detach(&b);
+}
+
+static json_t *eval_schema(void) {
+    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"language\":{\"const\":\"py\",\"description\":"
+                           "\"\\\"py\\\": Python\"},\"code\":{\"type\":\"string\","
+                           "\"description\":\"Code or standalone % command.\"},\"title\":{\"type\":"
+                           "\"string\",\"description\":\"Short transcript label.\"},\"timeout\":{\"type\":\"number\"},"
+                           "\"reset\":{\"type\":\"boolean\",\"description\":\"Wipe only this kernel.\"}},\"required\":["
+                           "\"language\",\"code\"],\"additionalProperties\":false}");
+    json_set(json_get_obj(json_get_obj(s, "properties"), "timeout"), "description", json_str_own(eval_timeout_description()));
+    return s;
+}
+
 agent_tool_t *tool_eval_new(tool_env_t *env) {
     char *py = find_python();
     if (!py) return NULL; /* runtime unavailable: tool not offered */
     free(py);
     char *desc = eval_description(NULL);
-    json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"language\":{\"const\":\"py\",\"description\":"
-                           "\"\\\"py\\\": Python\"},\"code\":{\"type\":\"string\","
-                           "\"description\":\"Code or standalone % command.\"},\"title\":{\"type\":"
-                           "\"string\",\"description\":\"Short transcript label.\"},\"timeout\":{\"type\":\"number\","
-                           "\"description\":\"Cell deadline in seconds; nonzero values clamp to 1–3600; 0 disables it.\"},"
-                           "\"reset\":{\"type\":\"boolean\",\"description\":\"Wipe only this kernel.\"}},\"required\":["
-                           "\"language\",\"code\"],\"additionalProperties\":false}");
+    json_t *s = eval_schema();
     agent_tool_t *t = agent_tool_new("eval", "Eval", desc, s, eval_execute);
     free(desc);
     t->intent_mode = INTENT_OMIT; /* eval.ts derives the intent from the cell (function intent) */

@@ -3474,6 +3474,59 @@ static char *format_file_text(const staged_t *s, const char *tag) {
     return sb_detach(&b);
 }
 
+/* ---------- post-write disk verification (edit/index.ts #write, tools/acp-bridge.ts routeWriteThroughBridge) ------- */
+
+static int (*g_write_hook)(const char *path, const char *data, size_t len, mode_t mode);
+
+void pe_set_write_hook(int (*fn)(const char *path, const char *data, size_t len, mode_t mode)) { g_write_hook = fn; }
+
+static int local_write(const char *path, const char *data, size_t len, mode_t mode) {
+    return g_write_hook ? g_write_hook(path, data, len, mode) : fs_write_atomic(path, data, len, mode);
+}
+
+/* the text Bun's file.text() reads: a leading UTF-8 BOM dropped */
+static const char *bom_stripped(const char *s, size_t *len) {
+    if (*len >= 3 && !memcmp(s, "\xEF\xBB\xBF", 3)) {
+        *len -= 3;
+        return s + 3;
+    }
+    return s;
+}
+
+int pe_bridge_write_verified(const char *abs, const char *requested, const char *content,
+                             int (*write)(void *ud, const char *abs, const char *content, char **err), void *ud,
+                             char **actual, char **err) {
+    if (actual) *actual = NULL;
+    /* the pre-image tells "the client never persisted the write" (an editor that only updated its buffer) apart from a
+     * client-side reformat; an unreadable one checks nothing */
+    size_t pre_len = 0;
+    char *pre = fs_is_file(abs) ? fs_read(abs, &pre_len) : NULL;
+    char *e = NULL;
+    if (write(ud, abs, content, &e) != 0) {
+        *err = e ? e : xstrdup("write failed");
+        free(pre);
+        return -1;
+    }
+    /* best effort: a read-back that fails trusts the content */
+    size_t back_len = 0;
+    char *back = fs_read(abs, &back_len);
+    const char *text = back ? bom_stripped(back, &back_len) : content;
+    size_t text_len = back ? back_len : strlen(content), content_len = strlen(content);
+    bool unpersisted = false;
+    if (pre) {
+        const char *p = bom_stripped(pre, &pre_len);
+        unpersisted = pre_len == text_len && !memcmp(p, text, text_len) && (text_len != content_len || memcmp(text, content, text_len));
+    }
+    if (unpersisted) {
+        *err = xasprintf("write through the editor appeared successful but file content did not change on disk: %s", requested);
+    } else if (actual && back) {
+        *actual = xstrndup(text, text_len);
+    }
+    free(pre);
+    free(back);
+    return unpersisted ? -1 : 0;
+}
+
 static int write_file(const pe_opts_t *o, const staged_t *s, char **err) {
     bool remote = o->remote && o->remote_write && o->remote(o->ud, s->abs);
     if (remote) {
@@ -3488,7 +3541,7 @@ static int write_file(const pe_opts_t *o, const staged_t *s, char **err) {
     }
     if (o->bridge_write && s->op != OP_DELETE && !s->move_abs) {
         const char *content = s->persisted ? s->persisted : "";
-        int rc = o->bridge_write(o->ud, s->abs, content, strlen(content), err);
+        int rc = o->bridge_write(o->ud, s->abs, s->display, content, strlen(content), err);
         if (rc <= 0) return rc;
     }
     if (s->op == OP_DELETE) {
@@ -3520,15 +3573,45 @@ static int write_file(const pe_opts_t *o, const staged_t *s, char **err) {
     struct stat st;
     mode_t mode = 0644;
     if (stat(s->abs, &st) == 0) mode = st.st_mode & 07777;
-    if (s->op == OP_CREATE) {
+    /* the pre-image is the only way to tell "the write never landed" from "something else rewrote the file"; a stat
+     * cannot (coarse mtimes). Updates only: a new file has none, a vanished one checks nothing. */
+    char *pre = NULL;
+    size_t pre_len = 0;
+    if (s->op == OP_UPDATE) {
+        pre = fs_read(s->abs, &pre_len);
+        if (!pre && errno != ENOENT) {
+            *err = fs_node_error(errno, "open", s->abs);
+            return -1;
+        }
+    } else if (s->op == OP_CREATE) {
         char *dir = path_dirname(s->abs);
         fs_mkdir_p(dir, 0755);
         free(dir);
     }
-    int rc = fs_write_atomic(s->abs, content, strlen(content), mode);
+    size_t len = strlen(content);
+    int rc = local_write(s->abs, content, len, mode);
     if (rc != 0) {
         *err = xasprintf("%s (os error %d)", strerror(-rc), -rc);
+        free(pre);
         return -1;
+    }
+    if (pre) {
+        /* a content-changing write that left the disk at the pre-image failed; post vs pre first (usually a length
+         * mismatch), the requested content only when the disk really is unchanged */
+        size_t post_len = 0;
+        char *post = fs_read(s->abs, &post_len);
+        if (!post && errno != ENOENT) {
+            *err = fs_node_error(errno, "open", s->abs);
+            free(pre);
+            return -1;
+        }
+        bool unchanged = post && post_len == pre_len && !memcmp(post, pre, pre_len) && (len != pre_len || memcmp(content, pre, pre_len));
+        free(post);
+        free(pre);
+        if (unchanged) {
+            *err = xasprintf("edit appeared successful but file content did not change on disk: %s", s->display);
+            return -1;
+        }
     }
     return 0;
 }
@@ -3583,12 +3666,12 @@ static void finish(stageds_t *st, pe_mode_t mode, const pe_opts_t *o, hl_clip_t 
         staged_t *s = &st->v[i];
         if (s->op != OP_NOOP) {
             char *err = NULL;
-            if (o->raw_snapshot) { /* magic: refuse a file that changed after the numbered snapshot was read */
+            if (o->raw_snapshot) { /* magic: refuse a file that changed while the edit was being prepared */
                 size_t len = 0;
                 char *now = fs_read(s->abs, &len);
                 bool same = now && len == o->raw_snapshot_len && !memcmp(now, o->raw_snapshot, len);
                 free(now);
-                if (!same) err = xstrdup("The file changed after the numbered snapshot was read; re-read and retry.");
+                if (!same) err = xstrdup("The file changed while the edit was being prepared; re-read and retry.");
             }
             if (err || write_file(o, s, &err) != 0) {
                 out->is_error = true;

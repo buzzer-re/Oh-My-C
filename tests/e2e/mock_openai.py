@@ -42,8 +42,10 @@ Subagent turns ("Complete assignment thoroughly:\n\n<assignment>") run <assignme
 Idle recap side turns ("<recap>…") answer a fixed one-line recap.
 Composer prediction side turns ("<composer-prediction>…") answer "PREDICTED-NEXT", or the `predict=<text>` token of the
   latest user message (`~` -> space, `|` -> newline, e.g. predict=NO_PREDICTION); SLOWPREDICT there answers after 3 s.
-Magic edit apply requests (system "You turn a described change into line operations") answer the change's
-  `OPS: <attempt> || <attempt>` (one per attempt, ` ;; ` between lines), or `CANNOT: nothing named` without OPS.
+Magic edit apply requests (system "Apply every requested change to the draft of this one file.") play the change's
+  `TURNS: <JSON list>` one entry per turn (the turns so far pick it; later turns repeat the last): a string is a text reply, a list of [tool, args] native tool calls in one message, {"length": entry} that
+  reply cut at the output limit; `TURNS_WHOLE:` (before TURNS) replaces the list once the file is shown whole (no `⋮`
+  in the first request). Without TURNS the apply model answers `CANNOT: nothing named`.
 /agents architect requests ("Custom agent request:…" containing AGENTSPEC) answer a docs-writer agent spec as JSON.
 Mid-stream connection drops (turn recovery), driven by the latest user message:
   - "drop:<mode>:<n>:<text>"   the first <n> requests stream <text> (may be empty) and then drop the connection;
@@ -160,18 +162,21 @@ def seq_next(msgs):
         done -= len(group)
     return None
 
-def magic_reply(req):
-    """magic edit apply request: the change's `OPS: a || b` names one reply per attempt (` ;; ` separates lines);
-    a request carrying a rejected <reply> gets the attempt after it; no OPS answers a refusal"""
-    change = req.split("Change to make:\n\n", 1)[-1].split("\n\nYour previous reply was rejected", 1)[0]
-    if "OPS:" not in change:
+def magic_turn(msgs):
+    """magic edit apply turn: the scripted entry for this turn of the change's TURNS (see the module doc)"""
+    first = text_of(msgs[1]) if len(msgs) > 1 else ""
+    change = first.split("Change to make:\n\n", 1)[-1]
+    if "TURNS:" not in change:
         return "CANNOT: nothing named"
-    attempts = [a.strip().replace(" ;; ", "\n") for a in change.split("OPS:", 1)[1].strip().split(" || ")]
-    n = 0
-    if "<reply>\n" in req:
-        prev = req.split("<reply>\n", 1)[1].split("\n</reply>", 1)[0]
-        n = attempts.index(prev) + 1 if prev in attempts else len(attempts) - 1
-    return attempts[min(n, len(attempts) - 1)]
+    script = change.split("TURNS:", 1)[1].strip()
+    if "TURNS_WHOLE:" in change and "\u22ee" not in first.split("<file>", 1)[-1].split("</file>", 1)[0]:
+        script = change.split("TURNS_WHOLE:", 1)[1].split("TURNS:", 1)[0].strip()
+    turns = json.loads(script)
+    # turns so far: assistant messages, plus feedback right after a user or tool message (a turn cut at the output
+    # limit leaves no assistant message behind)
+    n = sum(1 for k, m in enumerate(msgs) if m.get("role") == "assistant" or
+            (m.get("role") == "user" and k > 1 and msgs[k - 1].get("role") in ("user", "tool")))
+    return turns[min(n, len(turns) - 1)]
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -277,8 +282,8 @@ class H(BaseHTTPRequestHandler):
             params = next(t["function"].get("parameters") or {} for t in body["tools"] if t["function"]["name"] == "respond")
             vals = {"string": lu_all, "number": 42, "integer": 42, "boolean": True}
             side = ("call", "respond", {k: vals.get(v.get("type"), lu_all) for k, v in (params.get("properties") or {}).items()})
-        elif last.get("role") == "user" and sysc.startswith("You turn a described change into line operations"):
-            side = ("say", magic_reply(lu_all))  # magic edit apply model (edit/magic-apply-system.md)
+        elif sysc.startswith("Apply every requested change to the draft of this one file."):
+            side = ("magic", magic_turn(msgs))  # magic edit apply model (edit/magic-apply-system.md)
         elif last.get("role") == "user" and sysc.startswith("You explain one background shell command"):  # job caption request
             side = ("say", '- "Waits about 2 min, printing a tick every 3s."\nExtra')
         elif last.get("role") == "user" and sysc == "You are a helpful assistant.":
@@ -297,6 +302,15 @@ class H(BaseHTTPRequestHandler):
             for k, (tname, targs) in enumerate(json.loads(text_of(last)[6:])):
                 chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": k, "id": f"call_{k + 1}", "type": "function", "function": {"name": tname, "arguments": json.dumps(targs)}}]}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+        elif side and side[0] == "magic":
+            turn, finish = side[1], None
+            if isinstance(turn, dict): turn, finish = turn["length"], "length"
+            if isinstance(turn, str):
+                chunks.append({**base, "choices": [{"index": 0, "delta": {"content": turn}}]})
+            else:
+                for k, (tname, targs) in enumerate(turn):
+                    chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": k, "id": f"call_m{k + 1}", "type": "function", "function": {"name": tname, "arguments": json.dumps(targs)}}]}}]})
+            chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish or ("stop" if isinstance(turn, str) else "tool_calls")}]})
         elif side and side[0] == "say":
             chunks.append({**base, "choices": [{"index": 0, "delta": {"content": side[1]}}]})
             chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})

@@ -204,6 +204,22 @@ static void test_columns(const char *dir) {
         lng[300] = 0;
         c = job_truncate(lng, 200);
         CHECK(strlen(c) == 199 + 3 && str_ends(c, "\xE2\x80\xA6"));
+        free(c);
+        /* formatAsyncJobLabel (omp 2f068d1aba): one line, whitespace runs collapsed, 120 units with "..." past 117 */
+        c = job_format_label("  for f in *.log;\n\tdo\xC2\xA0gzip \"$f\";  done \n");
+        CHECK_STR(c, "for f in *.log; do gzip \"$f\"; done");
+        free(c);
+        lng[120] = 0;
+        c = job_format_label(lng);
+        CHECK(strlen(c) == 120 && !strchr(c, '.'));
+        free(c);
+        lng[120] = 'x';
+        lng[121] = 0;
+        c = job_format_label(lng);
+        CHECK(strlen(c) == 120 && str_ends(c, "x..."));
+        free(c);
+        c = job_format_label(" \n ");
+        CHECK_STR(c, "");
         free(c), free(lng);
     }
     /* isColumnTruncationNotice / hasColumnTruncationClause: bracketed, a stated cap and unit, fractional caps too */

@@ -60,7 +60,8 @@ class Client:
         elif method == "fs/read_text_file":
             res = {"content": self.buffers.get(p["path"]) or open(p["path"]).read()}
         elif method == "fs/write_text_file":
-            open(p["path"], "w").write(p["content"])
+            if not getattr(self, "drop_writes", False):  # drop_writes: an editor that only updates its buffer
+                open(p["path"], "w").write(p["content"])
         elif method == "terminal/create":
             pr = subprocess.run([p["command"], *p.get("args", [])], cwd=p.get("cwd"), capture_output=True, text=True)
             self.terms["t1"] = pr
@@ -124,6 +125,13 @@ r, fr = prompt(c, sid, "read:buf.txt")
 check("fs read", any(f.get("method") == "fs/read_text_file" for f in fr) and "unsaved editor buffer" in texts(fr), texts(fr))
 r, fr = prompt(c, sid, "write:out.txt:bridged write")
 check("fs write", any(f.get("method") == "fs/write_text_file" for f in fr) and open("out.txt").read() == "bridged write")
+# a write the editor acknowledges but never persists fails instead of reporting success (omp routeWriteThroughBridge)
+open("kept.txt", "w").write("old content\n")
+c.drop_writes = True
+r, fr = prompt(c, sid, "write:kept.txt:new content")
+c.drop_writes = False
+check("fs write unpersisted", "write through the editor appeared successful but file content did not change on disk: kept.txt"
+      in texts(fr) and open("kept.txt").read() == "old content\n", texts(fr))
 r, fr = prompt(c, sid, "bash:echo via-terminal")
 terms = [c2 for u in updates(fr, "tool_call_update") for c2 in u.get("content", []) if c2.get("type") == "terminal"]
 check("terminal", any(f.get("method") == "terminal/create" for f in fr) and terms and "via-terminal" in texts(fr), texts(fr))
