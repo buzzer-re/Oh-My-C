@@ -335,6 +335,22 @@ static json_t *provider_refusal_data(const json_t *m) {
     return d;
 }
 
+/* messages.ts logProviderTurnError: a turn ending in a provider error leaves one warn-level line with the fields that make
+ * recurring provider failures diagnosable from the log alone (omp #6177), including the provider request id Anthropic
+ * support asks for (omp 832ef9d8e5) */
+static void log_provider_turn_error(const json_t *msg) {
+    if (!str_eq(json_get_str(msg, "stopReason"), "error")) return;
+    sb_t b = SB_INIT;
+    sb_appendf(&b, "agent turn ended with provider error: provider=%s model=%s", json_get_str(msg, "provider") ? json_get_str(msg, "provider") : "",
+               json_get_str(msg, "model") ? json_get_str(msg, "model") : "");
+    if (json_get(msg, "errorStatus")) sb_appendf(&b, " errorStatus=%lld", (long long)json_get_int(msg, "errorStatus", 0));
+    if (json_get(msg, "errorId")) sb_appendf(&b, " errorId=%lld", (long long)json_get_int(msg, "errorId", 0));
+    if (json_get_str(msg, "requestId")) sb_appendf(&b, " requestId=%s", json_get_str(msg, "requestId"));
+    sb_appendf(&b, " errorMessage=%s", json_get_str(msg, "errorMessage") ? json_get_str(msg, "errorMessage") : "");
+    LOGW("%s", sb_cstr(&b));
+    sb_free(&b);
+}
+
 static void on_agent_event(void *ud, const agent_event_t *ev) {
     app_t *a = ud;
     if (ev->type == AGENT_EV_AGENT_START) strvec_free(&a->retry_notes);
@@ -372,6 +388,7 @@ static void on_agent_event(void *ud, const agent_event_t *ev) {
         apply_chillax(a, tx);
     }
     if (ev->type == AGENT_EV_MESSAGE_END && str_eq(json_get_str(ev->message, "role"), "assistant")) {
+        log_provider_turn_error(ev->message);
         cachewarm_on_response(a->warmer, ev->message);
         /* completedAt: local completion time stamped by the session at message_end (persisted with the message) */
         if (ev->message) json_set_int((json_t *)ev->message, "completedAt", now_ms());
