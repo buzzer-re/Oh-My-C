@@ -310,6 +310,11 @@ static char *read_projection_refusal(const char *display, const char *raw_conten
                            display);
 }
 
+static int write_bridge_text(void *ud, const char *abs, const char *content, char **err) {
+    tool_env_t *env = ud;
+    return env->bridge->write_text(env->bridge, abs, content, err);
+}
+
 static int write_local(tool_env_t *env, tool_ctx_t *ctx, const char *raw_path, const char *raw_content, tool_result_t *out) {
     char *path = unwrap_header(raw_path);
     if (!raw_content) {
@@ -417,14 +422,14 @@ static int write_local(tool_env_t *env, tool_ctx_t *ctx, const char *raw_path, c
         tool_result_free(&pr);
     }
     if (bridged) {
-        char *berr = NULL;
-        if (env->bridge->write_text(env->bridge, abs, final, &berr) != 0) {
+        /* routeWriteThroughBridge: a write the client acknowledged but never persisted fails; the client may also have
+         * transformed the text (format on save): what is on disk now is what callers see */
+        char *berr = NULL, *back = NULL;
+        if (pe_bridge_write_verified(abs, path, final, write_bridge_text, env, &back, &berr) != 0) {
             tool_result_error(out, "%s", berr ? berr : "write failed");
             free(berr);
             goto done;
         }
-        /* the client may have transformed the text (format on save): what is on disk now is what callers see */
-        char *back = fs_read(abs, NULL);
         if (back) {
             free(final);
             final = back;

@@ -564,8 +564,131 @@ static void test_recover_inline(void) {
     passed += 4;
 }
 
+/* ---------- post-write disk verification (omp edit-patch-unchanged-error.test.ts, edit-acp-bridge.test.ts) ---------- */
+
+static const char *g_drop_suffix; /* writes to paths ending in this never land (NULL: none) */
+
+static int dropping_write(const char *path, const char *data, size_t len, mode_t mode) {
+    if (g_drop_suffix && str_ends(path, g_drop_suffix)) return 0;
+    return fs_write_atomic(path, data, len, mode);
+}
+
+static int editor_buffer_only(void *ud, const char *abs, const char *content, char **err) {
+    UNUSED(ud), UNUSED(abs), UNUSED(content), UNUSED(err);
+    return 0; /* acknowledged, never persisted */
+}
+
+static int editor_persists(void *ud, const char *abs, const char *content, char **err) {
+    UNUSED(err);
+    const char *text = ud ? ud : content; /* ud: the client's format-on-save result */
+    return fs_write(abs, text, strlen(text)) == 0 ? 0 : -1;
+}
+
+/* the edit tool's bridge callback with the verification (edit.c pe_bridge_write) over a buffer-only client */
+static int bridge_buffer_only(void *ud, const char *abs, const char *display, const char *data, size_t len, char **err) {
+    UNUSED(ud), UNUSED(len);
+    return pe_bridge_write_verified(abs, display, data, editor_buffer_only, NULL, NULL, err);
+}
+
+static void test_post_write_verification(void) {
+    char *dir = fs_mktempdir("omc-edit");
+    char *cwd = path_real(dir);
+    /* a reported write that leaves the disk unchanged names the caller-facing path, not the absolute one */
+    write_file(cwd, "deep/nested/foo.txt", "a\n");
+    pe_set_write_hook(dropping_write);
+    g_drop_suffix = "foo.txt";
+    json_t *args = json_parse_str("{\"path\":\"deep/nested/foo.txt\",\"edits\":[{\"op\":\"update\",\"diff\":\"@@\\n-a\\n+b\"}]}");
+    pe_opts_t o = opts_for(cwd, NULL);
+    pe_result_t r;
+    pe_run(PE_PATCH, args, &o, &r);
+    CHECK(r.is_error && str_eq(r.text, "edit appeared successful but file content did not change on disk: deep/nested/foo.txt") &&
+              str_eq(r.error_kind, "write_failed") && !strstr(r.text, cwd),
+          "unchanged write: %s", r.text);
+    char *now = read_rel(cwd, "deep/nested/foo.txt");
+    CHECK(str_eq(now, "a\n"), "unchanged file: %s", now);
+    free(now);
+    pe_result_free(&r);
+    json_free(args);
+    /* in a multi-file change the lost write fails while the other file lands */
+    write_file(cwd, "first.ts", "export const a = 1;\n");
+    write_file(cwd, "second.ts", "export const b = 1;\n");
+    g_drop_suffix = "second.ts";
+    args = json_obj();
+    json_set_str(args, "input", "*** Begin Patch\n*** Update File: first.ts\n@@\n-export const a = 1;\n+export const a = 2;\n"
+                                "*** Update File: second.ts\n@@\n-export const b = 1;\n+export const b = 2;\n*** End Patch");
+    pe_run(PE_APPLY_PATCH, args, &o, &r);
+    CHECK(r.is_error && str_eq(r.text, "edit appeared successful but file content did not change on disk: second.ts"), "batch: %s",
+          r.text);
+    now = read_rel(cwd, "first.ts");
+    CHECK(str_eq(now, "export const a = 2;\n"), "first file: %s", now);
+    free(now);
+    now = read_rel(cwd, "second.ts");
+    CHECK(str_eq(now, "export const b = 1;\n"), "second file: %s", now);
+    free(now);
+    pe_result_free(&r);
+    json_free(args);
+    /* a new file has no pre-image: nothing to check */
+    g_drop_suffix = "new.txt";
+    args = json_parse_str("{\"input\":\"*** Begin Patch\\n*** Add File: new.txt\\n+x\\n*** End Patch\"}");
+    pe_run(PE_APPLY_PATCH, args, &o, &r);
+    CHECK(!r.is_error, "create: %s", r.text);
+    pe_result_free(&r);
+    json_free(args);
+    /* writes that land pass */
+    g_drop_suffix = NULL;
+    args = json_parse_str("{\"path\":\"deep/nested/foo.txt\",\"old_string\":\"a\",\"new_string\":\"c\"}");
+    pe_run(PE_REPLACE, args, &o, &r);
+    CHECK(!r.is_error, "landed write: %s", r.text);
+    pe_result_free(&r);
+    json_free(args);
+    pe_set_write_hook(NULL);
+
+    /* the ACP bridge: a client that acknowledges a write it never persisted */
+    write_file(cwd, "buffer-only.txt", "old content\n");
+    o.bridge_write = bridge_buffer_only;
+    args = json_parse_str("{\"path\":\"buffer-only.txt\",\"old_string\":\"old content\",\"new_string\":\"new content\"}");
+    pe_run(PE_REPLACE, args, &o, &r);
+    CHECK(r.is_error && str_eq(r.text, "write through the editor appeared successful but file content did not change on disk: "
+                                       "buffer-only.txt"),
+          "bridge: %s", r.text);
+    now = read_rel(cwd, "buffer-only.txt");
+    CHECK(str_eq(now, "old content\n"), "bridged file: %s", now);
+    free(now);
+    pe_result_free(&r);
+    json_free(args);
+    o.bridge_write = NULL;
+    char *abs = path_join(cwd, "buffer-only.txt"), *actual = NULL, *err = NULL;
+    /* a persisted write, and a client-side reformat, hand back what is on disk */
+    CHECK(pe_bridge_write_verified(abs, "buffer-only.txt", "new content\n", editor_persists, NULL, &actual, &err) == 0 &&
+              str_eq(actual, "new content\n"),
+          "persisted: %s", err ? err : actual);
+    free(actual);
+    actual = NULL;
+    CHECK(pe_bridge_write_verified(abs, "buffer-only.txt", "x  =  1\n", editor_persists, "x = 1\n", &actual, &err) == 0 &&
+              str_eq(actual, "x = 1\n"),
+          "reformatted: %s", err ? err : actual);
+    free(actual);
+    actual = NULL;
+    /* a reformat back to the pre-image is not refused when the content asked for it */
+    CHECK(pe_bridge_write_verified(abs, "buffer-only.txt", "x = 1\n", editor_buffer_only, NULL, &actual, &err) == 0, "same text: %s",
+          err ? err : "");
+    free(actual);
+    free(abs);
+    actual = NULL;
+    /* a file the editor creates in its buffer only had no pre-image */
+    abs = path_join(cwd, "fresh.txt");
+    CHECK(pe_bridge_write_verified(abs, "fresh.txt", "x\n", editor_buffer_only, NULL, &actual, &err) == 0 && !actual, "fresh: %s",
+          err ? err : "");
+    free(abs);
+    fs_rm_rf(cwd);
+    free(cwd);
+    free(dir);
+    passed++;
+}
+
 int main(int argc, char **argv) {
     verbose = argc > 1 && !strcmp(argv[1], "-v");
+    test_post_write_verification();
     test_diff_renderers();
     test_parser_errors();
     test_sloppy_sentinels();

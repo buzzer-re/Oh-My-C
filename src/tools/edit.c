@@ -70,17 +70,18 @@ static int pe_remote_write(void *ud, const char *abs, const char *data, size_t l
     return ssh_store(ud, abs, data, len, err);
 }
 
-/* editor-visible files go through an ACP client that advertises fs.writeTextFile; session artifacts stay local */
-static int pe_bridge_write(void *ud, const char *abs, const char *data, size_t len, char **err) {
+static int bridge_write_text(void *ud, const char *abs, const char *content, char **err) {
+    tool_env_t *env = ud;
+    return env->bridge->write_text(env->bridge, abs, content, err);
+}
+
+/* editor-visible files go through an ACP client that advertises fs.writeTextFile; session artifacts stay local. A write
+ * the client acknowledged but never persisted fails (routeWriteThroughBridge). */
+static int pe_bridge_write(void *ud, const char *abs, const char *display, const char *data, size_t len, char **err) {
     tool_env_t *env = ud;
     UNUSED(len);
     if (!env->bridge || !env->bridge->write_text || (env->local_dir && str_starts(abs, env->local_dir))) return 1;
-    char *e = NULL;
-    if (env->bridge->write_text(env->bridge, abs, data, &e) != 0) {
-        *err = e ? e : xstrdup("write failed");
-        return -1;
-    }
-    return 0;
+    return pe_bridge_write_verified(abs, display, data, bridge_write_text, env, NULL, err);
 }
 
 static char *pe_after_write(void *ud, const char *abs) {
