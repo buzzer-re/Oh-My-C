@@ -121,6 +121,7 @@ secrets.enabled	inert	no secret obfuscation
 telemetry.otlpExportEnabled	inert	no OTLP export
 
 # ---------- inert: Interaction / Context ----------
+todo.backend	inert	extension todo backends (pi.registerTodoBackend) need JS extensions
 todo.eager	inert	no eager todo nudge
 tasks.todoClearDelay	inert	the todo widget never auto-clears
 title.refreshOnReplan	inert	no title refresh on replan
