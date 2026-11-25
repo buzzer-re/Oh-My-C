@@ -23,5 +23,8 @@ char *tool_intent_label(const char *intent);
 char *job_display_label(const char *intent, const char *label);
 /* omp truncate(): at most `max` UTF-16 units including the `…` (owned) */
 char *job_truncate(const char *s, size_t max);
+/* formatAsyncJobLabel: a bash job's label, the command on one line (whitespace runs collapsed, trimmed) and at most
+ * 120 UTF-16 units ("..." past 117); also what a restored session reports for a job a process exit ended (owned) */
+char *job_format_label(const char *command);
 
 #endif
