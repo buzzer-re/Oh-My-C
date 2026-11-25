@@ -1365,6 +1365,187 @@ static void test_strict_schema(void) {
     sb_free(&deep);
 }
 
+/* JSON with single quotes for double quotes (test readability); owned */
+static char *q2(const char *s) {
+    char *d = xstrdup(s);
+    for (char *p = d; *p; p++)
+        if (*p == '\'') *p = '"';
+    return d;
+}
+
+static void check_sanitized(const char *in, bool repair, const char *want, int line) {
+    char *qi = q2(in), *qw = q2(want);
+    json_t *s = J(qi), *w = J(qw);
+    json_t *r = oai_responses_sanitize_schema(s, repair);
+    char *got = json_dump(r, 0), *exp = json_dump(w, 0);
+    g_checks++;
+    if (strcmp(got, exp)) {
+        g_fail++;
+        fprintf(stderr, "%s:%d: sanitized\n  got  %s\n  want %s\n", __FILE__, line, got, exp);
+    }
+    free(got);
+    free(exp);
+    json_free(r);
+    json_free(s);
+    json_free(w);
+    free(qi);
+    free(qw);
+}
+#define SANITIZED(in, repair, want) check_sanitized(in, repair, want, __LINE__)
+
+/* sanitizeSchemaForOpenAIResponses: upstream's cases (schema-normalization.test.ts, openai-codex.test.ts,
+ * openai-array-tool-schema.test.ts), with omp's key order; omp e48b03993b, 008e054ba1, 35e42d9e8a */
+static void test_responses_sanitizer(void) {
+    /* object nodes get `properties`, a bare one says it is open; oneOf becomes anyOf; literals stay */
+    SANITIZED("{'type':'object','properties':{'nested':{'type':'object'},'union':{'oneOf':[{'type':'object'}]}},"
+              "'oneOf':[{'type':'object'}],'enum':[{'type':'object','oneOf':[{'const':'literal'}]}],"
+              "'const':{'type':'object','oneOf':[{'const':'literal'}]},'default':{'type':'object'},'examples':[{'type':'object'}]}",
+              false,
+              "{'type':'object','properties':{'nested':{'type':'object','properties':{},'additionalProperties':true},"
+              "'union':{'anyOf':[{'type':'object','properties':{},'additionalProperties':true}]}},"
+              "'enum':[{'type':'object','oneOf':[{'const':'literal'}]}],'const':{'type':'object','oneOf':[{'const':'literal'}]},"
+              "'default':{'type':'object'},'examples':[{'type':'object'}],"
+              "'anyOf':[{'type':'object','properties':{},'additionalProperties':true}]}");
+    SANITIZED("{'type':'object','properties':{'body':{'type':'string','contentSchema':{'type':'object'}}},"
+              "'dependencies':{'body':{'type':'object'},'other':['body']}}",
+              false,
+              "{'type':'object','properties':{'body':{'type':'string','contentSchema':{'type':'object','properties':{},"
+              "'additionalProperties':true}}},'dependencies':{'body':{'type':'object','properties':{},'additionalProperties':true},"
+              "'other':['body']}}");
+    SANITIZED("{'type':['object','null']}", false, "{'type':['object','null'],'properties':{},'additionalProperties':true}");
+    /* lookarounds: pattern values dropped, patternProperties keys folded under '.*', property names untouched */
+    SANITIZED("{'type':'object','properties':{'fileKey':{'type':'string','pattern':'^(?!undefined$|null$)'},"
+              "'ending':{'type':'string','pattern':'(?<=/)node$'},'slug':{'type':'string','pattern':'^[a-z0-9_-]+$'},"
+              "'literal':{'type':'string','pattern':'\\\\(?!literal'},'patternOnly':{'pattern':'^(?!bad$)'},"
+              "'^(?!property-name)':{'type':'string'}},'patternProperties':{'^(?!secret_)':{'type':'string'},"
+              "'(?<=/)node$':{'type':'string'},'^x-':{'type':'object'},'\\\\(?!literal':{'type':'string'}},"
+              "'propertyNames':{'pattern':'^(?!invalid$)'}}",
+              false,
+              "{'type':'object','properties':{'fileKey':{'type':'string'},'ending':{'type':'string'},"
+              "'slug':{'type':'string','pattern':'^[a-z0-9_-]+$'},'literal':{'type':'string','pattern':'\\\\(?!literal'},"
+              "'patternOnly':true,'^(?!property-name)':{'type':'string'}},'patternProperties':{'.*':{'anyOf':[{'type':'string'},"
+              "{'type':'string'}]},'^x-':{'type':'object','properties':{},'additionalProperties':true},"
+              "'\\\\(?!literal':{'type':'string'}},'propertyNames':true}");
+    /* an unescaped `[` inside a character class (#20137) */
+    SANITIZED("{'type':'object','properties':{'nested':{'type':'string','pattern':'^[^[\\\\]]*$'},"
+              "'escaped':{'type':'string','pattern':'^[^\\\\[\\\\]]*$'},'outside':{'type':'string','pattern':'^\\\\[[a-z]+\\\\]$'},"
+              "'lookaheadLiteral':{'type':'string','pattern':'^[(?=]+$'}},'patternProperties':{'^[[]':{'type':'string'},"
+              "'^\\\\[x\\\\]':{'type':'number'}}}",
+              false,
+              "{'type':'object','properties':{'nested':{'type':'string'},'escaped':{'type':'string','pattern':'^[^\\\\[\\\\]]*$'},"
+              "'outside':{'type':'string','pattern':'^\\\\[[a-z]+\\\\]$'},'lookaheadLiteral':{'type':'string','pattern':'^[(?=]+$'}},"
+              "'patternProperties':{'.*':{'type':'string'},'^\\\\[x\\\\]':{'type':'number'}}}");
+    CHECK(oai_unsupported_regex("^[^[\\]]*$") && oai_unsupported_regex("(?<!a)b") && oai_unsupported_regex("a(?=b)"));
+    CHECK(!oai_unsupported_regex("^[^\\[\\]]*$") && !oai_unsupported_regex("\\(?!x") && !oai_unsupported_regex("^[(?=]+$"));
+    CHECK(!oai_unsupported_regex("(?:x)") && !oai_unsupported_regex("(?<name>x)") && !oai_unsupported_regex("trailing\\"));
+    /* a non-array oneOf is kept verbatim; exclusive-required unions are left to provider handling */
+    SANITIZED("{'type':'object','oneOf':{'type':'object'}}", false,
+              "{'type':'object','oneOf':{'type':'object'},'properties':{},'additionalProperties':true}");
+    SANITIZED("{'type':'object','properties':{'project':{'type':'string'},'paths':{'type':'array','items':{'type':'string'}}},"
+              "'required':['project'],'anyOf':[{'required':['paths']},{'required':['scopes']}]}",
+              false,
+              "{'type':'object','properties':{'project':{'type':'string'},'paths':{'type':'array','items':{'type':'string'}}},"
+              "'required':['project'],'anyOf':[{'required':['paths']},{'required':['scopes']}]}");
+    /* `{}` is `true`; boolean and non-empty schemas stay */
+    SANITIZED("{'type':'object','additionalProperties':{}}", false, "{'type':'object','additionalProperties':true,'properties':{}}");
+    SANITIZED("{'type':'array','items':{}}", false, "{'type':'array','items':true}");
+    SANITIZED("{'type':'object','properties':{'meta':{}},'required':['meta']}", false,
+              "{'type':'object','properties':{'meta':true},'required':['meta']}");
+    SANITIZED("{'anyOf':[{},{'type':'string'}]}", false, "{'anyOf':[true,{'type':'string'}]}");
+    SANITIZED("{'type':'object','additionalProperties':{'type':'string'},'unevaluatedProperties':false}", false,
+              "{'type':'object','additionalProperties':{'type':'string'},'unevaluatedProperties':false,'properties':{}}");
+    /* 35e42d9e8a: a $ref or combinator supplies the shape, so the placeholder does not mark the node open */
+    SANITIZED("{'type':'object','$ref':'#/$defs/x'}", false, "{'type':'object','$ref':'#/$defs/x','properties':{}}");
+    SANITIZED("{'type':'object','allOf':[{'type':'object','properties':{'a':{'type':'string'}}}]}", false,
+              "{'type':'object','allOf':[{'type':'object','properties':{'a':{'type':'string'}}}],'properties':{}}");
+    /* Codex (openai-codex.test.ts): no-argument objects, lookarounds, patternProperties, nested classes */
+    SANITIZED("{'type':'object'}", true, "{'type':'object','properties':{},'additionalProperties':true}");
+    SANITIZED("{'type':'object','properties':{'fileKey':{'type':'string','pattern':'^(?!undefined$|null$)'}},"
+              "'propertyNames':{'pattern':'^(?!undefined$|null$)'}}",
+              true, "{'type':'object','properties':{'fileKey':{'type':'string'}},'propertyNames':true}");
+    SANITIZED("{'type':'object','patternProperties':{'^(?!secret_)':{'type':'string'},'^public_':{'type':'string'}},"
+              "'additionalProperties':false}",
+              true,
+              "{'type':'object','patternProperties':{'.*':{'type':'string'},'^public_':{'type':'string'}},"
+              "'additionalProperties':false,'properties':{}}");
+    /* Codex's open items for itemless arrays (and only for them), off with unevaluatedItems anywhere */
+    static const char *const itemless[][2] = {
+        {"{'type':'array'}", "{'type':'array','items':true}"},
+        {"{'type':['array','null']}", "{'type':['array','null'],'items':true}"},
+        {"{'type':'object','properties':{'listeners':{'type':'array'}}}",
+         "{'type':'object','properties':{'listeners':{'type':'array','items':true}}}"},
+        {"{'anyOf':[{'type':'array'},{'type':'null'}]}", "{'anyOf':[{'type':'array','items':true},{'type':'null'}]}"},
+        {"{'type':'array','items':{'type':'array'}}", "{'type':'array','items':{'type':'array','items':true}}"},
+        {"{'type':'array','prefixItems':[{'type':'string'}]}", "{'type':'array','prefixItems':[{'type':'string'}],'items':true}"},
+        {"{'type':'array','prefixItems':[]}", "{'type':'array','prefixItems':[],'items':true}"},
+        {"{'prefixItems':[{'type':'string'}]}", "{'prefixItems':[{'type':'string'}],'items':true}"},
+        {"{'prefixItems':[]}", "{'prefixItems':[],'items':true}"},
+    };
+    for (size_t i = 0; i < ARRAY_LEN(itemless); i++) {
+        SANITIZED(itemless[i][0], false, itemless[i][0]);
+        SANITIZED(itemless[i][0], true, itemless[i][1]);
+        SANITIZED(itemless[i][1], true, itemless[i][1]);
+        char *qs = q2(itemless[i][1]);
+        json_t *s = J(qs);
+        CHECK(oai_strict_schema(s) == NULL); /* the open tail is not representable in strict mode */
+        json_free(s);
+        free(qs);
+    }
+    static const char *const kept[] = {"{'type':'array','items':true}", "{'type':'array','items':false}",
+                                       "{'type':'array','prefixItems':[{'type':'string'}],'items':{'type':'number'}}",
+                                       "{'type':'array','prefixItems':[],'items':false}",
+                                       "{'type':'array','prefixItems':[{'type':'string'}],'unevaluatedItems':false}",
+                                       "{'type':'object','properties':{'closed':{'type':'array','allOf':[{'type':'array',"
+                                       "'prefixItems':[{'type':'string'}]}],'unevaluatedItems':false},'open':{'type':'array',"
+                                       "'prefixItems':[{'type':'string'}]}}}",
+                                       "{'type':'string','enum':[{'type':'array'}],'const':{'type':'array'},"
+                                       "'default':{'type':'array'},'examples':[{'type':'array'}]}"};
+    for (size_t i = 0; i < ARRAY_LEN(kept); i++) SANITIZED(kept[i], true, kept[i]);
+    SANITIZED("{'type':'object','$defs':{'unevaluatedItems':{'type':'string'}},'properties':{'unevaluatedItems':{'type':'string'},"
+              "'listeners':{'type':'array'}}}",
+              true,
+              "{'type':'object','$defs':{'unevaluatedItems':{'type':'string'}},'properties':{'unevaluatedItems':{'type':'string'},"
+              "'listeners':{'type':'array','items':true}}}");
+    SANITIZED("{'type':'object','properties':{'listeners':{'type':'array'}},'const':{'unevaluatedItems':false}}", true,
+              "{'type':'object','properties':{'listeners':{'type':'array','items':true}},'const':{'unevaluatedItems':false}}");
+}
+
+/* the Responses / Codex / Azure tool converters send sanitized parameters (an MCP lookaround pattern no longer 400s the
+ * request); strict adaptation runs on the sanitized schema */
+static void test_responses_tool_schemas(void) {
+    static const char *const apis[] = {"openai-responses", "openai-codex-responses", "azure-openai-responses"};
+    char *qt = q2("[{'name':'mcp__figma_get_design_context','description':'Get Figma design context','parameters':{'type':'object',"
+                  "'properties':{'fileKey':{'type':'string','pattern':'^(?!undefined$|null$)'},'meta':{'type':'object'},"
+                  "'mode':{'oneOf':[{'const':'a'},{'const':'b'}]}},'required':['fileKey']}}]");
+    for (int v = 0; v < 3; v++) {
+        tmodel_t t;
+        char *mj = xasprintf("{\"id\":\"gpt-5.5\",\"api\":\"%s\",\"provider\":\"p1\",\"baseUrl\":\"https://example.test/v1\","
+                             "\"compat\":{\"supportsStrictMode\":true}}",
+                             apis[v]);
+        model_init(&t, mj);
+        free(mj);
+        json_t *tools = J(qt), *msgs = J("[{\"role\":\"user\",\"content\":\"hi\",\"timestamp\":1}]");
+        ai_context_t ctx = {.messages = msgs, .tools = tools};
+        ai_stream_opts_t o;
+        ai_stream_opts_init(&o);
+        json_t *p = oair_build_request(&t.m, &ctx, &o);
+        json_t *tool = json_at(json_get(p, "tools"), 0);
+        char *got = json_dump(json_get(tool, "parameters"), 0);
+        char *want = q2("{'type':'object','properties':{'fileKey':{'type':'string'},'meta':{'type':'object','properties':{},"
+                        "'additionalProperties':true},'mode':{'anyOf':[{'const':'a'},{'const':'b'}]}},'required':['fileKey']}");
+        CHECK_STR(got, want);
+        /* the open `meta` object keeps the tool non-strict, as in omp */
+        CHECK(!json_get_bool(tool, "strict", false));
+        free(got);
+        free(want);
+        json_free(p);
+        json_free(tools);
+        json_free(msgs);
+        json_free(t.raw);
+    }
+    free(qt);
+}
+
 /* ---------- transport retry helpers (fetch-retry.ts, retry-after.ts, retryable.ts) ---------- */
 
 /* omp bd075c82b9: the host's affinity header mirrors the normalized prompt-cache key, none when retention is off */
@@ -1611,6 +1792,8 @@ int main(void) {
     test_responses_stream();
     test_ollama();
     test_strict_schema();
+    test_responses_sanitizer();
+    test_responses_tool_schemas();
     test_leaked_thinking();
     printf("test_providers_oai: %d checks, %d failures\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
