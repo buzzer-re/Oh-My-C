@@ -205,7 +205,9 @@ continuations print mode suppresses).
   (`model.toolCallLoopGuard.*`; the redirect is steered in and persisted as a `tool-call-loop-redirect`
   custom_message) and counts mutating tool results for the todo tracker; `guards_mid_run_nudge` steers the hidden
   `mid-run-todo-nudge`. After every run `app_prompt` / `app_prompt_hidden` call `guards_after_run`, which may append a
-  hidden developer message and continue the agent: the empty-stop retry (`empty-stop-retry.md`, 3 attempts), the
+  hidden developer message and continue the agent: the empty-stop retry (`empty-stop-retry.md`, 3 attempts, each
+  logged as `Empty-stop retry scheduled` with the reply's model, provider and stop metadata; the capped error is logged
+  as a warning and the budget starts over), the
   unexpected-stop retry (`features.unexpectedStopDetection`: mechanical for signed-thinking-only stops, smart judges
   text stops with `judge/unexpected-stop.json`), and the stop-time todo reminder (`todo.reminders`, `remindersMax`,
   skipped when the reply waits for the user, while async jobs run, in plan mode and in print mode; surfaced as the
