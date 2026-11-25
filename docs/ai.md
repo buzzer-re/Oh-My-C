@@ -297,9 +297,10 @@ Points worth knowing per provider:
   single-entry `allOf` inlined, type arrays split into `anyOf` variants, `const` turned into `enum`, and every object
   closed with all its keys required (optional ones nullable). Completions, Responses and Codex use it. Strict
   requests from a tool's own `strict` flag (`agent_tool_t.strict`, omp's per-tool `strict`): `TOOL_STRICT` tools
-  (most built-ins, resolve/reject/report_issue, RPC host tools) go strict wherever the provider supports it, and Codex
+  (most built-ins, resolve/reject/propose/report_issue, RPC host tools) go strict wherever the provider supports it, and Codex
   and Devin send strict only for them. `TOOL_NOT_STRICT` tools (task, generate_image, every MCP tool) are never
-  strict and carry an explicit `strict: false`. Unset tools go strict wherever the provider supports it.
+  strict and carry an explicit `strict: false`. Unset tools (omc-only ones such as `powershell` and library tools) go
+  strict where the provider supports it, except on Codex and Devin.
 - **Responses tool schemas** (`provider_openai_responses.c`, omp `sanitizeSchemaForOpenAIResponses`): on the
   Responses, Codex and Azure routes every tool's parameters are sanitized before strict adaptation: a well-formed
   `oneOf` becomes `anyOf`, every object node gets `properties` (a bare one also `additionalProperties: true`, which
