@@ -282,15 +282,32 @@ Points worth knowing per provider:
   (unlisted earlier models are marked gone), cached 2 h per credential in `<agent dir>/kiro-models.json`; a failed
   refresh keeps the last cache. It runs at startup when Kiro has a credential, after `/login kiro`, on hub F5 and
   `omc models refresh`. omp unions the rosters of several Kiro accounts; omc stores one credential per provider.
+- **Tool schemas** (`toolschema.c`, omp `utils/schema/{draft,dereference,wire,normalize}.ts`): every function returns
+  a new tree in omp's key order. `ts_upgrade_2020_12` is omp's draft-07 upgrade (`definitions` → `$defs` with refs
+  rewritten, tuple `items` → `prefixItems`, `dependencies` split, OpenAPI `nullable`). `ts_wire_schema` is
+  `toolWireSchema` for a raw JSON Schema (upgrade, nullable-scalar `anyOf` → type array, described const unions →
+  typed `enum`, bare enums typed, ArkType `name /** doc */` keys, `{}` → `true`); it runs once on MCP and RPC host
+  tool schemas at registration. omc's built-in schemas are already omp's wire form, so omp's ArkType path has no
+  counterpart. `ts_mcp_normalize` is `normalizeSchemaForMCP` (upgrade, local `$ref`s inlined, `$schema`/`nullable`
+  dropped, `const` and all-`const` unions as typed `enum`). `ts_adapt_for_strict` / `ts_try_enforce_strict` are
+  `adaptSchemaForStrict` / `tryEnforceStrictSchema`. An open keyset (`patternProperties`, `additionalProperties` true
+  or a schema, a bare object), a boolean or `{}` branch, a schema that loops back into itself, or a node strict mode
+  cannot type falls back to the upgraded schema, non-strict. Otherwise the result has validation and annotation
+  keywords dropped, a `default` folded into the description as `(default: X)`, a `$ref` with siblings and a
+  single-entry `allOf` inlined, type arrays split into `anyOf` variants, `const` turned into `enum`, and every object
+  closed with all its keys required (optional ones nullable). Completions, Responses and Codex use it. Strict
+  requests from a tool's own `strict` flag (`agent_tool_t.strict`, omp's per-tool `strict`): `TOOL_STRICT` tools
+  (most built-ins, resolve/reject/report_issue, RPC host tools) go strict wherever the provider supports it, and Codex
+  and Devin send strict only for them. `TOOL_NOT_STRICT` tools (task, generate_image, every MCP tool) are never
+  strict and carry an explicit `strict: false`. Unset tools go strict wherever the provider supports it.
 - **Responses tool schemas** (`provider_openai_responses.c`, omp `sanitizeSchemaForOpenAIResponses`): on the
   Responses, Codex and Azure routes every tool's parameters are sanitized before strict adaptation: a well-formed
   `oneOf` becomes `anyOf`, every object node gets `properties` (a bare one also `additionalProperties: true`, which
   keeps it non-strict), `{}` becomes `true`, and `pattern`s OpenAI's validator rejects (lookarounds, an unescaped `[`
   inside a character class) are dropped, with such `patternProperties` keys folded under `.*`; Codex also gives
-  itemless arrays `items: true`. Not ported on these routes: omp's tool wire pass (`toolWireSchema`: draft-07 upgrade,
-  nullable/const-union rewrites for MCP schemas), `rejectRootObjectUnion` flattening, Moonshot MFJS normalization, the
-  quarantine of tools with enum/type contradictions, and omp's strict pipeline (`tryEnforceStrictSchema`): omc's
-  `oai_strict_schema` is a simpler converter that keeps validation keywords and never keeps `allOf`/`$ref` strict.
+  itemless arrays `items: true`. Azure sends the sanitized schema with `strict: false`. Not ported:
+  `rejectRootObjectUnion` flattening (xAI), Moonshot MFJS normalization, and the quarantine that drops a tool whose
+  schema contradicts itself (`findStrictToolSchemaViolation`).
 - **Gemini signatures on chat completions** (`provider_openai_completions.c`): a tool call's per-call signature
   (`extra_content.google|vertex`, or an encrypted `reasoning_details` entry naming the call), its
   `function.thought_signature` (Portkey without strict OpenAI compliance) and a message-level `thinking_signature` /

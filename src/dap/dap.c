@@ -914,6 +914,7 @@ agent_tool_t *tool_debug_new(tool_env_t *env, dap_manager_t *m) {
         "t\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\",\"description\":\"per-request timeout"
         " seconds\"}},\"required\":[\"action\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("debug", "Debug", desc, s, debug_execute);
+    t->strict = TOOL_STRICT;
     t->examples = schema_lit(
         "[{\"caption\":\"Launch and inspect hang\",\"note\":\"1. debug(action: \\\"launch\\\", program: \\\"./my_app\\\")\\n2. debug(action: \\\"set_breakpoint\\\", file: \\\"src/main.c\\\", line: 42)\\n3. debug(action: \\\"continue\\\")\\n4. If the program appears hung: debug(action: \\\"pause\\"
         "\")\\n5. Inspect state with `threads`, `stack_trace`, `scopes`, and `variables`\"},{\"caption\":"

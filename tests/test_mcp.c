@@ -261,8 +261,20 @@ static void test_tool_cache(const char *dir) {
     CHECK(mono_ms() - t0 < 1000);
     agent_t *a = agent_new();
     CHECK(mcp_sync_tools(m, a) == 2);
-    agent_tool_t *echo = agent_find_tool(a, "mcp__slow_echo_text");
-    CHECK(echo && agent_find_tool(a, "mcp__slow_old_tool") && echo->discoverable);
+    agent_tool_t *echo = agent_find_tool(a, "mcp__slow_echo_text"), *old = agent_find_tool(a, "mcp__slow_old_tool");
+    CHECK(echo && old && echo->discoverable);
+    if (echo && old) { /* MCPTool: the server's description (else "MCP tool from <server>"), its schema, `strict: false` */
+        json_t *we = agent_tool_wire(echo), *wo = agent_tool_wire(old);
+        char *de = json_dump(we, 0), *dd = json_dump(wo, 0);
+        CHECK(str_eq(de, "{\"name\":\"mcp__slow_echo_text\",\"description\":\"Echo text back\",\"parameters\":{\"type\":"
+                         "\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}},\"strict\":false}"));
+        CHECK(str_eq(dd, "{\"name\":\"mcp__slow_old_tool\",\"description\":\"MCP tool from slow\",\"parameters\":{\"type\":"
+                         "\"object\",\"properties\":{}},\"strict\":false}"));
+        free(de);
+        free(dd);
+        json_free(we);
+        json_free(wo);
+    }
     if (echo) { /* the deferred call waits for the connection, then runs */
         tool_ctx_t ctx = {0};
         tool_result_t out = {0};

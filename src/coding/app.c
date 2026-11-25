@@ -1773,12 +1773,14 @@ static void add_checkpoint_tools(app_t *a, agent_t *ag) {
     json_t *s1 = schema_lit("{\"type\":\"object\",\"properties\":{\"goal\":{\"type\":\"string\",\"description\":\"investigati"
         "on goal\"}},\"required\":[\"goal\"],\"additionalProperties\":false}");
     agent_tool_t *t1 = agent_tool_new("checkpoint", "Checkpoint", d1, s1, checkpoint_execute);
+    t1->strict = TOOL_STRICT;
     t1->ud = a;
     t1->exclusive = true;
     t1->intent_mode = INTENT_OMIT; /* checkpoint.ts derives its intent from the goal */
     json_t *s2 = schema_lit("{\"type\":\"object\",\"properties\":{\"report\":{\"type\":\"string\",\"description\":\"investiga"
         "tion findings\"}},\"required\":[\"report\"],\"additionalProperties\":false}");
     agent_tool_t *t2 = agent_tool_new("rewind", "Rewind", d2, s2, rewind_execute);
+    t2->strict = TOOL_STRICT;
     t2->ud = a;
     t2->exclusive = true;
     t2->intent_mode = INTENT_OMIT;

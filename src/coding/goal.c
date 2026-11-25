@@ -264,6 +264,7 @@ static void sync_tool(app_t *a) {
         schema_prop(s, "objective", "string", "goal objective", false);
         schema_prop(s, "token_budget", "integer", "token budget", false);
         agent_tool_t *t = agent_tool_new("goal", "Goal", desc, s, goal_execute);
+        t->strict = TOOL_STRICT;
         t->ud = a;
         t->exclusive = true;
         agent_add_tool(a->agent, t);

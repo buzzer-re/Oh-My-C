@@ -187,6 +187,7 @@ agent_tool_t *tool_edit_new(tool_env_t *env) {
     char *desc = prompt_load_or(rel, "Edit files.");
     free(rel);
     agent_tool_t *t = agent_tool_new("edit", "Edit", desc, edit_schema(mode), edit_execute);
+    t->strict = TOOL_STRICT;
     t->exclusive = true;
     t->examples = edit_examples(mode);
     free(desc);

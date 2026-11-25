@@ -147,7 +147,8 @@ in `app.c`:
 
 omp's user-facing extension system (TypeScript hooks, custom tools and commands under
 `extensibility/`) is not ported. Host programs add tools through the RPC `set_host_tools` command or
-`omc_register_tool()` ([modes.md](modes.md)).
+`omc_register_tool()` ([modes.md](modes.md)). RPC host tools are strict like omp's `RpcHostToolAdapter`, and their
+schemas get omp's wire pass when registered.
 
 ## Session runtime (`app.c`)
 

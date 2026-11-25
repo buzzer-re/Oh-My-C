@@ -2,6 +2,7 @@
 #include "mcp.h"
 #include "mcperr.h"
 
+#include "ai/toolschema.h"
 #include "config/settings.h"
 #include "core/fs.h"
 #include "core/proc.h"
@@ -2599,15 +2600,23 @@ int mcp_register_tools(mcp_manager_t *m, agent_t *a) {
             pthread_mutex_unlock(&s->mu);
             if (!visible) continue;
             char *name = mcp_tool_name(s->name, tn);
-            json_t *schema = json_get_obj(t, "inputSchema");
-            json_t *params = schema ? json_clone(schema) : json_parse_str("{\"type\":\"object\",\"properties\":{}}");
-            if (!json_get(params, "type")) json_set_str(params, "type", "object");
-            if (!json_get(params, "properties")) json_set(params, "properties", json_obj());
-            const char *desc = json_get_str(t, "description");
-            char *d = xasprintf("%s\n\n(MCP tool `%s` from server `%s`)", desc ? desc : "", tn, s->name);
+            /* MCPTool: normalizeSchemaForMCP(inputSchema), then the wire pass every provider applies (toolWireSchema) */
+            json_t *schema = json_get_obj(t, "inputSchema"), *params;
+            if (schema) {
+                json_t *norm = ts_mcp_normalize(schema);
+                params = ts_wire_schema(norm);
+                json_free(norm);
+            } else {
+                params = json_parse_str("{\"type\":\"object\",\"properties\":{}}");
+            }
+            const char *desc = json_get_str(t, "description"); /* MCPTool: tool.description ?? `MCP tool from ${server}` */
+            char *d = desc ? xstrdup(desc) : xasprintf("MCP tool from %s", s->name);
             char *label = xasprintf("%s/%s", s->name, tn); /* omp MCPTool label */
             agent_tool_t *at = agent_tool_new(name, label, d, params, mcp_tool_execute);
             free(label);
+            /* MCPTool `strict = false`: the server validates, and strict mode makes OpenAI-family models over-fill
+             * mutually exclusive optional fields */
+            at->strict = TOOL_NOT_STRICT;
             bridge_t *b = xcalloc(1, sizeof(*b));
             b->m = m;
             b->server = xstrdup(s->name);
