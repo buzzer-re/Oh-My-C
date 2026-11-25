@@ -6,7 +6,7 @@ A from-scratch C rewrite of [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi
 $ ldd build/omc
     libssl.so.3  libcrypto.so.3  libz.so.1  libm.so.6  libc.so.6
 ```
-Current equivalent OMP release: v19.1.0
+Current equivalent OMP release: v19.1.1
 
 ## Why
 
@@ -16,7 +16,7 @@ It also solved another problem for me: I don't have to install Bun or any other 
 
 ## Installing
 
-omc's version is the omp release it matches, so `omc v19.1.0` behaves like `omp v19.1.0`.
+omc's version is the omp release it matches, so `omc v19.1.1` behaves like `omp v19.1.1`.
 
 The quick way picks the right binary for your system, checks it against `SHA256SUMS` and installs it into `~/.local/bin`:
 
