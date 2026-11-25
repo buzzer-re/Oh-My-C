@@ -477,6 +477,11 @@ request itself or fail it at once. Anthropic uses it for:
   (`anthropic-usage-wrap-up.md`). omp's sibling-account health gate before auto-accept is not ported
   (omc does not rotate Claude accounts).
 
+The same header hook keeps the `request-id` of the response a turn streams from on the assistant message
+(`requestId`, between `timestamp` and `responseId`), refusals and mid-stream failures included; a request that got no
+successful response carries none. A turn that ends in a provider error logs one `agent turn ended with provider
+error` line (provider, model, errorStatus, errorId, requestId, errorMessage; `OMC_LOG`).
+
 ## Server-side conversation state
 
 Both are ports of omp 18.17 and keep the client as the source of truth: a turn sends only what it appends when its full
