@@ -282,6 +282,15 @@ Points worth knowing per provider:
   (unlisted earlier models are marked gone), cached 2 h per credential in `<agent dir>/kiro-models.json`; a failed
   refresh keeps the last cache. It runs at startup when Kiro has a credential, after `/login kiro`, on hub F5 and
   `omc models refresh`. omp unions the rosters of several Kiro accounts; omc stores one credential per provider.
+- **Responses tool schemas** (`provider_openai_responses.c`, omp `sanitizeSchemaForOpenAIResponses`): on the
+  Responses, Codex and Azure routes every tool's parameters are sanitized before strict adaptation: a well-formed
+  `oneOf` becomes `anyOf`, every object node gets `properties` (a bare one also `additionalProperties: true`, which
+  keeps it non-strict), `{}` becomes `true`, and `pattern`s OpenAI's validator rejects (lookarounds, an unescaped `[`
+  inside a character class) are dropped, with such `patternProperties` keys folded under `.*`; Codex also gives
+  itemless arrays `items: true`. Not ported on these routes: omp's tool wire pass (`toolWireSchema`: draft-07 upgrade,
+  nullable/const-union rewrites for MCP schemas), `rejectRootObjectUnion` flattening, Moonshot MFJS normalization, the
+  quarantine of tools with enum/type contradictions, and omp's strict pipeline (`tryEnforceStrictSchema`): omc's
+  `oai_strict_schema` is a simpler converter that keeps validation keywords and never keeps `allOf`/`$ref` strict.
 - **Gemini signatures on chat completions** (`provider_openai_completions.c`): a tool call's per-call signature
   (`extra_content.google|vertex`, or an encrypted `reasoning_details` entry naming the call), its
   `function.thought_signature` (Portkey without strict OpenAI compliance) and a message-level `thinking_signature` /
