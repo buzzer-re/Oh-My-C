@@ -41,7 +41,7 @@ def stop():
 
 
 def reap_job():
-    """the background job's shell outlives a killed omc: end it by the pid it wrote"""
+    """the background job outlives a killed omc: end it by the pid its shell wrote (the shell execs into the sleep)"""
     try:
         with open(JOB_PID) as f:
             os.kill(int(f.read().strip()), signal.SIGKILL)
@@ -152,7 +152,7 @@ for f in glob.glob(os.path.join(agent, "sessions", "*", "*.jsonl")):
 launch()
 if not wait_for("mock-1", 10):
     fail("jobs startup", plain()[-600:])
-script = [["bash", {"command": "echo $$ > job.pid; sleep 20", "async": True}],
+script = [["bash", {"command": "echo $$ > job.pid; exec sleep 20", "async": True}],
           ["bash", {"command": "sleep 2; echo replayed-$((40+4))"}]]
 send("calls:" + json.dumps(script))
 send(ENTER)
