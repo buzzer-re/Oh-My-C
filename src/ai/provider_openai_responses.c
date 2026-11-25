@@ -8,6 +8,7 @@
 #include "ai/compat_detect.h"
 #include "ai/provider_openai.h"
 #include "ai/responses_ws.h"
+#include "ai/toolschema.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -694,10 +695,15 @@ static json_t *convert_tools(const ai_model_t *m, const json_t *tools, int varia
         json_t *base = tool_params(t);
         json_t *params = oai_responses_sanitize_schema(base, variant == V_CODEX);
         json_free(base);
-        json_t *adapted = want ? oai_strict_schema(params) : NULL;
-        if (adapted) {
-            json_set(w, "parameters", adapted);
+        /* adaptSchemaForStrict: the strict form, or the (upgraded) sanitized schema when strict mode cannot represent it */
+        bool eff = false;
+        if (variant != V_AZURE) {
+            json_t *ad = ts_adapt_for_strict(params, want, &eff);
             json_free(params);
+            params = ad;
+        }
+        if (eff) {
+            json_set(w, "parameters", params);
             json_set_bool(w, "strict", true);
         } else {
             json_set(w, "parameters", params);

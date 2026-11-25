@@ -2,6 +2,7 @@
 #include <time.h>
 #include "ai/leaked_thinking.h"
 #include "ai/provider_openai.h"
+#include "ai/toolschema.h"
 #include "core/fs.h"
 #include <unistd.h>
 
@@ -1326,43 +1327,188 @@ static void test_leaked_thinking(void) {
     json_free(t.raw);
 }
 
-static void test_strict_schema(void) {
-    json_t *s = J("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"x\"},"
-                  "\"b\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"number\"}]},"
-                  "\"c\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"k\":{\"type\":\"string\"}},\"required\":[\"k\"]}}},"
-                  "\"required\":[\"a\"]}");
-    json_t *r = oai_strict_schema(s);
-    CHECK(r != NULL);
-    json_t *props = json_get(r, "properties");
-    CHECK(json_get(json_get(props, "a"), "default") == NULL);
-    CHECK(json_len(json_get(json_get(props, "b"), "anyOf")) == 3);
-    CHECK(json_len(json_get(json_get(props, "c"), "anyOf")) == 2);
-    json_t *inner = json_get(json_at(json_get(json_get(props, "c"), "anyOf"), 0), "items");
-    CHECK(json_get(inner, "additionalProperties") && !json_get_bool(inner, "additionalProperties", true));
+static char *q2(const char *s);
+
+/* tryEnforceStrictSchema result as compact JSON plus the strict flag ("S:" strict, "N:" fallback); owned */
+static char *strict_of(const char *in) {
+    char *qi = q2(in);
+    json_t *s = J(qi);
+    bool st = false;
+    json_t *r = ts_try_enforce_strict(s, &st);
+    char *d = json_dump(r, 0), *out = xasprintf("%s%s", st ? "S:" : "N:", d);
+    free(d);
     json_free(r);
     json_free(s);
-    const char *bad[] = {"{\"type\":\"object\"}", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":true}",
-                         "{\"type\":\"object\",\"properties\":{\"x\":{\"oneOf\":[{\"type\":\"string\"}]}}}",
-                         "{\"type\":\"object\",\"properties\":{\"x\":{\"$ref\":\"#/$defs/y\",\"description\":\"d\"}}}",
-                         /* omp 008e054ba1: a bare object property is open, so the tool goes non-strict instead of
-                          * closing it to an empty-only object */
-                         "{\"type\":\"object\",\"properties\":{\"meta\":{\"type\":\"object\"}}}"};
-    for (size_t i = 0; i < ARRAY_LEN(bad); i++) {
-        s = J(bad[i]);
-        r = oai_strict_schema(s);
-        CHECK(r == NULL);
-        json_free(r);
-        json_free(s);
+    free(qi);
+    return out;
+}
+
+static void check_strict(const char *in, const char *want, int line) {
+    char *got = strict_of(in), *qw = q2(want);
+    g_checks++;
+    if (strcmp(got, qw)) {
+        g_fail++;
+        fprintf(stderr, "%s:%d: strict\n  got  %s\n  want %s\n", __FILE__, line, got, qw);
     }
-    /* deep nesting is capped */
-    sb_t deep = SB_INIT;
-    for (int i = 0; i < 40; i++) sb_append(&deep, "{\"type\":\"array\",\"items\":");
-    sb_append(&deep, "{\"type\":\"string\"}");
-    for (int i = 0; i < 40; i++) sb_putc(&deep, '}');
-    s = J(deep.s);
-    CHECK(oai_strict_schema(s) == NULL);
+    free(got);
+    free(qw);
+}
+#define STRICT(in, want) check_strict(in, want, __LINE__)
+
+static void check_ts(json_t *(*fn)(const json_t *), const char *in, const char *want, int line) {
+    char *qi = q2(in), *qw = q2(want);
+    json_t *s = J(qi), *w = J(qw), *r = fn(s);
+    char *got = json_dump(r, 0), *exp = json_dump(w, 0);
+    g_checks++;
+    if (strcmp(got, exp)) {
+        g_fail++;
+        fprintf(stderr, "%s:%d: schema\n  got  %s\n  want %s\n", __FILE__, line, got, exp);
+    }
+    free(got);
+    free(exp);
+    json_free(r);
     json_free(s);
-    sb_free(&deep);
+    json_free(w);
+    free(qi);
+    free(qw);
+}
+#define TS(fn, in, want) check_ts(fn, in, want, __LINE__)
+
+/* omp's tool-schema pipeline (toolschema.c): upstream's cases from schema-strict-mode.test.ts, schema-normalization and
+ * the draft/dereference/wire tests, with omp's key order (built by hand from omp's spreads and assignments) */
+static void test_strict_schema(void) {
+    /* draft-07 -> 2020-12 */
+    TS(ts_upgrade_2020_12,
+       "{'$schema':'http://json-schema.org/draft-07/schema#','type':'object','definitions':{'value':{'type':'string'}},"
+       "'properties':{'value':{'$ref':'#%2Fdefinitions%2Fvalue'}},'required':['value']}",
+       "{'$schema':'https://json-schema.org/draft/2020-12/schema','type':'object','$defs':{'value':{'type':'string'}},"
+       "'properties':{'value':{'$ref':'#/$defs/value'}},'required':['value']}");
+    TS(ts_upgrade_2020_12, "{'type':'array','items':[{'type':'string'},{'type':'number'}],'additionalItems':false}",
+       "{'type':'array','prefixItems':[{'type':'string'},{'type':'number'}],'items':false}");
+    TS(ts_upgrade_2020_12, "{'type':'object','properties':{'a':{'type':'string'}},'dependencies':{'a':['b'],'c':{'required':['d']}}}",
+       "{'type':'object','properties':{'a':{'type':'string'}},'dependentRequired':{'a':['b']},'dependentSchemas':{'c':{'required':['d']}}}");
+    TS(ts_upgrade_2020_12,
+       "{'type':'object','properties':{'n':{'type':'string','nullable':true},'o':{'nullable':true,'properties':{}}}}",
+       "{'type':'object','properties':{'n':{'type':['string','null']},'o':{'anyOf':[{'properties':{}},{'type':'null'}]}}}");
+    TS(ts_upgrade_2020_12, "{'type':'object','properties':{'a':{'type':'string','enum':['x']}}}",
+       "{'type':'object','properties':{'a':{'type':'string','enum':['x']}}}");
+    /* local `$ref` pointers: percent-decoding, ~1 / ~0, malformed and external refs */
+    strvec_t tok = {0};
+    CHECK(ts_ref_tokens("#", &tok) && tok.n == 0);
+    CHECK(ts_ref_tokens("#/$defs/a%252Fb%20~1~01%20%E7%A9%BA%0A", &tok) && tok.n == 2 && !strcmp(tok.v[0], "$defs") &&
+          !strcmp(tok.v[1], "a%2Fb /~1 \xe7\xa9\xba\n"));
+    strvec_free(&tok);
+    CHECK(!ts_ref_tokens("#/$defs/%E0%A4%A", &tok) && !ts_ref_tokens("https://example.com/schema#/$defs/value", &tok));
+    CHECK(!ts_ref_tokens("#$defs", &tok) && !ts_ref_tokens("#/$defs/%C0%80", &tok));
+    strvec_push(&tok, "$defs");
+    strvec_push(&tok, "a/b~ c\xe7\xa9\xba");
+    char *f = ts_ref_format(&tok);
+    CHECK_STR(f, "#/$defs/a~1b~0%20c%E7%A9%BA");
+    free(f);
+    strvec_free(&tok);
+    /* dereferencing inlines local refs (siblings merged over the def) and drops the definition blocks */
+    TS(ts_dereference,
+       "{'type':'object','$defs':{'a%2Fb /~1 x':{'type':'string'},'':{'type':'integer'}},'properties':{'encoded':{'$ref':"
+       "'#/$defs/a%252Fb%20~1~01%20x','description':'encoded'},'empty':{'$ref':'#/$defs/','description':'empty'},"
+       "'ext':{'$ref':'https://example.com/s','description':'ext'}},'required':['encoded']}",
+       "{'type':'object','properties':{'encoded':{'type':'string','description':'encoded'},'empty':{'type':'integer',"
+       "'description':'empty'},'ext':{'$ref':'https://example.com/s','description':'ext'}},'required':['encoded']}");
+    TS(ts_dereference, "{'type':'object','$defs':{'N':{'type':'object','properties':{'next':{'$ref':'#/$defs/N'}}}},"
+                       "'properties':{'head':{'$ref':'#/$defs/N'}}}",
+       "{'type':'object','properties':{'head':{'type':'object','properties':{'next':{}}}}}");
+    /* MCP input schemas: $schema and nullable dropped, const and all-const unions as typed enums */
+    TS(ts_mcp_normalize,
+       "{'$schema':'http://json-schema.org/draft-07/schema#','type':'object','properties':{'mode':{'oneOf':[{'const':'a'},"
+       "{'const':'b'}],'description':'m'},'fixed':{'const':5},'opt':{'type':'string','nullable':true},'mixed':{'anyOf':"
+       "[{'const':1},{'const':null}]}},'required':['mode']}",
+       "{'type':'object','properties':{'mode':{'enum':['a','b'],'type':'string','description':'m'},'fixed':{'enum':[5],"
+       "'type':'number'},'opt':{'type':['string','null']},'mixed':{'enum':[1,null],'type':'number'}},'required':['mode']}");
+    /* the wire pass: nullable scalar unions as type arrays, described const unions collapsed, bare enums typed, {} -> true */
+    TS(ts_wire_schema,
+       "{'type':'object','properties':{'g':{'anyOf':[{'type':'string','enum':['x','y'],'description':'guide'},{'type':'null'}],"
+       "'default':null,'description':'guide'},'k':{'anyOf':[{'const':'a','description':'kind'},{'const':'b','description':"
+       "'kind'}],'description':'kind'},'e':{'enum':[1,2]},'m':{}},'additionalProperties':{}}",
+       "{'type':'object','properties':{'g':{'default':null,'description':'guide','enum':['x','y',null],'type':['string','null']},"
+       "'k':{'description':'kind','type':'string','enum':['a','b']},'e':{'enum':[1,2],'type':'number'},'m':true},"
+       "'additionalProperties':true}");
+    TS(ts_wire_schema, "{'type':'object','properties':{'path /** where to look */':{'type':'string'}},'required':['path /** where to look */']}",
+       "{'type':'object','properties':{'path':{'type':'string','description':'where to look'}},'required':['path']}");
+    /* strict mode: non-structural keywords dropped, defaults folded into descriptions, type last, objects closed */
+    STRICT("{'type':'object','properties':{'path':{'type':'string'},'limit':{'type':'integer','minimum':1,'maximum':200}},"
+           "'additionalProperties':false}",
+           "S:{'properties':{'path':{'anyOf':[{'type':'string'},{'type':'null'}]},'limit':{'anyOf':[{'type':'integer'},"
+           "{'type':'null'}]}},'type':'object','additionalProperties':false,'required':['path','limit']}");
+    STRICT("{'type':'object','properties':{'retries':{'type':'number','description':'retry count','default':3},'name':{'type':"
+           "'string','format':'email','pattern':'^a'}},'required':['name']}",
+           "S:{'properties':{'retries':{'anyOf':[{'type':'number'},{'type':'null'}],'description':'retry count (default: 3)'},"
+           "'name':{'type':'string'}},'required':['retries','name'],'type':'object','additionalProperties':false}");
+    STRICT("{'type':['string','null'],'enum':['javascript','python',null],'description':'guide'}",
+           "S:{'anyOf':[{'enum':['javascript','python'],'type':'string'},{'enum':[null],'type':'null'}],'description':'guide'}");
+    STRICT("{'type':'object','properties':{'guide':{'default':null,'description':'guide','enum':['javascript','python',null],"
+           "'type':['string','null']}},'required':['guide'],'additionalProperties':false}",
+           "S:{'properties':{'guide':{'anyOf':[{'enum':['javascript','python'],'type':'string'},{'enum':[null],'type':'null'}],"
+           "'description':'guide (default: null)'}},'required':['guide'],'type':'object','additionalProperties':false}");
+    /* 35e42d9e8a: an object whose shape comes from allOf or $ref stays strict, the shape inlined */
+    STRICT("{'type':'object','properties':{'merged':{'type':'object','allOf':[{'type':'object','properties':{'a':{'type':"
+           "'string'}},'required':['a'],'additionalProperties':false}]},'referenced':{'type':'object','$ref':'#/$defs/Shape'}},"
+           "'required':['merged','referenced'],'additionalProperties':false,'$defs':{'Shape':{'type':'object','properties':"
+           "{'a':{'type':'string'}},'required':['a'],'additionalProperties':false}}}",
+           "S:{'properties':{'merged':{'properties':{'a':{'type':'string'}},'required':['a'],'type':'object',"
+           "'additionalProperties':false},'referenced':{'properties':{'a':{'type':'string'}},'required':['a'],'type':'object',"
+           "'additionalProperties':false}},'required':['merged','referenced'],'$defs':{'Shape':{'properties':{'a':{'type':"
+           "'string'}},'required':['a'],'type':'object','additionalProperties':false}},'type':'object','additionalProperties':false}");
+    /* a $ref with siblings is unravelled (siblings win); a bare $ref stays */
+    STRICT("{'type':'object','$defs':{'Star':{'type':'object','properties':{'name':{'type':'string','description':'The name of the "
+           "star.'}},'required':['name']}},'properties':{'largest_star':{'$ref':'#/$defs/Star','description':'The largest star in "
+           "the galaxy.'},'foo':{'$ref':'#/$defs/Star'}},'required':['largest_star','foo']}",
+           "S:{'$defs':{'Star':{'properties':{'name':{'description':'The name of the star.','type':'string'}},'required':['name'],"
+           "'type':'object','additionalProperties':false}},'properties':{'largest_star':{'properties':{'name':{'description':"
+           "'The name of the star.','type':'string'}},'required':['name'],'description':'The largest star in the galaxy.',"
+           "'type':'object','additionalProperties':false},'foo':{'$ref':'#/$defs/Star'}},'required':['largest_star','foo'],"
+           "'type':'object','additionalProperties':false}");
+    /* single-entry allOf inlined with its keys winning; oneOf and unresolved refs stay (omp keeps them strict) */
+    STRICT("{'type':'string','description':'outer','allOf':[{'description':'inner'}]}", "S:{'description':'inner','type':'string'}");
+    STRICT("{'type':'object','properties':{'x':{'oneOf':[{'type':'string'}]}},'required':['x']}",
+           "S:{'properties':{'x':{'oneOf':[{'type':'string'}]}},'required':['x'],'type':'object','additionalProperties':false}");
+    /* nested pure unions splice into the parent; an optional union gains null at the end */
+    STRICT("{'type':'object','properties':{'value':{'anyOf':[{'anyOf':[{'type':'string'},{'type':'number'}],'description':'inner "
+           "union'},{'type':'boolean'}]},'opt':{'anyOf':[{'type':'string'},{'type':'number'}]}},'required':['value']}",
+           "S:{'properties':{'value':{'anyOf':[{'type':'string'},{'type':'number'},{'type':'boolean'}],'description':'inner union'},"
+           "'opt':{'anyOf':[{'type':'string'},{'type':'number'},{'type':'null'}]}},'required':['value','opt'],'type':'object',"
+           "'additionalProperties':false}");
+    /* enum / const roots get an inferred type; unrepresentable shapes fall back to the (upgraded) input */
+    STRICT("{'enum':['draft','published']}", "S:{'enum':['draft','published'],'type':'string'}");
+    STRICT("{'const':7}", "S:{'enum':[7],'type':'number'}");
+    STRICT("{'enum':[1,'two',null]}", "N:{'enum':[1,'two',null]}");
+    STRICT("{'const':{'a':1}}", "N:{'const':{'a':1}}");
+    STRICT("{'type':'object'}", "N:{'type':'object'}");
+    STRICT("{'type':'object','properties':{'meta':{'type':'object'}}}", "N:{'type':'object','properties':{'meta':{'type':'object'}}}");
+    STRICT("{'type':'object','properties':{'xs':{'type':'array','items':true}},'required':['xs']}",
+           "N:{'type':'object','properties':{'xs':{'type':'array','items':true}},'required':['xs']}");
+    STRICT("{'type':'object','properties':{'a':{'anyOf':[true,{'type':'string'}]}}}",
+           "N:{'type':'object','properties':{'a':{'anyOf':[true,{'type':'string'}]}}}");
+    STRICT("{'type':'object','properties':{},'patternProperties':{'^x':{'type':'string'}}}",
+           "N:{'type':'object','properties':{},'patternProperties':{'^x':{'type':'string'}}}");
+    STRICT("{'type':'object','properties':{'empty':{'type':'object','properties':{}},'closed':{'type':'object',"
+           "'additionalProperties':false}},'required':['empty','closed'],'additionalProperties':false}",
+           "S:{'properties':{'empty':{'properties':{},'type':'object','additionalProperties':false,'required':[]},'closed':"
+           "{'type':'object','additionalProperties':false,'properties':{},'required':[]}},'required':['empty','closed'],"
+           "'type':'object','additionalProperties':false}");
+    /* a recursive def with siblings is cut where it re-enters itself (omp's circular graph): non-strict */
+    STRICT("{'type':'object','$defs':{'N':{'type':'object','properties':{'next':{'type':'object','properties':{'child':{'$ref':"
+           "'#/$defs/N','description':'c'}}}}}},'properties':{'head':{'$ref':'#/$defs/N'}},'required':['head']}",
+           "N:{'type':'object','$defs':{'N':{'type':'object','properties':{'next':{'type':'object','properties':{'child':{'$ref':"
+           "'#/$defs/N','description':'c'}}}}}},'properties':{'head':{'$ref':'#/$defs/N'}},'required':['head']}");
+    /* adaptSchemaForStrict without strict is the upgraded schema */
+    json_t *s = J("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"nullable\":true}}}");
+    bool eff = true;
+    json_t *r = ts_adapt_for_strict(s, false, &eff);
+    char *d = json_dump(r, 0);
+    CHECK(!eff);
+    CHECK_STR(d, "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"string\",\"null\"]}}}");
+    free(d);
+    json_free(r);
+    json_free(s);
 }
 
 /* JSON with single quotes for double quotes (test readability); owned */
@@ -1487,7 +1633,10 @@ static void test_responses_sanitizer(void) {
         SANITIZED(itemless[i][1], true, itemless[i][1]);
         char *qs = q2(itemless[i][1]);
         json_t *s = J(qs);
-        CHECK(oai_strict_schema(s) == NULL); /* the open tail is not representable in strict mode */
+        bool st = true;
+        json_t *r = ts_try_enforce_strict(s, &st);
+        CHECK(!st); /* the open tail is not representable in strict mode */
+        json_free(r);
         json_free(s);
         free(qs);
     }
@@ -1544,6 +1693,59 @@ static void test_responses_tool_schemas(void) {
         json_free(t.raw);
     }
     free(qt);
+}
+
+/* a tool's own `strict` across routes on a strict-capable model: `true` and unset go strict where the route allows
+ * (Codex only for `true`), `false` never does and is kept on the wire (omp MCPTool / TaskTool / generate_image) */
+static void test_tool_strict_flags(void) {
+    char *qt = q2("[{'name':'a','description':'','parameters':{'type':'object','properties':{'x':{'type':'string','description':"
+                  "'d','default':'v'}},'required':['x']},'strict':true},{'name':'b','description':'','parameters':{'type':"
+                  "'object','properties':{'x':{'type':'string','description':'d','default':'v'}},'required':['x']}},{'name':'c',"
+                  "'description':'','parameters':{'type':'object','properties':{'x':{'type':'string','description':'d','default':"
+                  "'v'}},'required':['x']},'strict':false}]");
+    char *strict_form = q2("{'properties':{'x':{'description':'d (default: v)','type':'string'}},'required':['x'],'type':'object',"
+                           "'additionalProperties':false}");
+    char *plain_form = q2("{'type':'object','properties':{'x':{'type':'string','description':'d','default':'v'}},'required':['x']}");
+    /* per api: the flag each of a / b / c gets ("T" true, "F" false, "-" absent); "T" also means the strict form */
+    static const struct {
+        const char *api, *want;
+    } routes[] = {{"openai-completions", "TTF"}, {"openai-responses", "TTF"}, {"openai-codex-responses", "T-F"},
+                  {"azure-openai-responses", "FFF"}};
+    for (size_t r = 0; r < ARRAY_LEN(routes); r++) {
+        tmodel_t t;
+        char *mj = xasprintf("{\"id\":\"gpt-5.5\",\"api\":\"%s\",\"provider\":\"p1\",\"reasoning\":false,\"baseUrl\":"
+                             "\"https://example.test/v1\",\"compat\":{\"supportsStrictMode\":true}}",
+                             routes[r].api);
+        model_init(&t, mj);
+        free(mj);
+        json_t *tools = J(qt), *msgs = J("[{\"role\":\"user\",\"content\":\"hi\",\"timestamp\":1}]");
+        ai_context_t ctx = {.messages = msgs, .tools = tools};
+        ai_stream_opts_t o;
+        ai_stream_opts_init(&o);
+        bool cc = !strcmp(routes[r].api, "openai-completions");
+        json_t *p = cc ? oaic_build_request(&t.m, &ctx, &o) : oair_build_request(&t.m, &ctx, &o);
+        for (size_t i = 0; i < 3; i++) {
+            json_t *w = json_at(json_get(p, "tools"), i);
+            if (cc) w = json_get_obj(w, "function");
+            const json_t *st = json_get(w, "strict");
+            char got = !st ? '-' : json_is_bool(st) && st->u.b ? 'T' : 'F';
+            char *params = json_dump(json_get(w, "parameters"), 0);
+            g_checks++;
+            if (got != routes[r].want[i] || strcmp(params, got == 'T' ? strict_form : plain_form)) {
+                g_fail++;
+                fprintf(stderr, "%s:%d: %s tool %zu: strict %c (want %c), parameters %s\n", __FILE__, __LINE__, routes[r].api, i,
+                        got, routes[r].want[i], params);
+            }
+            free(params);
+        }
+        json_free(p);
+        json_free(tools);
+        json_free(msgs);
+        json_free(t.raw);
+    }
+    free(qt);
+    free(strict_form);
+    free(plain_form);
 }
 
 /* ---------- transport retry helpers (fetch-retry.ts, retry-after.ts, retryable.ts) ---------- */
@@ -1792,6 +1994,7 @@ int main(void) {
     test_responses_stream();
     test_ollama();
     test_strict_schema();
+    test_tool_strict_flags();
     test_responses_sanitizer();
     test_responses_tool_schemas();
     test_leaked_thinking();

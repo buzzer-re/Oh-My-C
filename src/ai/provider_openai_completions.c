@@ -6,6 +6,7 @@
 #include "ai/compat_detect.h"
 #include "ai/provider_openai.h"
 #include "ai/think_heal.h"
+#include "ai/toolschema.h"
 
 #include <math.h>
 
@@ -238,172 +239,6 @@ static void stored_sig_merge(json_t *blk, const char *key, json_t *val) {
     json_set(merged, key, val);
     json_set(blk, "thoughtSignature", json_str_own(json_dump(merged, 0)));
     json_free(merged);
-}
-
-/* ---------- strict JSON schema adaptation ---------- */
-
-static bool str_in(const char *s, const char *const *list) {
-    for (; *list; list++)
-        if (strcmp(s, *list) == 0) return true;
-    return false;
-}
-
-static const char *const k_strict_keep[] = {"type",     "properties", "required",         "additionalProperties",
-                                            "items",    "enum",       "const",            "anyOf",
-                                            "description", "title",   "$ref",             "$defs",
-                                            "definitions", "pattern", "format",           "minimum",
-                                            "maximum",  "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
-                                            "minItems", "maxItems",   NULL};
-static const char *const k_strict_drop[] = {"default", "examples", "$schema", "$id", "$comment",
-                                            "deprecated", "readOnly", "writeOnly", NULL};
-
-static json_t *strict_node(const json_t *s, int depth, bool *ok);
-
-static json_t *strict_map(const json_t *obj, int depth, bool *ok) {
-    json_t *r = json_obj();
-    const char *k;
-    json_t *v;
-    json_obj_foreach(obj, mi, k, v) {
-        json_t *c = strict_node(v, depth + 1, ok);
-        if (!*ok) {
-            json_free(c);
-            break;
-        }
-        json_set(r, k, c);
-    }
-    return r;
-}
-
-static bool is_nullable_anyof(const json_t *n) {
-    json_t *any = json_get_arr(n, "anyOf");
-    json_t *e;
-    json_arr_foreach(any, ai, e) {
-        if (str_eq(json_get_str(e, "type"), "null")) return true;
-    }
-    return false;
-}
-
-static json_t *null_schema(void) {
-    json_t *n = json_obj();
-    json_set_str(n, "type", "null");
-    return n;
-}
-
-static json_t *strict_node(const json_t *s, int depth, bool *ok) {
-    if (!*ok) return NULL;
-    if (depth > 32 || !json_is_obj(s)) {
-        *ok = false;
-        return NULL;
-    }
-    if (json_get(s, "$ref")) {
-        const char *k;
-        json_t *v;
-        json_obj_foreach(s, ri, k, v) {
-            (void)v;
-            if (strcmp(k, "$ref") != 0 && !str_in(k, k_strict_drop)) {
-                *ok = false;
-                return NULL;
-            }
-        }
-    }
-    json_t *r = json_obj();
-    const char *k;
-    json_t *v;
-    json_obj_foreach(s, si, k, v) {
-        if (str_in(k, k_strict_drop)) continue;
-        if (!str_in(k, k_strict_keep)) {
-            *ok = false;
-            break;
-        }
-        if (strcmp(k, "properties") == 0 || strcmp(k, "$defs") == 0 || strcmp(k, "definitions") == 0) {
-            if (!json_is_obj(v)) {
-                *ok = false;
-                break;
-            }
-            json_set(r, k, strict_map(v, depth, ok));
-        } else if (strcmp(k, "items") == 0) {
-            json_set(r, k, strict_node(v, depth + 1, ok));
-        } else if (strcmp(k, "anyOf") == 0) {
-            if (!json_is_arr(v)) {
-                *ok = false;
-                break;
-            }
-            json_t *arr = json_arr();
-            json_t *e;
-            json_arr_foreach(v, ei, e) {
-                json_t *c = strict_node(e, depth + 1, ok);
-                if (!*ok) {
-                    json_free(c);
-                    break;
-                }
-                json_push(arr, c);
-            }
-            json_set(r, k, arr);
-        } else if (strcmp(k, "additionalProperties") == 0) {
-            if (!json_is_bool(v) || v->u.b) *ok = false;
-        } else if (strcmp(k, "type") == 0 && json_is_arr(v)) {
-            json_t *e;
-            json_arr_foreach(v, ti, e) {
-                if (str_eq(json_sv(e), "object")) *ok = false;
-            }
-            json_set(r, k, json_clone(v));
-        } else {
-            json_set(r, k, json_clone(v));
-        }
-        if (!*ok) break;
-    }
-    if (*ok && str_eq(json_get_str(s, "type"), "object")) {
-        json_t *props = json_get(r, "properties");
-        if (!json_is_obj(props)) {
-            *ok = false; /* open map: not representable */
-        } else {
-            json_t *orig_req = json_get_arr(s, "required");
-            json_t *req = json_arr();
-            for (size_t i = 0; i < props->u.obj.n; i++) {
-                const char *pk = props->u.obj.keys[i];
-                bool required = false;
-                json_t *e;
-                json_arr_foreach(orig_req, qi, e) {
-                    if (str_eq(json_sv(e), pk)) required = true;
-                }
-                json_push_str(req, pk);
-                if (required) continue;
-                json_t *p = props->u.obj.vals[i];
-                json_t *wrapped;
-                if (is_nullable_anyof(p)) continue;
-                if (json_get_arr(p, "anyOf") && json_len(p) == 1) {
-                    json_push(json_get(p, "anyOf"), null_schema());
-                    continue;
-                }
-                wrapped = json_obj();
-                json_t *any = json_arr();
-                json_t *desc = json_take(p, "description");
-                json_push(any, json_clone(p));
-                json_push(any, null_schema());
-                json_set(wrapped, "anyOf", any);
-                if (desc) json_set(wrapped, "description", desc);
-                props->u.obj.vals[i] = wrapped;
-                json_free(p);
-            }
-            json_set(r, "required", req);
-            json_set_bool(r, "additionalProperties", false);
-        }
-    }
-    if (!*ok) {
-        json_free(r);
-        return NULL;
-    }
-    return r;
-}
-
-json_t *oai_strict_schema(const json_t *schema) {
-    bool ok = true;
-    json_t *r = strict_node(schema, 0, &ok);
-    if (!ok) {
-        json_free(r);
-        return NULL;
-    }
-    return r;
 }
 
 char *oai_prompt_cache_key(const ai_stream_opts_t *o, size_t max_len, const char *prefix) {
@@ -1016,7 +851,16 @@ static json_t *convert_tools_cc(const ai_model_t *m, const json_t *over, const j
         json_t *t = json_at(tools, i);
         json_t *st = json_get(t, "strict");
         bool strict = !no_strict && supports && !(json_is_bool(st) && !st->u.b);
-        adapted[i] = strict ? oai_strict_schema(json_get(t, "parameters")) : NULL;
+        /* adaptSchemaForStrict on the tool's wire schema; a schema strict mode cannot represent goes non-strict */
+        bool eff = false;
+        json_t *base = tool_params(t);
+        json_t *ad = strict ? ts_adapt_for_strict(base, true, &eff) : NULL;
+        json_free(base);
+        if (!eff) {
+            json_free(ad);
+            ad = NULL;
+        }
+        adapted[i] = ad;
         if (!adapted[i]) all = false;
     }
     const char *eff = str_eq(mode, "none") ? "none" : str_eq(mode, "all_strict") ? (all ? "all_strict" : "none") : "mixed";
