@@ -419,9 +419,13 @@ void app_plan_apply_model(app_t *a) {
     a->plan_prev_set = true;
     a->plan_prev_model = a->model;
     a->plan_prev_identity = a->model ? mr_model_key(a->model) : NULL;
-    a->plan_prev_thinking = a->thinking;
+    /* configuredThinkingLevel(): `auto`, else the level clamped to the model (none on a model without thinking) */
+    const char *wire = app_wire_thinking(a);
+    ai_effort_t we = a->thinking;
+    if (wire) effort_parse(wire, &we);
+    a->plan_prev_thinking = we;
     a->plan_prev_auto = a->auto_thinking;
-    a->plan_prev_has_level = true;
+    a->plan_prev_has_level = a->auto_thinking || wire;
     if (m == a->model) {
         if (has_e) app_set_thinking(a, e);
         return;

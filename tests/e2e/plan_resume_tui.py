@@ -15,7 +15,7 @@ scratch = os.path.dirname(os.path.abspath(agent))
 work = os.path.join(scratch, "planres-work")
 os.makedirs(work, exist_ok=True)
 open(os.path.join(agent, "config.yml"), "w").write(
-    "setupVersion: 3\nmodelRoles:\n  default: mock/mock-1\n  plan: mock/mock-think\nstartup:\n  checkUpdate: false\n")
+    "setupVersion: 3\nmodelRoles:\n  default: mock/mock-1\n  plan: mock/mock-2\nstartup:\n  checkUpdate: false\n")
 
 
 def check(name, ok, detail=""):
@@ -87,8 +87,8 @@ try:
     check("composer", app.wait_for("╰", 15), app.text())
     app.pump(0.5)
     mark = len(app.raw)
-    app.type("/switch mock/mock-2")
-    check("switch", app.wait_for("Session-only model: mock/mock-2", 10, mark), app.text(mark))
+    app.type("/switch mock/mock-think")
+    check("switch", app.wait_for("Session-only model: mock/mock-think", 10, mark), app.text(mark))
     mark = len(app.raw)
     app.type("/plan")
     check("plan on", app.wait_for("Plan mode enabled", 10, mark), app.text(mark))
@@ -100,9 +100,9 @@ finally:
     app.kill()
 modes = [e for e in entries() if e.get("type") == "mode_change" and e.get("mode") == "plan"]
 data = modes[-1].get("data", {}) if modes else {}
-check("journal", data.get("prePlanModelIdentity") == "mock/mock-2" and "prePlanThinkingLevel" in data, data)
+check("journal", data.get("prePlanModelIdentity") == "mock/mock-think" and data.get("prePlanThinkingLevel") == "high", data)
 models = [e.get("model") for e in entries() if e.get("type") == "model_change"]
-check("plan model", models and models[-1] == "mock/mock-think", models)
+check("plan model", models and models[-1] == "mock/mock-2", models)
 
 app = App("-c")
 try:
@@ -115,4 +115,4 @@ try:
 finally:
     app.kill()
 models = [(e.get("model"), e.get("role")) for e in entries() if e.get("type") == "model_change"]
-check("restored", models and models[-1] == ("mock/mock-2", "temporary"), models)
+check("restored", models and models[-1] == ("mock/mock-think", "temporary"), models)
