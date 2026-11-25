@@ -1,9 +1,10 @@
 /* magic.h - `edit.mode: magic`: the calling agent describes its changes in words under one `# path` heading per
- * file; an auxiliary model (edit.magic.model, else the smol role) reads each numbered file and answers with line
- * operations, which compile to one exact `replace` edit per file.
- * Port of omp edit/magic.ts, edit/magic-lines.ts, edit/magic-view.ts and tui tools/magic-sections.ts (v19.1.0).
- * Not ported: omp's native "does the file still parse" guard (pi-natives parseCodeStatus); every other rejection
- * path (block hints, the doubted-range confirmation, apply errors) is the same. */
+ * file; an auxiliary model (edit.magic.model, else the smol role) carries each file's change out on an in-memory draft
+ * through a multi-turn `replace` / `read` / `search` tool loop, and the finished draft is committed as one exact
+ * `replace` edit per file.
+ * Port of omp edit/magic.ts, edit/magic-tools.ts, edit/magic-calls.ts, edit/magic-view.ts and tui
+ * tools/magic-sections.ts (v19.1.1). omp's syntax guard (native parseCodeStatus, tree-sitter) is ported for the
+ * language omc can parse, JSON; other languages are not checked (omp checks every tree-sitter language). */
 #ifndef OMC_MAGIC_H
 #define OMC_MAGIC_H
 
@@ -38,48 +39,72 @@ typedef VEC(magic_section_t) magic_sections_t;
 bool magic_parse_input(const char *input, magic_sections_t *out, char **err);
 void magic_sections_free(magic_sections_t *s);
 
-/* ---------- file views (edit/magic-view.ts) ---------- */
+/* ---------- initial file views (edit/magic-view.ts) ---------- */
 
 typedef struct {
-    int from, to; /* inclusive, zero-based */
-} magic_span_t;
-
-typedef struct {
-    char *text;
+    char *text;      /* `N│text` lines; `⋮ …` marks omitted stretches */
+    int total_lines;
     bool partial;
-    magic_span_t *shown; /* partial views: the shown stretches */
-    size_t nshown;
 } magic_view_t;
 typedef VEC(magic_view_t) magic_views_t;
 
 /* fileViews: an excerpt of the lines `change` names (when it leaves out at least half of a file of 200+ lines), then
- * the whole numbered file; views longer than `limit` UTF-16 units are dropped (limit < 0: no limit) */
+ * the whole numbered file; with neither within `limit` UTF-16 units (limit < 0: no limit), a head+tail preview the
+ * model navigates with `read` and `search`. Never empty. */
 void magic_file_views(const char *content, const char *change, double limit, magic_views_t *out);
 void magic_views_free(magic_views_t *v);
 
-/* ---------- line operations (edit/magic-lines.ts) ---------- */
+/* ---------- draft tools (edit/magic-tools.ts) ---------- */
 
+/* APPLY_TOOLS: [{name, description, parameters}] for read, search and replace (owned) */
+json_t *magic_apply_tools(void);
+
+/* one staged exact replacement (AppliedReplace), replayable against the draft it was made on */
 typedef struct {
-    char *old_s, *new_s; /* the compiled replace edit (owned), or NULL with problem */
-    int (*ranges)[2];    /* one-based inclusive ranges the reply deletes, moves or swaps */
-    size_t nranges;
-    char *problem;       /* worded for the apply model (owned) */
-} magic_compiled_t;
+    char *old_s, *rep;
+    bool all;
+    size_t at; /* byte offset of the (first) match in the pre-edit draft */
+    int line;  /* its 1-based line */
+} magic_step_t;
+typedef VEC(magic_step_t) magic_steps_t;
+void magic_steps_free(magic_steps_t *s);
 
-/* compileLineEdits: `cut` marks a reply that ran into the output limit */
-void magic_compile(const char *reply, const char *content, const magic_view_t *view, bool cut, magic_compiled_t *out);
-void magic_compiled_free(magic_compiled_t *c);
-/* blockHints: doubts about ranges that cut a block or run past it ("" when none; owned) */
-char *magic_block_hints(const char *content, int (*ranges)[2], size_t n, const magic_view_t *view);
+/* applyReplace: true with *content (the new draft), *step and *message (all owned); false with *error (owned), the
+ * draft untouched */
+bool magic_apply_replace(const char *text, const json_t *args, char **content, magic_step_t *step, char **message,
+                         char **error);
+/* readBufferLines / searchBuffer: the owned result text; *is_error for a model-facing error */
+char *magic_read_lines(const char *text, const json_t *args, bool *is_error);
+char *magic_search(const char *text, const json_t *args, bool *is_error);
+/* diagnoseBufferSyntax: the replace after which the draft first stopped parsing, with the current lines near it
+ * (owned). parses(code, ud): the language's parse check. */
+char *magic_diagnose_syntax(const char *original, const char *working, const magic_step_t *applied, size_t n,
+                            bool (*parses)(const char *code, void *ud), void *ud);
+
+/* ---------- written tool calls (edit/magic-calls.ts) ---------- */
+
+/* normalizeApplyArguments: a call's arguments with schema-compatible strings coerced and null options dropped (owned),
+ * or NULL with *error (owned) for malformed arguments; *repaired when they were recovered from duplicated raw JSON
+ * (`__rawJson`), so the reply replays them instead */
+json_t *magic_normalize_args(const json_t *call, bool *repaired, char **error);
+/* parseWrittenToolCalls: [{name, arguments}] from fenced JSON / Python and bare Python call lines (owned); *attempted
+ * when the text looked like a call */
+json_t *magic_parse_written_calls(const char *text, bool *attempted);
+
+/* ---------- syntax (parseCodeStatus) ---------- */
+
+/* 1: `code` parses as the language `path` names; 0: it does not; -1: no language omc checks (only JSON) */
+int magic_parse_status(const char *path, const char *code);
 
 /* ---------- the described change (edit/magic.ts applyDescribedChange) ---------- */
 
 typedef struct magic_io {
-    /* one completion of at most max_tokens output tokens: the owned reply text with *truncated, or NULL with *err
-     * (owned) for a failure that ends the call (a ToolError) */
-    char *(*complete)(struct magic_io *io, const char *request, int64_t max_tokens, bool *truncated, char **err);
-    /* apply one replace edit of the snapshot (check_snapshot: refuse a file that changed since it was read) */
-    void (*apply)(struct magic_io *io, const char *old_s, const char *new_s, bool check_snapshot, pe_result_t *r);
+    /* one completion turn over the conversation so far with the apply tools: the owned assistant message, or NULL
+     * with *err (owned) for a failure that ends the call (a ToolError) */
+    json_t *(*complete)(struct magic_io *io, const json_t *messages, const json_t *tools, char **err);
+    /* commit the finished draft: one `replace_all` edit of the whole snapshot, refused when the file changed since it
+     * was read */
+    void (*apply)(struct magic_io *io, const char *old_s, const char *new_s, pe_result_t *r);
     void *ud;
 } magic_io_t;
 
