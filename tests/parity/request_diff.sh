@@ -18,6 +18,9 @@ D=${RD_DIR:-${TMPDIR:-/tmp}/omc-reqdiff}
 PROMPT=${1:-say:hello}
 WORK=${2:-$D/work}
 rm -rf "$D/ompa" "$D/omca" "$D/home.omp" "$D/home.omc" "$D"/*.jsonl; mkdir -p "$D" "$WORK" "$D/home.omp" "$D/home.omc"
+# the default work dir is a repo root (a `.git` entry), so neither app's project discovery walks above it into the real
+# home's .claude/.agents skills and rules (both apps stop their ancestor walk at the repo root)
+[ -n "${2:-}" ] || mkdir -p "$WORK/.git"
 port=$((30000 + RANDOM % 20000))
 for d in ompa omca; do
     mkdir -p "$D/$d"
