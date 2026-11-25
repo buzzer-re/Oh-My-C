@@ -37,4 +37,21 @@ props = tool["parameters"]["properties"]
 assert "pattern" not in props["fileKey"] and "pattern" not in props["query"], props
 assert props["slug"]["pattern"] == "^[a-z0-9_-]+$" and props["meta"] == {"type": "object", "properties": {}, "additionalProperties": True}, props
 PY
+# Codex sends a tool strict only when the tool itself is (omp's per-tool `strict = true`); task and MCP tools are never
+# strict and say so (`strict: false`)
+mkdir -p "$T/rcodex"
+cp "$T/rschema/config.yml" "$T/rschema/mcp.json" "$T/rcodex/"
+printf '{"openai-codex":{"type":"oauth","access":"tok-codex","refresh":"r","expires":4102444800000}}' > "$T/rcodex/auth.json"
+check "codex tool strict" "plain provider answer"  env OMC_CODING_AGENT_DIR="$T/rcodex" PI_AI_CODEX_CLIENT_VERSION=0.150.0 \
+    OMC_PROVIDER_URL_REWRITE="https://chatgpt.com=http://127.0.0.1:$SPORT/chatgpt,https://api.openai.com=http://127.0.0.1:$SPORT/openai" \
+    "$B" --model openai-codex/gpt-6-luna --no-session -p "hi"
+python3 -I - "$T/rschema.jsonl" <<'PY' && echo "   ok  codex tool strict flags" || { echo "   FAIL codex tool strict flags"; fail=1; }
+import json, sys
+reqs = [r["body"] for r in map(json.loads, open(sys.argv[1])) if r["path"].endswith("/codex/responses") and r["body"].get("tools")]
+tools = {t.get("name"): t for t in reqs[-1]["tools"]}
+assert tools["read"].get("strict") is True and tools["read"]["parameters"].get("additionalProperties") is False, tools["read"]
+assert tools["task"].get("strict") is False, tools["task"]
+mcp = next(t for n, t in tools.items() if n.endswith("get_design_context"))
+assert mcp.get("strict") is False and "additionalProperties" not in mcp["parameters"], mcp
+PY
 kill $SPID 2>/dev/null; wait $SPID 2>/dev/null
