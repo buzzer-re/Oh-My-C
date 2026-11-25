@@ -78,6 +78,9 @@ bool tr_committed_text_stall(const json_t *msg, bool text_committed, bool aborti
 json_t *tr_stream_stall_reminder(int attempt);
 /* isBillingCapUsageLimit: the error asks for money, not time (out of credit, spent prepaid balance, spend ceiling) */
 bool tr_billing_cap_usage_limit(int status, const char *msg);
+/* is402BillingCapBody: a 402 body that is an account billing cap (opaque, billing_error / billing_not_configured,
+ * payment, balance or credits wording); NULL counts as opaque */
+bool tr_402_billing_cap_body(const char *msg);
 
 /* Manual retry tail rules (turn-recovery.ts) over an agent message array (live context or display transcript).
  * Custom messages are omc's `custom` role or a user/developer message carrying a customType. */

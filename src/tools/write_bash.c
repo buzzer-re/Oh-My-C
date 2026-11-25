@@ -600,6 +600,7 @@ agent_tool_t *tool_write_new(tool_env_t *env) {
     json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":"
                            "\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("write", "Write", desc, s, write_execute);
+    t->strict = TOOL_STRICT;
     t->exclusive = true;
     free(desc);
     t->ud = env;
@@ -1511,6 +1512,7 @@ agent_tool_t *tool_bash_new(tool_env_t *env) {
     }
 #endif
     agent_tool_t *t = agent_tool_new("bash", "Bash", desc, bash_tool_schema(pty_available(env)), bash_execute);
+    t->strict = TOOL_STRICT;
     t->exclusive = true;
     free(desc);
     t->ud = env;
@@ -1917,6 +1919,7 @@ agent_tool_t *tool_wait_new(tool_env_t *env) {
     json_free(dctx);
     json_t *s = json_parse_str("{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("wait", "Wait", desc, s, wait_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->intent_mode = INTENT_OPTIONAL; /* wait.ts: intent = "optional" */
     t->interruptible = true;          /* wait.ts: interruptible + handlesToolInterrupt (it drains the wake itself) */

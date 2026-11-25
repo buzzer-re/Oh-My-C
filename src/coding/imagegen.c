@@ -949,6 +949,7 @@ agent_tool_t *imagegen_tool_new(app_t *a) {
     char *d = str_trim(desc);
     free(desc);
     agent_tool_t *t = agent_tool_new("generate_image", "GenerateImage", d, schema_lit(SCHEMA), ig_execute);
+    t->strict = TOOL_NOT_STRICT;
     free(d);
     t->ud = a;
     t->exclusive = true; /* approval "write" */

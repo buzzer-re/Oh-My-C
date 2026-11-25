@@ -151,7 +151,8 @@ in `app.c`:
 
 omp's user-facing extension system (TypeScript hooks, custom tools and commands under
 `extensibility/`) is not ported. Host programs add tools through the RPC `set_host_tools` command or
-`omc_register_tool()` ([modes.md](modes.md)).
+`omc_register_tool()` ([modes.md](modes.md)). RPC host tools are strict like omp's `RpcHostToolAdapter`, and their
+schemas get omp's wire pass when registered.
 
 ## Session runtime (`app.c`)
 
@@ -218,7 +219,9 @@ continuations print mode suppresses).
   TUI's todo-reminder notice card and RPC `todo_reminder`).
 - **Stream loop guard** (`coding/thinkloop.c`; omp `ai/utils/thinking-loop.ts`, `stream-guards.ts`). Exact suffix cycles
   for every guarded model, plus near-duplicate and low-information paragraph heuristics for Gemini/DeepSeek/Grok;
-  Claude is never guarded. A hit ends the turn as a retryable `Thinking loop detected` error, and the retry carries
+  the heuristics skip structured answer content (segments that are mostly pipe-led markdown table rows or JSON
+  key/value fields, including fragments the 700-character chunker cut from them), so long tables and same-shape JSON
+  records do not read as a loop. Claude is never guarded. A hit ends the turn as a retryable `Thinking loop detected` error, and the retry carries
   `thinking-loop-redirect`. A Gemini stream with 64 planning headers and no tool call is interrupted and re-sampled
   with `gemini-tool-call-reminder`.
 

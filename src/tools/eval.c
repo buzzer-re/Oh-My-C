@@ -1077,6 +1077,7 @@ agent_tool_t *tool_eval_new(tool_env_t *env) {
     char *desc = eval_description(NULL);
     json_t *s = eval_schema();
     agent_tool_t *t = agent_tool_new("eval", "Eval", desc, s, eval_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->intent_mode = INTENT_OMIT; /* eval.ts derives the intent from the cell (function intent) */
     t->examples = schema_lit("[{\"caption\":\"Load a script with spaces without echoing its source\",\"call\":{"

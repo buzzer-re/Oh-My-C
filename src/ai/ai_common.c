@@ -1509,6 +1509,53 @@ static json_t *fold_user_into_tool_results(json_t *in) {
     return out;
 }
 
+/* splitAssistantToolCalls (compat splitToolCalls, omp 02eb912b76): each call of a multi-call assistant turn replays as its
+ * own assistant message, directly followed by that call's result; vLLM's Llama 3 chat templates reject an assistant
+ * message holding several tool calls. The turn's text and thinking stay with its first call, and the pieces drop the
+ * turn's native Responses items, which would replay the calls side by side again. Consumes `in`. */
+static json_t *split_tool_calls(json_t *in) {
+    json_t *out = json_arr();
+    while (json_len(in)) {
+        json_t *msg = json_arr_remove(in, 0), *blk;
+        size_t calls = 0;
+        if (str_eq(json_get_str(msg, "role"), "assistant"))
+            json_arr_foreach(json_get(msg, "content"), i, blk) calls += str_eq(json_get_str(blk, "type"), "toolCall");
+        if (calls < 2) {
+            json_push(out, msg);
+            continue;
+        }
+        json_t *results = json_arr();
+        while (json_len(in) && str_eq(json_get_str(json_at(in, 0), "role"), "toolResult"))
+            json_push(results, json_arr_remove(in, 0));
+        json_t *content = json_get(msg, "content");
+        bool first = true;
+        json_arr_foreach(content, i, blk) {
+            if (!str_eq(json_get_str(blk, "type"), "toolCall")) continue;
+            json_t *piece = json_clone(msg), *pc = json_arr(), *other;
+            json_del(piece, "providerPayload");
+            if (first)
+                json_arr_foreach(content, j, other) {
+                    if (!str_eq(json_get_str(other, "type"), "toolCall")) json_push(pc, json_clone(other));
+                }
+            json_push(pc, json_clone(blk));
+            json_set(piece, "content", pc);
+            json_push(out, piece);
+            first = false;
+            const char *id = json_get_str(blk, "id");
+            for (size_t k = 0; k < json_len(results); k++) {
+                if (!str_eq(json_get_str(json_at(results, k), "toolCallId"), id)) continue;
+                json_push(out, json_arr_remove(results, k));
+                break;
+            }
+        }
+        while (json_len(results)) json_push(out, json_arr_remove(results, 0));
+        json_free(results);
+        json_free(msg);
+    }
+    json_free(in);
+    return out;
+}
+
 json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) {
     json_t *out = json_arr();
     json_t *msg;
@@ -1681,6 +1728,9 @@ json_t *ai_transform_messages(const json_t *messages, const ai_model_t *target) 
     }
     strvec_free(&pending_ids);
     strvec_free(&pending_names);
+    json_t *split = target ? json_get(target->compat, "splitToolCalls") : NULL;
+    if (!split && target) split = json_get(target->compat_defaults, "splitToolCalls");
+    if (json_is_bool(split) && split->u.b) out = split_tool_calls(out);
     /* compat foldUserAfterToolResult (omp ec588c2710: Gemini 4 on chat-completions / Responses records) */
     json_t *fold = target ? json_get(target->compat, "foldUserAfterToolResult") : NULL;
     if (!fold && target) fold = json_get(target->compat_defaults, "foldUserAfterToolResult");

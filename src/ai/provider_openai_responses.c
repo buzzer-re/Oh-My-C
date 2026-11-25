@@ -8,6 +8,7 @@
 #include "ai/compat_detect.h"
 #include "ai/provider_openai.h"
 #include "ai/responses_ws.h"
+#include "ai/toolschema.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -481,6 +482,199 @@ static json_t *tool_params(const json_t *t) {
     return o;
 }
 
+/* ---------- sanitizeSchemaForOpenAIResponses (omp utils/schema/normalize.ts) ----------
+ * OpenAI Responses rejects `oneOf` in tool schemas even with strict mode off, every `type: "object"` node without a
+ * `properties` member, and regex `pattern`s its validator cannot parse. Only schema-valued positions are normalized,
+ * so literal payloads under `enum`, `const`, `default` and `examples` stay unchanged. Codex also repairs arrays without
+ * `items` with an explicit open `items: true` (off when `unevaluatedItems` appears anywhere in the schema). */
+
+#define RS_MAX_DEPTH 512
+
+static const char *const RS_ARRAY_KEYS[] = {"anyOf", "oneOf", "allOf", "prefixItems"};
+static const char *const RS_MAP_KEYS[] = {"properties", "patternProperties", "dependencies", "dependentSchemas", "$defs",
+                                          "definitions"};
+static const char *const RS_VALUE_KEYS[] = {"items",      "additionalItems", "contains",           "contentSchema",
+                                            "propertyNames", "if",           "then",               "else",
+                                            "not",        "additionalProperties", "unevaluatedItems", "unevaluatedProperties"};
+
+static bool rs_in(const char *k, const char *const *list, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (!strcmp(k, list[i])) return true;
+    return false;
+}
+#define RS_IN(k, list) rs_in(k, list, ARRAY_LEN(list))
+
+static bool rs_contains_unevaluated_items(const json_t *v, int depth) {
+    if (depth > RS_MAX_DEPTH) return false;
+    const json_t *e;
+    if (json_is_arr(v)) {
+        json_arr_foreach((json_t *)v, i, e) if (rs_contains_unevaluated_items(e, depth + 1)) return true;
+        return false;
+    }
+    if (!json_is_obj(v)) return false;
+    if (json_get(v, "unevaluatedItems")) return true;
+    const char *k;
+    json_t *child;
+    json_obj_foreach((json_t *)v, i, k, child) {
+        if (RS_IN(k, RS_MAP_KEYS) && json_is_obj(child)) {
+            const char *n;
+            json_obj_foreach(child, j, n, e) if (rs_contains_unevaluated_items(e, depth + 1)) return true;
+        } else if ((RS_IN(k, RS_ARRAY_KEYS) && json_is_arr(child)) || RS_IN(k, RS_VALUE_KEYS)) {
+            if (rs_contains_unevaluated_items(child, depth + 1)) return true;
+        }
+    }
+    return false;
+}
+
+/* isOpenAIUnsupportedRegex: lookaround groups, or an unescaped `[` inside a character class (a literal in ECMAScript, a
+ * nested class for OpenAI, which then reports the outer class as unclosed: `^[^[\]]*$`, omp e48b03993b) */
+bool oai_unsupported_regex(const char *p) {
+    bool in_class = false;
+    for (size_t i = 0; p && p[i]; i++) {
+        char c = p[i];
+        if (c == '\\') {
+            if (p[i + 1]) i++;
+        } else if (in_class) {
+            if (c == ']') in_class = false;
+            else if (c == '[') return true;
+        } else if (c == '[') {
+            in_class = true;
+        } else if (c == '(' && p[i + 1] == '?') {
+            if (p[i + 2] == '=' || p[i + 2] == '!') return true;
+            if (p[i + 2] == '<' && (p[i + 3] == '=' || p[i + 3] == '!')) return true;
+        }
+    }
+    return false;
+}
+
+static bool rs_declares_object(const json_t *type) {
+    if (str_eq(json_sv(type), "object")) return true;
+    const json_t *e;
+    json_arr_foreach((json_t *)type, i, e) if (str_eq(json_sv(e), "object")) return true;
+    return false;
+}
+
+/* isBareOpenObject: an object node with no properties, additionalProperties, $ref or combinator supplying its shape */
+static bool rs_bare_open_object(const json_t *s) {
+    if (!rs_declares_object(json_get(s, "type")) || json_is_obj(json_get(s, "properties")) || json_get(s, "additionalProperties") ||
+        json_get(s, "$ref"))
+        return false;
+    return !json_is_arr(json_get(s, "anyOf")) && !json_is_arr(json_get(s, "allOf")) && !json_is_arr(json_get(s, "oneOf"));
+}
+
+static json_t *rs_node(const json_t *v, bool repair, int depth, bool *changed_out);
+
+static json_t *rs_array(const json_t *arr, bool repair, int depth, bool *changed) {
+    json_t *out = json_arr(), *e;
+    json_arr_foreach((json_t *)arr, i, e) json_push(out, rs_node(e, repair, depth + 1, changed));
+    return out;
+}
+
+/* appendOpenAIResponsesFallbackPatternProperty: a stripped patternProperties key's schema goes under ".*" */
+static void rs_append_fallback(json_t *out, json_t *schema) {
+    json_t *existing = json_get(out, ".*");
+    if (!existing) {
+        json_set(out, ".*", schema);
+        return;
+    }
+    if (json_is_obj(existing) && json_is_arr(json_get(existing, "anyOf")) && json_len(existing) == 1) {
+        json_push(json_get(existing, "anyOf"), schema);
+        return;
+    }
+    json_t *any = json_arr(), *w = json_obj();
+    json_push(any, json_clone(existing));
+    json_push(any, schema);
+    json_set(w, "anyOf", any);
+    json_set(out, ".*", w);
+}
+
+static json_t *rs_map(const json_t *map, bool strip_regex_keys, bool repair, int depth, bool *changed) {
+    json_t *out = json_obj(), *child;
+    const char *k;
+    json_obj_foreach((json_t *)map, i, k, child) {
+        json_t *next = rs_node(child, repair, depth + 1, changed);
+        if (strip_regex_keys && oai_unsupported_regex(k)) {
+            *changed = true;
+            rs_append_fallback(out, next);
+            continue;
+        }
+        json_set(out, k, next);
+    }
+    return out;
+}
+
+static json_t *rs_node(const json_t *v, bool repair, int depth, bool *changed_out) {
+    if (!json_is_obj(v) || depth > RS_MAX_DEPTH) return json_clone(v);
+    /* `{}` (the empty schema) is `true`: grammar-constrained samplers read the object form as "an empty object" */
+    if (json_len(v) == 0) {
+        *changed_out = true;
+        return json_bool(true);
+    }
+    bool changed = false;
+    json_t *out = json_obj(), *child;
+    const char *k;
+    json_obj_foreach((json_t *)v, i, k, child) {
+        /* a well-formed oneOf is re-emitted as anyOf below; a malformed one is kept verbatim */
+        if (!strcmp(k, "oneOf") && json_is_arr(child)) {
+            changed = true;
+            continue;
+        }
+        if (!strcmp(k, "pattern") && json_is_str(child) && oai_unsupported_regex(json_sv(child))) {
+            changed = true;
+            continue;
+        }
+        json_t *next;
+        if (!strcmp(k, "patternProperties") && json_is_obj(child)) next = rs_map(child, true, repair, depth, &changed);
+        else if (RS_IN(k, RS_MAP_KEYS) && json_is_obj(child)) next = rs_map(child, false, repair, depth, &changed);
+        else if (RS_IN(k, RS_ARRAY_KEYS) && json_is_arr(child)) next = rs_array(child, repair, depth, &changed);
+        else if (RS_IN(k, RS_VALUE_KEYS) && json_is_obj(child)) next = rs_node(child, repair, depth + 1, &changed);
+        else next = json_clone(child);
+        json_set(out, k, next);
+    }
+    const json_t *one_of = json_get(v, "oneOf");
+    if (json_is_arr(one_of)) {
+        json_t *rewritten = rs_array(one_of, repair, depth, &changed), *e;
+        json_t *existing = json_get(out, "anyOf");
+        if (json_is_arr(existing)) {
+            json_arr_foreach(rewritten, j, e) json_push(existing, json_clone(e));
+            json_free(rewritten);
+        } else {
+            json_set(out, "anyOf", rewritten);
+        }
+    }
+    /* draft 2020-12 lets `type` be an array: any variant including "object" needs `properties`; a bare object is open
+     * in JSON Schema, so its placeholder says so (omp 008e054ba1 / 35e42d9e8a) */
+    if (rs_declares_object(json_get(v, "type")) && !json_get(v, "properties")) {
+        json_set(out, "properties", json_obj());
+        if (rs_bare_open_object(v)) json_set_bool(out, "additionalProperties", true);
+        changed = true;
+    }
+    /* an omitted `items` permits any element, including the tail after `prefixItems`: make that explicit */
+    const json_t *ty = json_get(v, "type");
+    bool arrayish = str_eq(json_sv(ty), "array") || (!ty && json_is_arr(json_get(v, "prefixItems")));
+    if (json_is_arr(ty)) {
+        const json_t *e;
+        json_arr_foreach((json_t *)ty, j, e) arrayish = arrayish || str_eq(json_sv(e), "array");
+    }
+    if (repair && arrayish && !json_get(v, "items")) {
+        json_set_bool(out, "items", true);
+        changed = true;
+    }
+    if (!changed) return out; /* a copy of `v` */
+    *changed_out = true;
+    if (json_len(out) == 0) {
+        json_free(out);
+        return json_bool(true);
+    }
+    return out;
+}
+
+json_t *oai_responses_sanitize_schema(const json_t *schema, bool repair_array_items) {
+    bool repair = repair_array_items && !rs_contains_unevaluated_items(schema, 0);
+    bool changed = false;
+    return rs_node(schema, repair, 0, &changed);
+}
+
 static json_t *convert_tools(const ai_model_t *m, const json_t *tools, int variant) {
     bool no_strict = env_truthy("PI_NO_STRICT");
     bool strict_mode = !no_strict && model_compat_bool(m, "supportsStrictMode", false);
@@ -497,12 +691,22 @@ static json_t *convert_tools(const ai_model_t *m, const json_t *tools, int varia
         if (variant == V_AZURE) want = false;
         else if (variant == V_CODEX) want = !no_strict && json_is_bool(st) && st->u.b;
         else want = strict_mode && !expl_false;
-        json_t *adapted = want ? oai_strict_schema(json_get(t, "parameters")) : NULL;
-        if (adapted) {
-            json_set(w, "parameters", adapted);
+        /* the Responses sanitizer runs before strict adaptation on every route; Codex also repairs open arrays */
+        json_t *base = tool_params(t);
+        json_t *params = oai_responses_sanitize_schema(base, variant == V_CODEX);
+        json_free(base);
+        /* adaptSchemaForStrict: the strict form, or the (upgraded) sanitized schema when strict mode cannot represent it */
+        bool eff = false;
+        if (variant != V_AZURE) {
+            json_t *ad = ts_adapt_for_strict(params, want, &eff);
+            json_free(params);
+            params = ad;
+        }
+        if (eff) {
+            json_set(w, "parameters", params);
             json_set_bool(w, "strict", true);
         } else {
-            json_set(w, "parameters", tool_params(t));
+            json_set(w, "parameters", params);
             if (variant == V_AZURE) json_set_bool(w, "strict", false);
             else if (expl_false && !no_strict && (variant == V_CODEX || strict_mode)) json_set_bool(w, "strict", false);
         }

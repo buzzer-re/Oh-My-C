@@ -701,6 +701,7 @@ agent_tool_t *tool_task_new(tool_env_t *env) {
                                   it)
                       : xstrdup(it);
     agent_tool_t *t = agent_tool_new("task", "Task", desc, schema_lit(sch), task_execute);
+    t->strict = TOOL_NOT_STRICT;
     t->lenient_args = true; /* omp lenientArgValidation: execute() reports spawn-shape problems */
     free(it);
     free(sch);

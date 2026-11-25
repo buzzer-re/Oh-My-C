@@ -55,7 +55,7 @@ struct agent_tool {
     bool lenient_args;  /* skip schema validation errors */
     bool mounted;       /* presented as a bash tool command instead of top-level (implies hidden) */
     bool discoverable;  /* upstream loadMode "discoverable": mountable as a tool command */
-    bool strict;        /* upstream `strict = true`: providers send the schema in strict mode */
+    int strict;         /* upstream `strict`: TOOL_STRICT (`true`), TOOL_NOT_STRICT (`false`), 0 when unset */
     int intent_mode;    /* INTENT_* : how the `i` intent field is injected into the wire schema */
     char *summary;      /* one-line catalog summary (owned, may be NULL) */
     json_t *examples;   /* [{caption?, call|good+bad|note}] appended to the wire description (owned, may be NULL) */
@@ -70,6 +70,10 @@ struct agent_tool {
 };
 
 enum { INTENT_REQUIRE = 0, INTENT_OPTIONAL = 1, INTENT_OMIT = 2 };
+/* agent_tool_t.strict. `true` lets routes that need the opt-in (Codex, Devin) send the schema strict; `false` keeps it
+ * non-strict everywhere and travels as an explicit `strict: false`, which some backends treat apart from an omitted
+ * flag; unset is strict wherever the provider supports it. */
+enum { TOOL_NOT_STRICT = -1, TOOL_STRICT = 1 };
 #define INTENT_FIELD "i"
 #define INTENT_MAX_LENGTH 200
 

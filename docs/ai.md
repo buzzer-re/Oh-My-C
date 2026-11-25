@@ -20,7 +20,10 @@ models without image input, and drops errored or aborted assistant turns
 `__demotedThinking` key (omp `kDemotedThinking`; encoders build their own wire blocks, so it never leaves the
 process): the Anthropic encoder counts those blocks, a refused request reports the count as
 `demotedReasoningBlocks`, and `ai_stream_opts_t.omit_demoted_reasoning` leaves them out (see agent.md, classifier
-refusals).
+refusals). Two compat flags reshape the end result: `splitToolCalls` (Llama 3 rows: vLLM's chat templates take one
+tool call per assistant message) replays each call of a multi-call turn as its own assistant message directly
+followed by its result, text and thinking on the first call and without the turn's native Responses items; then
+`foldUserAfterToolResult` folds user text that follows a tool result into that result.
 
 ## Model catalog (`catalog.c`)
 
@@ -279,6 +282,39 @@ Points worth knowing per provider:
   (unlisted earlier models are marked gone), cached 2 h per credential in `<agent dir>/kiro-models.json`; a failed
   refresh keeps the last cache. It runs at startup when Kiro has a credential, after `/login kiro`, on hub F5 and
   `omc models refresh`. omp unions the rosters of several Kiro accounts; omc stores one credential per provider.
+- **Tool schemas** (`toolschema.c`, omp `utils/schema/{draft,dereference,wire,normalize}.ts`): every function returns
+  a new tree in omp's key order. `ts_upgrade_2020_12` is omp's draft-07 upgrade (`definitions` → `$defs` with refs
+  rewritten, tuple `items` → `prefixItems`, `dependencies` split, OpenAPI `nullable`). `ts_wire_schema` is
+  `toolWireSchema` for a raw JSON Schema (upgrade, nullable-scalar `anyOf` → type array, described const unions →
+  typed `enum`, bare enums typed, ArkType `name /** doc */` keys, `{}` → `true`); it runs once on MCP and RPC host
+  tool schemas at registration. omc's built-in schemas are already omp's wire form, so omp's ArkType path has no
+  counterpart. `ts_mcp_normalize` is `normalizeSchemaForMCP` (upgrade, local `$ref`s inlined, `$schema`/`nullable`
+  dropped, `const` and all-`const` unions as typed `enum`). `ts_adapt_for_strict` / `ts_try_enforce_strict` are
+  `adaptSchemaForStrict` / `tryEnforceStrictSchema`. An open keyset (`patternProperties`, `additionalProperties` true
+  or a schema, a bare object), a boolean or `{}` branch, a schema that loops back into itself, or a node strict mode
+  cannot type falls back to the upgraded schema, non-strict. Otherwise the result has validation and annotation
+  keywords dropped, a `default` folded into the description as `(default: X)`, a `$ref` with siblings and a
+  single-entry `allOf` inlined, type arrays split into `anyOf` variants, `const` turned into `enum`, and every object
+  closed with all its keys required (optional ones nullable). Completions, Responses and Codex use it. Strict
+  requests from a tool's own `strict` flag (`agent_tool_t.strict`, omp's per-tool `strict`): `TOOL_STRICT` tools
+  (most built-ins, resolve/reject/propose/report_issue, RPC host tools) go strict wherever the provider supports it, and Codex
+  and Devin send strict only for them. `TOOL_NOT_STRICT` tools (task, generate_image, every MCP tool) are never
+  strict and carry an explicit `strict: false`. Unset tools (omc-only ones such as `powershell` and library tools) go
+  strict where the provider supports it, except on Codex and Devin.
+- **Responses tool schemas** (`provider_openai_responses.c`, omp `sanitizeSchemaForOpenAIResponses`): on the
+  Responses, Codex and Azure routes every tool's parameters are sanitized before strict adaptation: a well-formed
+  `oneOf` becomes `anyOf`, every object node gets `properties` (a bare one also `additionalProperties: true`, which
+  keeps it non-strict), `{}` becomes `true`, and `pattern`s OpenAI's validator rejects (lookarounds, an unescaped `[`
+  inside a character class) are dropped, with such `patternProperties` keys folded under `.*`; Codex also gives
+  itemless arrays `items: true`. Azure sends the sanitized schema with `strict: false`. Not ported:
+  `rejectRootObjectUnion` flattening (xAI), Moonshot MFJS normalization, and the quarantine that drops a tool whose
+  schema contradicts itself (`findStrictToolSchemaViolation`).
+- **Gemini signatures on chat completions** (`provider_openai_completions.c`): a tool call's per-call signature
+  (`extra_content.google|vertex`, or an encrypted `reasoning_details` entry naming the call), its
+  `function.thought_signature` (Portkey without strict OpenAI compliance) and a message-level `thinking_signature` /
+  `thought_signature` / `reasoning_signature` (stashed on the turn's first tool call) are merged into one
+  `thoughtSignature` envelope `{perCall, function, message}`; replay puts each back where it came from. Legacy raw
+  shapes (a bare `extra_content` object or detail) still read as `perCall`.
 - **Transcript dialects** (`dialect.c`): each dialect's `renderTranscript` and
   `serializeConversationForSummary`, used for compaction and branch-summary input (not for in-band tool
   calls).
@@ -422,7 +458,10 @@ There are two levels:
    A usage-limit wait runs on a wall-clock deadline taken before `auto_retry_start`, so system sleep counts toward it;
    ordinary backoff stays monotonic.
 3. **Model fallback** (`try_retry_fallback` in `app.c`, chains in `config/model_resolver.c`): `retry.fallbackChains`
-   is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback"). The chain key comes
+   is walked on retryable and hard errors (see [status.md](status.md), "Retry model fallback"); `retry.fallbackOn`
+   keys on the classifier's usage-limit flag, where a 402 counts only with a billing-cap body (opaque, `billing_error`
+   / `billing_not_configured` in prose or JSON, payment / balance / credits wording: omp `is402BillingCapBody`). A
+   billing cap is never retried on the same model: the chain runs, then the error surfaces. The chain key comes
    from the current selector, with the branch's last assigned role (`model_change` role, temporary `fallback` and
    `prewalk` switches skipped) as the hint while that role's configured model is the current one; `--model pi/<role>`
    (also `@<role>` or a bare configured role name) records that role after the default entry, on `--continue` too, so
@@ -467,6 +506,11 @@ request itself or fail it at once. Anthropic uses it for:
   wrapping up · resets …`) and the model is steered once per wrap-up window
   (`anthropic-usage-wrap-up.md`). omp's sibling-account health gate before auto-accept is not ported
   (omc does not rotate Claude accounts).
+
+The same header hook keeps the `request-id` of the response a turn streams from on the assistant message
+(`requestId`, between `timestamp` and `responseId`), refusals and mid-stream failures included; a request that got no
+successful response carries none. A turn that ends in a provider error logs one `agent turn ended with provider
+error` line (provider, model, errorStatus, errorId, requestId, errorMessage; `OMC_LOG`).
 
 ## Server-side conversation state
 

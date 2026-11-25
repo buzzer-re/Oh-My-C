@@ -5021,6 +5021,7 @@ agent_tool_t *tool_lsp_new(tool_env_t *env, lsp_manager_t *m) {
         "\"minimum\":5,\"maximum\":300,\"description\":\"Timeout in seconds; raises or lowers the default (range "
         "5\u2013300).\"},\"payload\":{\"type\":\"string\"}},\"required\":[\"action\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("lsp", "LSP", desc, s, lsp_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     lsp_tool_t *lt = xcalloc(1, sizeof(*lt));
     lt->env = env;

@@ -1861,6 +1861,7 @@ agent_tool_t *tool_find_new(tool_env_t *env) {
         ":\"array\",\"items\":{\"type\":\"string\"}},\"path\":{\"type\":\"string\"}},\"required\":[\"quer"
         "y\",\"grep_keywords\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("find", "Find", desc, s, find_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->ud = env;
     return t;

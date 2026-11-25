@@ -628,6 +628,7 @@ agent_tool_t *tool_ast_grep_new(tool_env_t *env) {
         ".g. cpp for ambiguous .h files\"},\"skip\":{\"type\":\"number\",\"description\":\"matches to ski"
         "p\"}},\"required\":[\"pat\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("ast_grep", "AST Grep", desc, s, astgrep_execute);
+    t->strict = TOOL_STRICT;
     t->examples = schema_lit(
         "[{\"caption\":\"Search TypeScript files under src\",\"call\":{\"pat\":\"console.log($$$)\",\"pat"
         "h\":\"src/**/*.ts\"}},{\"caption\":\"Named imports from a specific package\",\"call\":{\"pat\":\"import { $$$IMPORTS } from \\\"react\\\"\",\"path\":\"src/**/*.ts\"}},{\"caption\":\"Arrow func"
@@ -912,6 +913,7 @@ agent_tool_t *tool_ast_edit_new(tool_env_t *env) {
         "write\"},\"minItems\":1,\"description\":\"files, directories, globs, or internal URLs to rewrite"
         "\"}},\"required\":[\"ops\",\"paths\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("ast_edit", "AST Edit", desc, s, astedit_execute);
+    t->strict = TOOL_STRICT;
     t->examples = schema_lit(
         "[{\"caption\":\"Rename a call site across TypeScript files\",\"call\":{\"ops\":[{\"pat\":\"oldAp"
         "i($$$ARGS)\",\"out\":\"newApi($$$ARGS)\"}],\"paths\":[\"src/**/*.ts\"]}},{\"caption\":\"Delete m"

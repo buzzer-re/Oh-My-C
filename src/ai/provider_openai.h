@@ -49,8 +49,11 @@ void oai_policy_resolve(oai_policy_t *p, const ai_model_t *m, const ai_stream_op
 bool oai_tool_choice_forced(const json_t *tc);       /* "required" or named */
 const char *oai_tool_choice_name(const json_t *tc);  /* named tool or NULL */
 const char *oai_tool_choice_mode(const json_t *tc);  /* "auto"/"none"/"required" or NULL */
-/* Adapt a JSON schema for OpenAI strict mode. Returns an owned clone, or NULL when not representable. */
-json_t *oai_strict_schema(const json_t *schema);
+/* sanitizeSchemaForOpenAIResponses: owned copy of a tool schema the Responses API accepts (oneOf -> anyOf, `properties`
+ * on every object node, `{}` -> true, unsupported regex patterns stripped; `repair_array_items`: Codex's open `items`) */
+json_t *oai_responses_sanitize_schema(const json_t *schema, bool repair_array_items);
+/* isOpenAIUnsupportedRegex: a lookaround group or an unescaped `[` inside a character class */
+bool oai_unsupported_regex(const char *pattern);
 char *oai_hash36(const char *s);                     /* owned base36 hash */
 char *oai_prompt_cache_key(const ai_stream_opts_t *o, size_t max_len, const char *prefix); /* owned or NULL */
 bool oai_send_service_tier(const ai_model_t *m, const char *tier);

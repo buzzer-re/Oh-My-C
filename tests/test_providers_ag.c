@@ -1200,6 +1200,121 @@ static void test_http_upload_progress(void) {
     http_resp_free(&r);
 }
 
+/* a server answering successive connections with canned HTTP responses (status line + headers; Content-Length is added
+ * for `body`), each after reading the whole request */
+typedef struct {
+    const char *head, *body;
+} canned_t;
+typedef struct {
+    int lfd;
+    const canned_t *resp;
+    int n, served;
+} canned_srv_t;
+
+static void *canned_server(void *arg) {
+    canned_srv_t *c = arg;
+    for (int k = 0; k < c->n; k++) {
+        int fd = accept(c->lfd, NULL, NULL);
+        if (fd < 0) return NULL;
+        char buf[65536];
+        sb_t head = SB_INIT;
+        long body = -1, clen = 0;
+        for (;;) {
+            ssize_t r = recv(fd, buf, sizeof buf, 0);
+            if (r <= 0) break;
+            if (body < 0) {
+                sb_appendn(&head, buf, (size_t)r);
+                char *e = memmem(head.s, head.len, "\r\n\r\n", 4);
+                if (!e) continue;
+                const char *cl = strcasestr(head.s, "content-length:");
+                clen = cl ? atol(cl + 15) : 0;
+                body = (long)(head.len - (size_t)(e + 4 - head.s));
+            } else body += r;
+            if (body >= clen) break;
+        }
+        sb_free(&head);
+        char *out = xasprintf("%s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s", c->resp[k].head, strlen(c->resp[k].body),
+                              c->resp[k].body);
+        send(fd, out, strlen(out), 0);
+        free(out);
+        shutdown(fd, SHUT_WR);
+        close(fd);
+        c->served++;
+    }
+    return NULL;
+}
+
+/* one provider_anthropic_stream call against canned responses; `served` gets how many were requested */
+static json_t *anthropic_against(const canned_t *resp, int n, int *served) {
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in sa = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t sl = sizeof sa;
+    CHECK(bind(lfd, (struct sockaddr *)&sa, sizeof sa) == 0 && listen(lfd, 4) == 0);
+    getsockname(lfd, (struct sockaddr *)&sa, &sl);
+    canned_srv_t c = {.lfd = lfd, .resp = resp, .n = n};
+    pthread_t th;
+    pthread_create(&th, NULL, canned_server, &c);
+    char *spec = xasprintf("{\"id\":\"claude-sonnet-4-5\",\"api\":\"anthropic-messages\",\"provider\":\"anthropic\","
+                           "\"baseUrl\":\"http://127.0.0.1:%d\",\"reasoning\":false,\"input\":[\"text\"],\"maxTokens\":64000}",
+                           ntohs(sa.sin_port));
+    json_t *raw = J(spec);
+    ai_model_t m = mk_model(raw);
+    json_t *msgs = J("[{\"role\":\"user\",\"content\":\"hi\",\"timestamp\":1}]");
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.api_key = "sk-ant-api03-test";
+    json_t *r = provider_anthropic_stream(&m, &ctx, &o, NULL, NULL);
+    shutdown(lfd, SHUT_RDWR); /* unblocks a server still waiting in accept */
+    close(lfd);
+    pthread_join(th, NULL);
+    *served = c.served;
+    json_free(msgs);
+    json_free(raw);
+    free(spec);
+    return r;
+}
+
+/* omp 832ef9d8e5/f9d2917f32: the streamed response's `request-id` stays on the turn, a refusal included (between timestamp
+ * and responseId, where omp's message holds it); a turn whose request got no successful response has none, also when
+ * an earlier, retried attempt had one */
+static void test_anthropic_request_id(void) {
+    static const char OK_HEAD_A[] = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nrequest-id: req_mock";
+    static const char OK_HEAD_B[] = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nRequest-Id: req_empty";
+    static const char BAD_HEAD[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nrequest-id: req_400";
+    static const char BAD_BODY[] = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad\"}}";
+    static const char REFUSAL[] =
+        MSG_START "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},"
+                  "\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    static const char EMPTY[] = MSG_START "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":"
+                                          "\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: "
+                                          "{\"type\":\"message_stop\"}\n\n";
+    int served = 0;
+    canned_t refusal[] = {{OK_HEAD_A, REFUSAL}};
+    json_t *r = anthropic_against(refusal, 1, &served);
+    CHECK_INT(served, 1);
+    CHECK_STR(P(r, "stopReason"), "error");
+    CHECK_STR(P(r, "requestId"), "req_mock");
+    char *d = json_dump(r, 0);
+    const char *ts = strstr(d, "\"timestamp\""), *rq = strstr(d, "\"requestId\""), *rs = strstr(d, "\"responseId\"");
+    CHECK(ts && rq && rs && ts < rq && rq < rs);
+    free(d);
+    json_free(r);
+    canned_t bad[] = {{BAD_HEAD, BAD_BODY}};
+    r = anthropic_against(bad, 1, &served);
+    CHECK_INT(served, 1);
+    CHECK_STR(P(r, "stopReason"), "error");
+    CHECK(json_get(r, "requestId") == NULL);
+    json_free(r);
+    /* an empty completion is replayed (500 ms later); the replay's 400 must not keep the first attempt's id */
+    canned_t replayed[] = {{OK_HEAD_B, EMPTY}, {BAD_HEAD, BAD_BODY}};
+    r = anthropic_against(replayed, 2, &served);
+    CHECK_INT(served, 2);
+    CHECK_STR(P(r, "stopReason"), "error");
+    CHECK(json_get(r, "requestId") == NULL);
+    json_free(r);
+}
+
 /* omp 873763609a: omitDemotedReasoning leaves another model's reasoning (demoted to text) out of the request, while a
  * turn's own unsigned thinking beside signed thinking keeps its text replay */
 static void test_anthropic_omit_demoted(void) {
@@ -1263,6 +1378,7 @@ int main(void) {
     test_http_upload_progress();
     test_anthropic_omit_demoted();
     test_anthropic_empty_request();
+    test_anthropic_request_id();
     test_anthropic_compaction_gate();
     test_anthropic_request_apikey();
     test_anthropic_request_adaptive();

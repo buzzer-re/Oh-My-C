@@ -3803,6 +3803,7 @@ agent_tool_t *tool_web_search_new(tool_env_t *env) {
                            "\"num_search_results\":{\"type\":\"number\"}},\"required\":[\"query\"],"
                            "\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("web_search", "Web Search", desc, s, web_search_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->ud = env;
     return t;

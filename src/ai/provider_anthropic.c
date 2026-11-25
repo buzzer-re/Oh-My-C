@@ -2666,6 +2666,7 @@ extern uint32_t aie_classify_text(const char *err, int status, const char *api, 
 typedef struct {
     const ai_model_t *m;
     const ai_stream_opts_t *o;
+    anthropic_sse_t *sse;    /* the attempt's stream state (its message takes the request id) */
     char *lane;              /* slow-mode account lane, NULL when slow mode does not apply */
     bool sent_slow;          /* the attempt carried `anthropic-usage-limit: slow` */
     bool fast_wanted;        /* the attempt carried `speed: "fast"` */
@@ -2702,6 +2703,14 @@ static bool fast_mode_unsupported(int status, const char *body) {
 
 static void anth_on_headers(void *ud, int status, const http_headers_t *h) {
     anth_hook_t *k = ud;
+    /* omp 832ef9d8e5/f9d2917f32: the `request-id` of the response the turn streams from stays on the message
+     * (AssistantMessage.requestId), so a refused or failed turn keeps the id Anthropic support asks for; an attempt that
+     * got no successful response carries none, not an earlier attempt's */
+    if (k->sse) {
+        const char *rid = status >= 200 && status < 300 ? http_headers_get(h, "request-id") : NULL;
+        if (rid) aib_set(&k->sse->b, "requestId", json_str(rid));
+        else json_del(k->sse->b.msg, "requestId");
+    }
     if (!k->lane) return;
     anthropic_slow_signal_t sig;
     bool any = anthropic_slow_parse(h, &sig);
@@ -2889,7 +2898,9 @@ static json_t *anthropic_stream_once(const ai_model_t *m, const ai_context_t *ct
         /* transportFetch: first-party `anthropic` requests ride the Cowork transport */
         ai_post_ex_t ex = {.on_headers = anth_on_headers, .on_failure = anth_on_failure, .hook_ud = &hk,
                            .cowork = str_eq(m->provider, "anthropic") && str_eq(m->api, "anthropic-messages")};
+        hk.sse = &s;
         int rc = ai_sse_post_ex(url, &h, body, &lo, anthropic_sse_event, &s, &status, &err, &ex);
+        hk.sse = NULL;
         free(url);
         free(body);
         http_headers_free(&h);

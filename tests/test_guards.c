@@ -6,6 +6,7 @@
 #include "coding/autothink.h"
 #include "coding/guards.h"
 #include "coding/keywords.h"
+#include "coding/thinkloop.h"
 #include "coding/title.h"
 #include "tools/web.h"
 
@@ -85,9 +86,164 @@ static void title_replies(void) {
     CHECK(!title_is_no_title("nonexistent"));
 }
 
+/* thinking-loop.test.ts feed(): one semantic detector over `text` in `step`-sized deltas, then the flush (owned/NULL) */
+static char *tl_feed(const char *text, size_t step) {
+    tl_detector_t *d = tl_detector_new(true);
+    size_t n = strlen(text);
+    char *hit = NULL;
+    for (size_t i = 0; i < n && !hit; i += step) hit = tl_detector_push(d, text + i, MIN(step, n - i));
+    if (!hit) hit = tl_detector_flush(d);
+    tl_detector_free(d);
+    return hit;
+}
+
+static bool tl_trips(const char *text, size_t step, const char *want) {
+    char *hit = tl_feed(text, step);
+    bool ok = want ? hit && strstr(hit, want) : !hit;
+    if (!ok) fprintf(stderr, "loop guard: got %s, want %s\n", hit ? hit : "(none)", want ? want : "(none)");
+    free(hit);
+    return ok;
+}
+
+static char *json_records(int records, size_t value_chars, const char *sep) {
+    static const char BASE[] = "Open the login page, enter the test account credentials, confirm the dashboard renders the case "
+                               "list, and verify every widget reports data. ";
+    sb_t out = SB_INIT;
+    for (int i = 0; i < records; i++) {
+        sb_t desc = SB_INIT;
+        sb_appendf(&desc, "Case %d ", i);
+        while (desc.len < value_chars) sb_append(&desc, BASE);
+        sb_appendf(&out, "%s{\"case_id\": %d, \"case_name\": \"case %d\", \"description\": \"%.*s\", \"case_sheet\": 0}", i ? sep : "",
+                   35350 + i, i + 1, (int)value_chars, desc.s);
+        sb_free(&desc);
+    }
+    return sb_detach(&out);
+}
+
+static char *ta_cases(const char *items) { return xasprintf("[TA_CASES]#{\"cases\": [%s]}", items); }
+
+/* omp e574d35a42 / a66b3c77f5 / 92e16e31ca (thinking-loop.test.ts): structured answer content (markdown tables, JSON
+ * records, including fragments the chunker cut mid-value) is not reasoning; prose loops that merely contain pipes or
+ * quote JSON, lists, and exact cycles still trip */
+static void loop_guard_structured(void) {
+    sb_t b = SB_INIT;
+    /* a markdown table followed by a one-line JSON array of same-shape rows (issue #11129) */
+    sb_append(&b, "| case_id | case_name | case_url |\n| --- | --- | --- |");
+    sb_t items = SB_INIT;
+    for (int i = 0; i < 33; i++) {
+        int id = 35350 + i;
+        sb_appendf(&b, "\n| %d | case %d | https://example.com/#/CaseEdit?fs_id=%d |", id, i + 1, id);
+        sb_appendf(&items, "%s{\"case_id\": %d, \"case_name\": \"case %d\", \"case_url\": \"https://example.com/#/CaseEdit?fs_id=%d\", "
+                           "\"case_sheet\": 0}", i ? ", " : "", id, i + 1, id);
+    }
+    sb_appendf(&b, "\n\n[TA_CASES]#{\"cases\": [%s]}", items.s);
+    CHECK(tl_trips(b.s, 20, NULL));
+    sb_clear(&b);
+    sb_clear(&items);
+    /* a long table whose cells are prose */
+    sb_append(&b, "| case_id | status | note |\n| --- | --- | --- |");
+    for (int i = 0; i < 150; i++) sb_appendf(&b, "\n| %d | Verify the login page loads | Pass |", 35350 + i);
+    CHECK(tl_trips(b.s, 20, NULL));
+    sb_clear(&b);
+    /* one-line JSON arrays: short values, long values cut across chunks, 550-character values, array-valued fields */
+    for (int i = 0; i < 100; i++)
+        sb_appendf(&items, "%s{\"case_id\": %d, \"case_name\": \"case %d\", \"case_url\": \"https://example.com/#/CaseEdit?fs_id=%d\", "
+                           "\"case_sheet\": 0}", i ? ", " : "", 35350 + i, i + 1, 35350 + i);
+    char *t = ta_cases(items.s);
+    CHECK(tl_trips(t, 20, NULL));
+    free(t);
+    sb_clear(&items);
+    char *recs = json_records(60, 250, ", ");
+    t = ta_cases(recs);
+    CHECK(tl_trips(t, 20, NULL));
+    free(t);
+    free(recs);
+    recs = json_records(100, 550, ", ");
+    t = ta_cases(recs);
+    CHECK(tl_trips(t, 20, NULL));
+    free(t);
+    free(recs);
+    for (int i = 0; i < 100; i++)
+        sb_appendf(&items, "%s{\"case_id\": %d, \"case_name\": \"case %d\", \"steps\": [1, 2, 3], \"tags\": [\"auth\", \"login\"], "
+                           "\"case_sheet\": 0}", i ? ", " : "", 35350 + i, i + 1);
+    t = ta_cases(items.s);
+    CHECK(tl_trips(t, 20, NULL));
+    free(t);
+    sb_clear(&items);
+    /* JSON records one per line */
+    recs = json_records(150, 60, "\n");
+    CHECK(tl_trips(recs, 20, NULL));
+    free(recs);
+    /* a table with a caption every tenth row stays above the 60% row share */
+    sb_append(&b, "| case_id | case_name | case_url |\n| --- | --- | --- |");
+    for (int i = 0; i < 150; i++) {
+        sb_appendf(&b, "\n| %d | case %d | https://example.com/#/CaseEdit?fs_id=%d |", 35350 + i, i + 1, 35350 + i);
+        if (i % 10 == 9) sb_appendf(&b, "\nBatch %d.9 of 15 is done.", i / 10 + 1); /* JS i / 10 + 1 */
+    }
+    CHECK(tl_trips(b.s, 20, NULL));
+    sb_clear(&b);
+    /* prose that still trips: one pipe per line, union types, shell pipelines (a row leads with a pipe) */
+    for (int i = 0; i < 80; i++)
+        sb_appendf(&b, "%sAttempt %d: I will run cat report.log | grep %s and check the result before I decide.", i ? "\n" : "", i,
+                   i % 2 ? "again" : "once more");
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    for (int i = 0; i < 80; i++)
+        sb_appendf(&b, "%sAttempt %d: the result is a ChartOptions | TableOptions | null union, so I will narrow it again before the "
+                       "next call.", i ? "\n" : "", i);
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    for (int i = 0; i < 80; i++)
+        sb_appendf(&b, "%sAttempt %d: I will run cat report.log | grep case | wc -l and compare the count before I decide.", i ? "\n" : "", i);
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    /* half table rows, half prose: under the 60% share */
+    for (int i = 0; i < 40; i++)
+        sb_appendf(&b, "%s| %d | case %d | Verify the login page |\nI will check this row again, then move on.", i ? "\n\n" : "", 35350 + i, i + 1);
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    /* prose quoting a JSON object (fields under half the segment) and single-field objects */
+    for (int i = 0; i < 40; i++)
+        sb_appendf(&b, "%sAttempt %d: the reply was {\"id\": %d, \"ok\": true, \"retries\": 0, \"cached\": false}, so I will check the cache "
+                       "again before the next call.", i ? "\n\n" : "", i, i);
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    for (int i = 0; i < 40; i++)
+        sb_appendf(&b, "%s{\"note\": \"I will check the cache again before the next call, then verify result %d.\"} done", i ? "\n\n" : "", i);
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    /* bullet and numbered lists are not structured */
+    for (int i = 0; i < 70; i++)
+        sb_appendf(&b, "%s- Case %d: Verify the login page loads and shows the dashboard for user %d", i ? "\n" : "", i + 1, 35350 + i);
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    for (int i = 0; i < 100; i++)
+        sb_appendf(&b, "%s%d. Verify the login page loads and shows the dashboard for user %d", i ? "\n" : "", i + 1, 35350 + i);
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    /* a drifting loop dense with inline code */
+    for (int i = 0; i < 40; i++)
+        sb_appendf(&b, "%sAttempt %d: I will call `read` on `src/a/b.ts`, then `grep` for `foo` in `src/`, then `edit` `src/c/d.ts`: the "
+                       "`foo` helper %s needs checking, so `bun test` follows.", i ? "\n\n" : "", i, i % 2 ? "again" : "once more");
+    CHECK(tl_trips(b.s, 20, "near-identical segments"));
+    sb_clear(&b);
+    /* byte-identical table rows still hit the exact cycle path */
+    for (int i = 0; i < 40; i++) sb_appendf(&b, "%s| 35350 | case 1 | https://example.com/#/CaseEdit?fs_id=35350 |", i ? "\n" : "");
+    CHECK(tl_trips(b.s, 7, "back-to-back"));
+    sb_clear(&b);
+    /* a wall-of-text prose loop with no blank lines reaches the detector as forced chunks */
+    for (int i = 0; i < 60; i++)
+        sb_appendf(&b, "%sAttempt %d: I am now verifying the test module %s to guarantee there are no compile errors.", i ? " " : "", i,
+                   i % 2 ? "again" : "once more");
+    CHECK(tl_trips(b.s, 17, "near-identical segments"));
+    sb_free(&b);
+    sb_free(&items);
+}
+
 int main(void) {
     explicit_nulls();
     title_replies();
+    loop_guard_structured();
     /* standalone prose keyword */
     CHECK(kw("please ultrathink"));
     CHECK(kw("ultrathink."));

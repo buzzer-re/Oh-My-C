@@ -2815,6 +2815,7 @@ agent_tool_t *tool_github_new(tool_env_t *env) {
         "\"tail\":{\"type\":\"number\",\"description\":\"log lines per failed job\"}"
         "},\"required\":[\"op\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("github", "GitHub", desc, s, github_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     gh_tool_t *g = xcalloc(1, sizeof *g);
     g->env = env;

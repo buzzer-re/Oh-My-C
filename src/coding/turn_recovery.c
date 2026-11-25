@@ -52,6 +52,8 @@ enum {
     P_DASHSCOPE_DOC, /* isBillingCapUsageLimit (rate-limit.ts) */
     P_DASHSCOPE_MSG,
     P_STATUS_402_QUOTA,
+    P_BILLING_CODE,  /* is402BillingCapBody's machine fields (omp 34c8e4ecb1) */
+    P_BILLING_FIELD,
     P_OUT_OF_CREDIT,
     P_INSUFFICIENT_BALANCE,
     P_CREDITS_EXHAUSTED,
@@ -82,7 +84,8 @@ static const struct {
     {P_PREMATURE_CLOSE, RX_ICASE,
      "(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion "
      "event|Cursor stream ended before turnEnded)"},
-    {P_TIMEOUT, RX_ICASE, "\\b(?:operation\\s+)?timed?\\s*out\\b|\\btimeout\\b|\\bstream stall\\b"},
+    /* omp f241b9824f: "stream stalled" / "stalls" / "stalling" are timeouts too, so a stalled call fails over */
+    {P_TIMEOUT, RX_ICASE, "\\b(?:operation\\s+)?timed?\\s*out\\b|\\btimeout\\b|\\bstream stall(?:ed|s|ing)?\\b"},
     {P_ENVELOPE, RX_ICASE, "anthropic stream envelope error:"},
     {P_ENVELOPE_TRUNC, RX_ICASE, "before message_(?:start|delta|stop)"},
     {P_STREAM_READ, RX_ICASE, "stream[_ -]?read[_ -]?error"},
@@ -140,7 +143,11 @@ static const struct {
     {P_GENERIC_LIMIT, RX_ICASE, "exceeds the limit of \\d+"},
     {P_DASHSCOPE_DOC, RX_ICASE, "error-code[^()\\s]*#token-limit"},
     {P_DASHSCOPE_MSG, RX_ICASE, "\\byou exceeded your current quota, please check your plan and billing details\\b"},
-    {P_STATUS_402_QUOTA, RX_ICASE, "\\b(?:payment(?:\\s+is)?[-_.\\s]*required|deactivated_workspace|insufficient.?(?:balance|account.?funds))\\b"},
+    {P_STATUS_402_QUOTA, RX_ICASE,
+     "\\b(?:payment(?:\\s+is)?[-_.\\s]*required|deactivated_workspace|insufficient.?(?:balance|credits?|account.?funds)|"
+     "requires?\\s+more\\s+credits|billing[-_.\\s]*(?:verification|error|issue)|can only afford)\\b"},
+    {P_BILLING_CODE, RX_ICASE, "^billing_(?:error|not_configured)$"},
+    {P_BILLING_FIELD, RX_ICASE, "\\b(?:type|code|param)=billing_(?:error|not_configured)(?:[\\s)]|$)"},
     {P_OUT_OF_CREDIT, RX_ICASE, "\\bout of credit|\\badd (?:more )?credit|\\btop ?up\\b"},
     {P_INSUFFICIENT_BALANCE, RX_ICASE, "insufficient.?balance"},
     {P_CREDITS_EXHAUSTED, RX_ICASE, "\\b(?:exceed\\w*|insufficient|not enough)\\b[^\\n]{0,40}\\bcredits?\\b|\\bcredits?\\b[^\\n]{0,40}\\b(?:exhausted|depleted)\\b"},
@@ -262,24 +269,69 @@ bool aie_codex_steer_rejection(const json_t *msg) {
     return codex_steer_text(json_get_str(msg, "api"), json_get_str(msg, "errorMessage"));
 }
 
-/* the parts of rate-limit.ts isOpaqueStatusBody that matter for a 402: only status digits and HTTP framing */
+static bool word_ch(char c) { return isalnum((unsigned char)c) || c == '_'; }
+
+/* `w` as a whole word at s+i (\bw\b, ASCII case-insensitive): its length, else 0 */
+static size_t word_at(const char *s, size_t i, const char *w) {
+    size_t n = strlen(w);
+    if ((i > 0 && word_ch(s[i - 1])) || strncasecmp(s + i, w, n) || word_ch(s[i + n])) return 0;
+    return n;
+}
+
+/* rate-limit.ts isOpaqueStatusBody, Latin part (omc does not classify the Han quota wording): with 429/402, HTTP framing
+ * words and "(no body)" removed, no run of three letters or digits is left */
 static bool opaque_status_body(const char *s) {
+    static const char *const frame[] = {"429", "402", "http", "https", "status", "error", "code", "response", "message"};
+    sb_t c = SB_INIT;
+    for (size_t i = 0; s[i];) {
+        size_t skip = 0;
+        for (size_t k = 0; k < ARRAY_LEN(frame) && !skip; k++) skip = word_at(s, i, frame[k]);
+        if (!skip) { /* \(?\bno body\b\)? */
+            size_t at = s[i] == '(' ? i + 1 : i;
+            size_t nb = word_at(s, at, "no body");
+            if (nb) skip = at - i + nb + (s[at + nb] == ')');
+        }
+        if (skip) i += skip;
+        else sb_putc(&c, s[i++]);
+    }
     int run = 0;
-    for (const char *p = s; *p; p++) {
-        run = isalnum((unsigned char)*p) ? run + 1 : 0;
-        if (run >= 3) {
-            size_t start = (size_t)(p - s) - 2;
-            static const char *const frame[] = {"429", "402", "http", "https", "status", "error", "code", "response",
-                                                "message", "no body"};
-            bool framing = false;
-            for (size_t k = 0; k < ARRAY_LEN(frame) && !framing; k++)
-                framing = strncasecmp(s + start, frame[k], strlen(frame[k])) == 0;
-            if (!framing) return false;
-            while (isalnum((unsigned char)p[1])) p++;
-            run = 0;
+    bool opaque = true;
+    for (size_t i = 0; i < c.len && opaque; i++) {
+        run = isalnum((unsigned char)c.s[i]) ? run + 1 : 0;
+        opaque = run < 3;
+    }
+    sb_free(&c);
+    return opaque;
+}
+
+/* is402BillingCapBody's structured arm: the JSON object embedded in the message (parseJsonBody: first `{` to last `}`)
+ * names billing_error / billing_not_configured as its error's (or its own) type, code or param */
+static bool billing_error_json(const char *msg) {
+    const char *open = strchr(msg, '{'), *close = strrchr(msg, '}');
+    if (!open || !close || close < open) return false;
+    json_t *body = json_parse(open, (size_t)(close - open) + 1, NULL);
+    bool hit = false;
+    if (json_is_obj(body)) {
+        const json_t *err = json_get_obj(body, "error");
+        if (!err) err = body;
+        static const char *const keys[] = {"type", "code", "param"};
+        for (size_t i = 0; i < ARRAY_LEN(keys) && !hit; i++) {
+            const json_t *v = json_get(err, keys[i]);
+            hit = json_is_str(v) && m(P_BILLING_CODE, json_sv(v));
         }
     }
-    return true;
+    json_free(body);
+    return hit;
+}
+
+/* rate-limit.ts is402BillingCapBody: a 402 that is opaque, names a billing failure (machine fields in prose or JSON,
+ * omp 34c8e4ecb1), or is payment/balance/credits-worded, or a quota-exhausted / concurrency reason */
+bool tr_402_billing_cap_body(const char *msg) {
+    if (!msg || opaque_status_body(msg)) return true;
+    if (m(P_BILLING_CODE, msg) || m(P_BILLING_FIELD, msg) || billing_error_json(msg)) return true;
+    if (m(P_STATUS_402_QUOTA, msg)) return true;
+    const char *reason = mr_rate_limit_reason(msg);
+    return str_eq(reason, "QUOTA_EXHAUSTED") || str_eq(reason, "CONCURRENT_LIMIT");
 }
 
 /* rate-limit.ts isBillingCapUsageLimit: topping the account up clears the error, waiting never does */
@@ -288,9 +340,7 @@ bool tr_billing_cap_usage_limit(int status, const char *msg) {
     const char *reason = mr_rate_limit_reason(msg);
     if (str_eq(reason, "CONCURRENT_LIMIT") && status != 402) return false; /* isConcurrencyCapExclusion */
     if (m(P_DASHSCOPE_DOC, msg) && m(P_DASHSCOPE_MSG, msg)) return false;  /* isDashScopeTokenLimitText */
-    if (status == 402) /* is402BillingCapBody */
-        return opaque_status_body(msg) || m(P_STATUS_402_QUOTA, msg) || str_eq(reason, "QUOTA_EXHAUSTED") ||
-               str_eq(reason, "CONCURRENT_LIMIT");
+    if (status == 402) return tr_402_billing_cap_body(msg);
     /* parseGoogleRpcRateLimitReason: a RESOURCE_EXHAUSTED ErrorInfo reason INSUFFICIENT_G1_CREDITS_BALANCE */
     if (strstr(msg, "RESOURCE_EXHAUSTED") && strstr(msg, "INSUFFICIENT_G1_CREDITS_BALANCE")) return true;
     return m(P_OUT_OF_CREDIT, msg) || m(P_INSUFFICIENT_BALANCE, msg) || m(P_CREDITS_EXHAUSTED, msg) ||
@@ -323,7 +373,8 @@ static uint32_t classify_text(const char *msg, int err_status, bool prior_overfl
         if (m(P_AUTH, msg)) kinds |= AIE_AUTH_FAILED;
         const char *reason = mr_rate_limit_reason(msg);
         bool concurrency_excluded = str_eq(reason, "CONCURRENT_LIMIT") && st != 402;
-        if (!concurrency_excluded && (ai_usage_limit_text(msg, st) || (st == 402 && opaque_status_body(msg))))
+        /* is402BillingCap: a 402 billing-cap body is an account usage limit, so retry rotates and walks the chain */
+        if (!concurrency_excluded && (ai_usage_limit_text(msg, st) || (st == 402 && tr_402_billing_cap_body(msg))))
             kinds |= AIE_USAGE_LIMIT;
         if (!terminal_client_status(st)) {
             if (m(P_TIMEOUT, msg)) kinds |= AIE_TRANSIENT | AIE_TIMEOUT;

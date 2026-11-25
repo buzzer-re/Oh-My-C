@@ -39,6 +39,6 @@ agent_tool_t *tool_think_new(void) {
         think_execute);
     t->summary = xstrdup("Record private scratchpad thoughts");
     t->intent_mode = INTENT_OMIT;
-    t->strict = true;
+    t->strict = TOOL_STRICT;
     return t;
 }

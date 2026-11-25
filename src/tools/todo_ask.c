@@ -611,6 +611,7 @@ agent_tool_t *tool_todo_new(tool_env_t *env) {
         "\"phase\":{\"type\":\"string\"},\"items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
         "\"description\":\"tasks for flat init or append\"}},\"required\":[\"op\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("todo", "Todo", desc, s, todo_execute);
+    t->strict = TOOL_STRICT;
     t->lenient_args = true; /* omp lenientArgValidation: execute() reports schema errors itself */
     free(desc);
     t->ud = env;
@@ -1232,6 +1233,7 @@ agent_tool_t *tool_ask_new(tool_env_t *env) {
     schema_prop_json(s, "html", h, true);
     json_set_bool(s, "additionalProperties", false);
     agent_tool_t *t = agent_tool_new("ask", "Ask", desc, s, ask_execute);
+    t->strict = TOOL_STRICT;
     t->exclusive = true; /* the form example lives in the description (omp f2c2894ffa), no `examples` */
     t->lenient_args = true; /* raw args reach execute() on schema failure: a bare string or legacy `questions` still asks */
     free(desc);

@@ -9,6 +9,7 @@
 #include "coding/turn_recovery.h"
 #include "session/export_html.h"
 
+#include "ai/toolschema.h"
 #include "config/auth.h"
 #include "config/settings.h"
 #include "core/proc.h"
@@ -3568,11 +3569,13 @@ static void handle(rpc_t *r, json_t *cmd) {
             const char *nm = json_get_str(t, "name");
             if (!nm || !*nm) continue;
             if (agent_find_tool(a->agent, nm)) agent_remove_tool(a->agent, nm);
+            /* a raw JSON Schema: providers see it after omp's wire pass (toolWireSchema) */
             json_t *params = json_get(t, "parameters");
             agent_tool_t *tool = agent_tool_new(nm, json_get_str(t, "label") ? json_get_str(t, "label") : nm,
                                                 json_get_str(t, "description") ? json_get_str(t, "description") : "",
-                                                params ? json_clone(params) : json_parse_str("{\"type\":\"object\",\"properties\":{}}"),
+                                                params ? ts_wire_schema(params) : json_parse_str("{\"type\":\"object\",\"properties\":{}}"),
                                                 host_tool_execute);
+            tool->strict = TOOL_STRICT; /* RpcHostToolAdapter */
             tool->hidden = json_get_bool(t, "hidden", false);
             tool->exclusive = json_get_bool(t, "exclusive", false); /* omc-only: runs alone, in message order */
             tool->ud = r;

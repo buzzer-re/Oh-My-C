@@ -581,7 +581,7 @@ static agent_tool_t *special_new(tool_env_t *env, const char *name, const char *
     json_set_bool(s, "additionalProperties", false);
     agent_tool_t *t = agent_tool_new(name, label, description, s, execute);
     t->summary = xstrdup(summary);
-    t->strict = true;
+    t->strict = TOOL_STRICT;
     t->intent_mode = INTENT_OMIT;
     t->hidden = true; /* presented by tools_finalize: a command while bash is on, top-level otherwise */
     t->ud = env;

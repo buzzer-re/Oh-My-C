@@ -1482,6 +1482,7 @@ agent_tool_t *tool_grep_new(tool_env_t *env) {
                            "\"string\"},\"case\":{\"type\":\"boolean\"},\"gitignore\":{\"type\":\"boolean\"},\"skip\":{"
                            "\"type\":[\"number\",\"null\"]}},\"required\":[\"pattern\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("grep", "Grep", desc, s, grep_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->ud = env;
     return t;
@@ -1994,6 +1995,7 @@ agent_tool_t *tool_glob_new(tool_env_t *env) {
                            "\"boolean\"},\"gitignore\":{\"type\":\"boolean\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200}},"
                            "\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("glob", "Glob", desc, s, glob_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->ud = env;
     t->lenient_args = true; /* lenientArgValidation: glob_execute refuses unknown keys and validates the rest */

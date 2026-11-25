@@ -20,7 +20,10 @@ reasoning_extraction, before any output) while an assistant text block replays t
 Anthropic requests under a path containing "nostrict" answer a 400 refusing the first strict tool.
 Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test).
 OpenAI Responses: "CTX=<n>" in the latest user text reports <n> input tokens; /responses/compact answers 404
-(model_not_found) when the request carries "COMPACT404" (the remote speculation latch, tests/e2e/compaction.sh)."""
+(model_not_found) when the request carries "COMPACT404" (the remote speculation latch, tests/e2e/compaction.sh).
+MOCK_OPENAI_SCHEMA_CHECK=1 makes .../responses refuse function parameters OpenAI's validator rejects (a lookaround or a
+nested character class in a pattern or patternProperties key, oneOf, an object node without properties) with OpenAI's
+400 invalid_function_parameters (tests/e2e/provider_wire.sh)."""
 import json, os, re, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -64,6 +67,54 @@ def drop_connection(handler, mode):
         sock.close()
     except OSError:
         pass
+
+
+def openai_unsupported_regex(p):
+    """a lookaround group, or an unescaped `[` inside a character class (OpenAI reads it as a nested class)"""
+    in_class, i = False, 0
+    while i < len(p):
+        c = p[i]
+        if c == "\\":
+            i += 1
+        elif in_class:
+            if c == "]":
+                in_class = False
+            elif c == "[":
+                return True
+        elif c == "[":
+            in_class = True
+        elif c == "(" and p[i + 1:i + 2] == "?" and (p[i + 2:i + 3] in ("=", "!") or p[i + 2:i + 4] in ("<=", "<!")):
+            return True
+        i += 1
+    return False
+
+
+def openai_schema_error(node, where="parameters"):
+    """the first construct OpenAI's tool-schema validator refuses, or None (literal payloads are not schemas)"""
+    if isinstance(node, list):
+        return next((e for e in (openai_schema_error(x, where) for x in node) if e), None)
+    if not isinstance(node, dict):
+        return None
+    if isinstance(node.get("pattern"), str) and openai_unsupported_regex(node["pattern"]):
+        return "%s: pattern %r is not a supported regular expression" % (where, node["pattern"])
+    if "oneOf" in node:
+        return "%s: 'oneOf' is not permitted" % where
+    t = node.get("type")
+    if (t == "object" or (isinstance(t, list) and "object" in t)) and "properties" not in node:
+        return "%s: object schema missing properties" % where
+    for k in node.get("patternProperties") or {}:
+        if openai_unsupported_regex(k):
+            return "%s: patternProperties key %r is not a supported regular expression" % (where, k)
+    for k, v in node.items():
+        if k in ("enum", "const", "default", "examples"):
+            continue
+        if k in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas") and isinstance(v, dict):
+            err = next((e for e in (openai_schema_error(x, "%s.%s.%s" % (where, k, n)) for n, x in v.items()) if e), None)
+        else:
+            err = openai_schema_error(v, "%s.%s" % (where, k))
+        if err:
+            return err
+    return None
 
 
 def text_of(msg):
@@ -216,6 +267,13 @@ class H(BaseHTTPRequestHandler):
                 {"type": "image_generation_call", "result": png, "size": tool.get("size", "1024x1024"), "quality": "high"},
                 {"type": "message", "content": [{"type": "output_text", "text": "Here is the image."}]}],
                 "tools": [{"type": "image_generation", "model": "gpt-image-2-2026"}], "usage": {"input_tokens": 7, "output_tokens": 9}})
+        if path.endswith("/responses") and os.environ.get("MOCK_OPENAI_SCHEMA_CHECK"):
+            for i, t in enumerate(body.get("tools") or []):
+                err = t.get("type") == "function" and openai_schema_error(t.get("parameters"))
+                if err:
+                    return self.reply(400, {"error": {"message": "Invalid schema for function '%s': %s." % (t.get("name"), err),
+                                                      "type": "invalid_request_error", "param": "tools[%d].parameters" % i,
+                                                      "code": "invalid_function_parameters"}})
         if path.endswith("/responses"):
             self.sse_start()
             last = (body.get("input") or [{}])[-1]

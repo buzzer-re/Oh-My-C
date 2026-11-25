@@ -421,6 +421,53 @@ int main(void) {
     CHECK(!tr_billing_cap_usage_limit(402, "A subscription is required for this endpoint"));
     CHECK(!tr_billing_cap_usage_limit(0, "503 service unavailable"));
     CHECK(!tr_billing_cap_usage_limit(0, NULL));
+    /* omp 34c8e4ecb1 (rate-limit-utils.test.ts): a 402 billing failure is a usage limit, the same body on a 400 is not */
+    {
+        const char *muse = "Billing verification failed. Billing Issue. To use this API key, your team needs to resolve a billing "
+                           "issue first. (type=billing_error param=billing_not_configured)";
+        CHECK(tr_402_billing_cap_body(muse));
+        CHECK(aie_is(aie_classify_text(muse, 402, NULL, NULL), AIE_USAGE_LIMIT));
+        CHECK(!aie_is(aie_classify_text(muse, 400, NULL, NULL), AIE_USAGE_LIMIT));
+        static const char *const structured[] = {"402 Request rejected (type=billing_error param=billing_not_configured)",
+                                                 "402 Request rejected (code=billing_not_configured)",
+                                                 "{\"error\":{\"message\":\"Request rejected\",\"type\":\"billing_error\"}}",
+                                                 "{\"error\":{\"message\":\"Request rejected\",\"code\":\"billing_not_configured\"}}",
+                                                 "billing_error", "BILLING_NOT_CONFIGURED"};
+        for (size_t i = 0; i < ARRAY_LEN(structured); i++) {
+            CHECK(tr_402_billing_cap_body(structured[i]));
+            CHECK(aie_is(aie_classify_text(structured[i], 402, NULL, NULL), AIE_USAGE_LIMIT));
+        }
+        const char *credits = "402 This request requires more credits, or fewer max_tokens. You can only afford 5519.";
+        CHECK(tr_402_billing_cap_body(credits) && aie_is(aie_classify_text(credits, 0, NULL, NULL), AIE_USAGE_LIMIT));
+        CHECK(tr_billing_cap_usage_limit(402, credits));
+        /* informative 402s stay plain failures, even with billing or credits prose */
+        static const char *const informative[] = {"A subscription is required for this endpoint; your credits are unchanged",
+                                                  "A subscription is required; see the billing page",
+                                                  "Request rejected (type=billing_error_other)",
+                                                  "A subscription is required for this endpoint"};
+        for (size_t i = 0; i < ARRAY_LEN(informative); i++) {
+            CHECK(!tr_402_billing_cap_body(informative[i]));
+            CHECK(!aie_is(aie_classify_text(informative[i], 402, NULL, NULL), AIE_USAGE_LIMIT));
+        }
+        CHECK(!aie_is(aie_classify_text("402 A subscription is required for this endpoint; see the billing page", 0, NULL, NULL),
+                      AIE_USAGE_LIMIT));
+        CHECK(tr_402_billing_cap_body(NULL) && tr_402_billing_cap_body("402 (no body)"));
+    }
+    /* omp f241b9824f (error-id.test.ts): inflected stream-stall wording is a timeout, on its word boundary */
+    {
+        static const char *const stalls[] = {"pi-native stream stall while waiting for the next event",
+                                             "Anthropic stream stalled while waiting for the next event",
+                                             "Provider stream stalls while waiting for the next event",
+                                             "Provider stream stalling while waiting for the next event"};
+        for (size_t i = 0; i < ARRAY_LEN(stalls); i++) {
+            uint32_t id = aie_classify_text(stalls[i], 0, "anthropic-messages", NULL);
+            CHECK(aie_is(id, AIE_TIMEOUT) && aie_is(id, AIE_TRANSIENT) && aie_retriable(id));
+        }
+        CHECK(!aie_is(aie_classify_text("upstream stalled", 0, "anthropic-messages", NULL), AIE_TIMEOUT));
+        CHECK(!aie_is(aie_classify_text("stream stallone", 0, "anthropic-messages", NULL), AIE_TIMEOUT));
+        uint32_t denied = aie_classify_text("Anthropic stream stalled while waiting for the next event", 400, "anthropic-messages", NULL);
+        CHECK(!aie_is(denied, AIE_TIMEOUT) && !aie_retriable(denied));
+    }
 
     /* manual retry tail rules (agent-session-manual-retry.test.ts) */
     CHECK(tail_of("ucea"));   /* Esc during tool execution: errored result right before the boundary */

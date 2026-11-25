@@ -22,7 +22,8 @@ plan proposals, UI `ask`). Per-tool completeness is tracked in [status.md](statu
   descriptions as omp.
 - Descriptions are omp's markdown (`prompts/coding-agent/prompts/tools/<name>.md`, rendered by
   `tool_prompt()`, `omp://` → `omc://`). Schemas are omp's exact wire schemas written as JSON
-  literals (`schema_lit`), including `additionalProperties`. The `i` intent field is injected
+  literals (`schema_lit`), including `additionalProperties`. Each tool also carries omp's `strict` flag
+  (`TOOL_STRICT` / `TOOL_NOT_STRICT`, [ai.md](ai.md), tool schemas). The `i` intent field is injected
   separately ([agent.md](agent.md#the-intent-field-i)). `tests/parity/request_diff.sh` diffs the
   whole request against omp.
 
@@ -360,7 +361,9 @@ call to it runs, every session sees.
   `~/.claude.json` (global and per-project `mcpServers`).
 - Servers connect in parallel at session start (`mcp.startupTimeoutMs`). Their tools become
   `mcp__<server>_<tool>` (mounted as bash tool commands by default) and their instructions are appended to
-  the system prompt. Resources are read through `mcp://`. Subagents share the parent's connections.
+  the system prompt. Like omp's `MCPTool`, a tool keeps the server's description (else `MCP tool from <server>`),
+  its input schema goes through `normalizeSchemaForMCP` and the wire pass ([ai.md](ai.md), tool schemas), and it is
+  never sent strict (`strict: false`). Resources are read through `mcp://`. Subagents share the parent's connections.
 - A failed tool call returns omp's `formatMCPToolFailure` block (`src/mcp/mcperr.c`, `mcp/errors.ts`): `MCP failure`,
   server, tool, transport, stage, failure class, retryable, the sanitized message, code, trace id, bounded and
   credential-redacted JSON-RPC `data`, and the next step. A retryable connection-class failure gets one reconnect and
@@ -450,7 +453,7 @@ reader thread handles events. The e2e suite runs it against a scripted adapter
 
 1. Implement `agent_tool_t *tool_<name>_new(tool_env_t *)` in `src/tools/`. Use omp's description
    file via `tool_prompt()` and omp's exact schema via `schema_lit()`. Set `exclusive` if the tool
-   mutates state.
+   mutates state, and `strict` as omp's tool declares it.
 2. Add it to `CTORS` and gating in `tools_common.c` (and `TOOL_META` for label/summary). Keep
    `BUILTIN_ORDER` canonical.
 3. Report failures with `tool_result_error()` using omp's wording. Put renderer data in

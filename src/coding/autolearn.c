@@ -525,6 +525,7 @@ static agent_tool_t *learn_tool_new(tool_env_t *env) {
     char *desc = tool_prompt("learn", ctx);
     json_free(ctx);
     agent_tool_t *t = agent_tool_new("learn", "Learn", desc ? desc : "", schema_lit(LEARN_SCHEMA), learn_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->summary = xstrdup("Capture a reusable lesson to memory (and optionally a managed skill)");
     t->ud = env;
@@ -538,6 +539,7 @@ static agent_tool_t *manage_skill_tool_new(tool_env_t *env) {
     char *desc = raw ? xstrndup(raw, len) : tool_prompt("manage-skill", NULL);
     agent_tool_t *t = agent_tool_new("manage_skill", "Manage Skill", desc ? desc : "", schema_lit(MANAGE_SKILL_SCHEMA),
                                      manage_skill_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->summary = xstrdup("Create, update, or delete an isolated managed skill");
     t->ud = env;

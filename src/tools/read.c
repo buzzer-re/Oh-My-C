@@ -2432,6 +2432,7 @@ agent_tool_t *tool_read_new(tool_env_t *env) {
     json_t *s = schema_lit("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Local path, "
                            "internal URI, or URL; selectors inline.\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
     agent_tool_t *t = agent_tool_new("read", "Read", desc, s, read_execute);
+    t->strict = TOOL_STRICT;
     free(desc);
     t->doc_topics = read_doc_topics;
     t->ud = env;
