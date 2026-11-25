@@ -438,9 +438,10 @@ json_t *app_stats(app_t *a); /* {tokens, cost, messages, contextPercent, ...} ow
 char *app_model_label(app_t *a); /* "provider/id" owned */
 const char *app_session_file(app_t *a);
 /* run a one-shot completion with no tools (titles, summaries) */
-/* plain title from the title model (title-system.md) for `text`; owned raw reply or NULL */
+/* generateTitle: a plain title from the title models (title-system.md) for `text`, asked in turn until one names it or
+ * declines; owned normalized title or NULL */
 char *app_generate_title_from(app_t *a, const char *text);
-/* same with a custom system prompt (NULL = title-system.md); owned raw reply or NULL */
+/* same with a custom system prompt (NULL = title-system.md) */
 char *app_generate_title_with(app_t *a, const char *text, const char *system_prompt);
 char *app_complete_text(app_t *a, const ai_model_t *m, const char *system, const char *user, ai_effort_t effort);
 /* the same, journaling the billed request as a model_usage entry of `usage_purpose` (NULL: none) */

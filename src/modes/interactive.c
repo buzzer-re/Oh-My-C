@@ -1574,9 +1574,7 @@ static void plan_name_apply(void *p) {
 static void *plan_name_main(void *p) {
     plan_name_job_t *j = p;
     char *sys = prompt_render("coding-agent/prompts/system/plan-filename.md", NULL);
-    char *raw = app_generate_title_with(j->u->app, j->excerpt, sys);
-    j->result = raw ? title_normalize(raw) : NULL;
-    free(raw);
+    j->result = app_generate_title_with(j->u->app, j->excerpt, sys);
     free(sys);
     tui_post(j->u->tui, plan_name_apply, j);
     return NULL;

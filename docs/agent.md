@@ -510,7 +510,11 @@ Under `title.generator: fork` (the default), when the reply to the user's first 
 begins, a side request on the same model, system prompt, tools and history asks for a card title
 such as `🧪 FLAKY: Fix flaky park tests`. This reuses the prompt cache. Low-signal input
 (greetings, acks) is skipped. The `tiny` generator and the fallback use the title model with
-`title-system.md`. Titles are applied on the agent thread and written to the title slot.
+`title-system.md`: the tiny/commit/smol role candidates are asked in turn, and a provider error or an unusable reply
+(empty, cut off after `<title>`, over the length limits) moves on to the next one, while a clean decline (a closed
+empty `<title/>` / `<title></title>` or `none`, quoted or with a trailing `.!?`) ends the search without asking a
+fallback model (`title_judge_reply`, omp `extractGeneratedTitle`). Titles are applied on the agent thread and written
+to the title slot.
 `OMC_NO_TITLE=1` disables them (RPC mode always does). Every billed title request (the fork, each
 title-model attempt, errors included) is journaled as an off-transcript `model_usage` entry with
 `purpose: "title"` and charged to the session's cost gate, so `/usage` and `--max-cost` count it.
