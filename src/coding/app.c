@@ -1106,16 +1106,10 @@ static void hook_after_tool(void *ud, agent_t *ag, const json_t *call, tool_resu
 
 /* ---------- retry model fallback (session/turn-recovery.ts) ---------- */
 
-static bool is_usage_limit(const char *err) {
-    static const char *const pats[] = {"usage limit", "usage_limit", "limit_reached", "quota exceeded", "quota reached",
-                                       "quota_exceeded", "insufficient_quota", "insufficient quota", "resource exhausted",
-                                       "resource_exhausted", "exhausted your capacity", "quota will reset",
-                                       "insufficient balance", "balance exhausted", "out of credits", "spending limit",
-                                       "spending-limit", "out of usage", "access_terminated_error", "402"};
-    for (size_t i = 0; err && i < ARRAY_LEN(pats); i++)
-        if (str_istr(err, pats[i])) return true;
-    return ai_zero_allowance_text(err);
-}
+/* AIError.is(id, Flag.UsageLimit) on the classified turn (#classifyRetryMessage): what retry.fallbackOn, the usage-limit
+ * wait and the retry notes key on. A 402 counts only when its body is a billing cap (omp 34c8e4ecb1), so an
+ * informative 402 ("a subscription is required") stays a plain failure. */
+static bool is_usage_limit(const json_t *assistant) { return aie_is(aie_classify_message(assistant), AIE_USAGE_LIMIT); }
 
 static bool is_abort_error(const char *err) {
     return err && (str_istr(err, "aborted") || str_istr(err, "cancelled by user") || str_istr(err, "interrupted"));
@@ -1533,7 +1527,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
         text_overflow_fits = in <= a->model->context_window && cmp_context_fits_model(a, a->model, assistant);
     }
     if (text_overflow_fits && !is_abort_error(err) && settings_bool("retry.enabled", true) &&
-        settings_bool("retry.modelFallback", true) && mr_fallback_admits(is_usage_limit(err))) {
+        settings_bool("retry.modelFallback", true) && mr_fallback_admits(is_usage_limit(assistant))) {
         char *cur = current_selector(a);
         bool switched = try_retry_fallback(a, ag, cur, assistant, err, false, false);
         free(cur);
@@ -1626,7 +1620,7 @@ static int hook_should_retry(void *ud, agent_t *ag, const json_t *assistant, int
             immediate = true;
         }
     }
-    bool usage_limit = is_usage_limit(err);
+    bool usage_limit = is_usage_limit(assistant);
     /* an account out of money has no reset to wait for: fallbacks still run, then the provider's error surfaces and
      * the error frame's Retry re-attempts at once */
     int status = (int)json_get_int(assistant, "errorStatus", 0);
