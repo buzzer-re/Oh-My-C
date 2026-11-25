@@ -26,7 +26,9 @@
 #include <ctype.h>
 #include <math.h>
 #include <errno.h>
+#include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 
 typedef struct {
@@ -119,11 +121,25 @@ struct rpc {
 #define RPC_MAX_REASSEMBLED_BYTES (64 * 1024 * 1024)
 #define RPC_CHUNK_PAYLOAD_BYTES (256 * 1024)
 
+/* RpcOutputWriter's failure: stdout cannot take a frame any more (a closed or broken pipe). Later frames are dropped
+ * and run_rpc_mode ends the session and exits 1, as omp's onFailure does (session.dispose, then process.exit(1)) */
+static volatile sig_atomic_t g_out_failed;
+
 static void write_out(const char *s, size_t n) {
-    while (n) {
+    while (n && !g_out_failed) {
         ssize_t w = write(1, s, n);
         if (w < 0 && errno == EINTR) continue;
-        if (w <= 0) return;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { /* a non-blocking stdout: wait until it drains */
+            struct pollfd pfd = {.fd = 1, .events = POLLOUT};
+            poll(&pfd, 1, 1000);
+            continue;
+        }
+        if (w <= 0) {
+            int e = w < 0 ? errno : EPIPE;
+            g_out_failed = 1;
+            LOGE("RPC output delivery failed: Error: %s", strerror(e));
+            return;
+        }
         s += w;
         n -= (size_t)w;
     }
@@ -4261,10 +4277,16 @@ void rpc_detach(rpc_t *r) {
 }
 
 int run_rpc_mode(app_t *a) {
+    g_out_failed = 0;
     rpc_t *r = rpc_attach(a, NULL, NULL);
     sb_t line = SB_INIT;
     char buf[65536];
     for (;;) {
+        /* wake now and then: an output failure on another thread ends the session */
+        struct pollfd pfd = {.fd = 0, .events = POLLIN};
+        int pr = poll(&pfd, 1, 250);
+        if (g_out_failed) break;
+        if (pr == 0 || (pr < 0 && errno == EINTR)) continue;
         ssize_t n = read(0, buf, sizeof buf);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
@@ -4276,6 +4298,22 @@ int run_rpc_mode(app_t *a) {
             rpc_handle_line(r, sb_cstr(&line));
             sb_clear(&line);
         }
+    }
+    if (g_out_failed) {
+        /* session.dispose(): nothing more is delivered, so the run in flight stops rather than finishing */
+        rpc_close_input(r);
+        if (rpc_busy(r)) agent_abort(a->agent);
+        sb_free(&line);
+        pthread_mutex_lock(&r->mu);
+        pthread_t th = r->th;
+        pthread_mutex_unlock(&r->mu);
+        if (th) pthread_join(th, NULL);
+        pthread_mutex_lock(&r->mu);
+        r->th = 0;
+        r->running = false;
+        pthread_mutex_unlock(&r->mu);
+        rpc_detach(r);
+        return 1; /* the caller frees the app (its MCP servers) and exits 1 */
     }
     if (line.len) rpc_handle_line(r, sb_cstr(&line)); /* a last line without a newline */
     /* stdin closed: pending dialogs fail, then an in-flight run finishes (scripted clients pipe commands then EOF) */

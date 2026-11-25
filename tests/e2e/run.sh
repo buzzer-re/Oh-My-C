@@ -810,6 +810,8 @@ check "rpc extracmds"  "extracmds rpc ok"  python3 -I "$ROOT/tests/e2e/extracmds
 check "tui extracmds"  "extracmds tui ok"  python3 -I "$ROOT/tests/e2e/extracmds_tui.py" "$B" "$T/xc"
 # workspace and session lifecycle (WP-21): --add-dir, /add-dir, /remove-dir, /dirs, /pin, /fresh, /move, /wt
 check "rpc workspace"  "workspace rpc ok"  python3 -I "$ROOT/tests/e2e/workspace_rpc.py" "$B" "$T/req.jsonl"
+# RPC exits 1 once stdout cannot take a frame (omp RpcOutputWriter onFailure: dispose, then exit 1)
+check "rpc output fail"  "rpc output fail ok"  python3 -I "$ROOT/tests/e2e/rpc_output_fail.py" "$B"
 # /wt runs the new worktree's post-checkout hook once with git's arguments, rescans skills, warns on failure (omp 911a80022a)
 check "wt post-checkout hook"  "wt hook rpc ok"  python3 -I "$ROOT/tests/e2e/wt_hook_rpc.py" "$B" "$T/req.jsonl"
 # model switching (WP-19): /switch, /modelpreset, prewalk handoff, in a throwaway agent dir

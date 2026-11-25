@@ -161,7 +161,10 @@ to `async.printWaitMs`.
 This is omp's RPC protocol (`modes/rpc/*`). One JSON object per line on stdin, and responses plus
 events on stdout. `rpc_attach()` / `rpc_handle_json()` make the same endpoint embeddable: the library
 uses it ([below](#library-embedding)). `--mode rpc-ui` is the same protocol with the `ask` tool enabled
-(its questions go to the client).
+(its questions go to the client). When stdout stops taking frames (the client went away: a broken or closed pipe),
+later frames are dropped, `RPC output delivery failed` goes to the log, the run in flight is aborted, the session
+and its MCP servers are disposed and the process exits 1, like omp's `RpcOutputWriter` failure path; a closed stdin
+instead lets the run in flight finish.
 
 On start the endpoint emits `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],
 "maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"supportsBashExcludeFromContext":true}` (`bash`
