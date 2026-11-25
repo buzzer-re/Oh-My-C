@@ -253,6 +253,228 @@ static double jaccard(const sset_t *a, const sset_t *b) {
     return uni ? (double)inter / (double)uni : 0;
 }
 
+/* ---------- structured answer content (isStructuredSegment, omp e574d35a42 / a66b3c77f5 / 92e16e31ca) ---------- */
+
+#define JSON_MIN_FIELDS 2
+#define JSON_MIN_FIELD_SHARE 0.5
+#define TABLE_ROW_MIN_PIPES 2
+#define TABLE_MIN_LINES 2
+#define TABLE_ROW_MIN_SHARE 0.6
+
+/* a JS `\s` character at s[i] (ASCII whitespace, NBSP, the Unicode spaces, U+2028/9, BOM): its byte length, else 0 */
+static size_t js_space(const char *s, size_t i, size_t n) {
+    if (i >= n) return 0;
+    unsigned char c = (unsigned char)s[i];
+    if (c == ' ' || (c >= '\t' && c <= '\r')) return 1;
+    if (c < 0x80) return 0;
+    uint32_t cp;
+    int k = utf8_decode(s + i, n - i, &cp);
+    bool sp = cp == 0xA0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F ||
+              cp == 0x205F || cp == 0x3000 || cp == 0xFEFF;
+    return sp && k > 0 ? (size_t)k : 0;
+}
+
+/* the JS `\s` character ending at s[i] (exclusive): its byte length, else 0 */
+static size_t js_space_before(const char *s, size_t i) {
+    if (i == 0) return 0;
+    size_t start = i - 1;
+    while (start > 0 && i - start < 4 && ((unsigned char)s[start] & 0xC0) == 0x80) start--;
+    size_t k = js_space(s, start, i);
+    return k == i - start ? k : 0;
+}
+
+static size_t skip_ws(const char *s, size_t i, size_t n) {
+    size_t k;
+    while (i < n && (k = js_space(s, i, n))) i += k;
+    return i;
+}
+
+static size_t char_len(const char *s, size_t i, size_t n) {
+    size_t k = 1;
+    while (i + k < n && ((unsigned char)s[i + k] & 0xC0) == 0x80 && k < 4) k++;
+    return k;
+}
+
+/* JS `.` (no s flag) refuses \n, \r, U+2028, U+2029 */
+static bool js_line_terminator(const char *s, size_t i, size_t n) {
+    if (s[i] == '\n' || s[i] == '\r') return true;
+    return i + 2 < n && (unsigned char)s[i] == 0xE2 && (unsigned char)s[i + 1] == 0x80 &&
+           ((unsigned char)s[i + 2] == 0xA8 || (unsigned char)s[i + 2] == 0xA9);
+}
+
+/* the end of one `(?:\\.|[^"\\\n])` unit at s[i], or i when none starts there */
+static size_t string_unit(const char *s, size_t i, size_t n) {
+    if (i >= n || s[i] == '"' || s[i] == '\n') return i;
+    if (s[i] == '\\') return i + 1 < n && !js_line_terminator(s, i + 1, n) ? i + 1 + char_len(s, i + 1, n) : i;
+    return i + char_len(s, i, n);
+}
+
+/* (?=\s*[<set>]) at i, or (with `or_end`) the end of the text */
+static bool delimiter_ahead(const char *s, size_t i, size_t n, const char *set, bool or_end) {
+    if (or_end && i >= n) return true;
+    i = skip_ws(s, i, n);
+    return i < n && strchr(set, s[i]);
+}
+
+/* JSON_STRING_LEAD /^\s*"(?:\\.|[^"\\\n])*"?(?=\s*[,}\]:]|$)/ with the regex's backtracking: the match length, else 0 */
+static size_t lead_string(const char *s, size_t n) {
+    size_t p = skip_ws(s, 0, n);
+    if (p >= n || s[p] != '"') return 0;
+    VEC(size_t) ends = {0};
+    size_t q = p + 1, e;
+    vec_push(&ends, q);
+    while ((e = string_unit(s, q, n)) > q) vec_push(&ends, q = e);
+    size_t len = 0;
+    for (size_t k = ends.n; k-- > 0 && !len;) {
+        e = ends.v[k];
+        if (e < n && s[e] == '"' && delimiter_ahead(s, e + 1, n, ",}]:", true)) len = e + 1;
+        else if (delimiter_ahead(s, e, n, ",}]:", true)) len = e;
+    }
+    vec_free(&ends);
+    return len;
+}
+
+/* JSON_SCALAR /""|-?\d[\d.eE+-]*|true|false|null/ at i: its end, else 0 */
+static size_t json_scalar(const char *s, size_t i, size_t n) {
+    if (i + 1 < n && s[i] == '"' && s[i + 1] == '"') return i + 2;
+    size_t q = i < n && s[i] == '-' ? i + 1 : i;
+    if (q < n && isdigit((unsigned char)s[q])) {
+        for (q++; q < n && (isdigit((unsigned char)s[q]) || strchr(".eE+-", s[q])); q++);
+        return q;
+    }
+    static const char *const lit[] = {"true", "false", "null"};
+    for (size_t k = 0; k < ARRAY_LEN(lit); k++)
+        if (n - i >= strlen(lit[k]) && !strncmp(s + i, lit[k], strlen(lit[k]))) return i + strlen(lit[k]);
+    return 0;
+}
+
+/* JSON_SCALAR_ARRAY, a flat (possibly empty) array of scalars at i: its end, else 0 */
+static size_t json_scalar_array(const char *s, size_t i, size_t n) {
+    if (i >= n || s[i] != '[') return 0;
+    size_t q = skip_ws(s, i + 1, n), e = json_scalar(s, q, n);
+    if (e) {
+        q = e;
+        for (;;) {
+            size_t c = skip_ws(s, q, n);
+            if (c >= n || s[c] != ',') break;
+            size_t v = json_scalar(s, skip_ws(s, c + 1, n), n);
+            if (!v) break;
+            q = v;
+        }
+    }
+    q = skip_ws(s, q, n);
+    return q < n && s[q] == ']' ? q + 1 : 0;
+}
+
+/* `\s*""\s*:\s*(?:SCALAR|SCALAR_ARRAY)` from q: its end, else 0 */
+static size_t json_field_rest(const char *s, size_t q, size_t n) {
+    q = skip_ws(s, q, n);
+    if (q + 1 >= n || s[q] != '"' || s[q + 1] != '"') return 0;
+    q = skip_ws(s, q + 2, n);
+    if (q >= n || s[q] != ':') return 0;
+    q = skip_ws(s, q + 1, n);
+    size_t e = json_scalar(s, q, n);
+    return e ? e : json_scalar_array(s, q, n);
+}
+
+/* JSON_FIELD (multiline) at i: the match length, else 0 */
+static size_t json_field(const char *s, size_t i, size_t n) {
+    bool line_start = i == 0 || s[i - 1] == '\n' || s[i - 1] == '\r' ||
+                      (i >= 3 && (unsigned char)s[i - 3] == 0xE2 && (unsigned char)s[i - 2] == 0x80 &&
+                       ((unsigned char)s[i - 1] == 0xA8 || (unsigned char)s[i - 1] == 0xA9));
+    size_t e;
+    if (line_start && (e = json_field_rest(s, i, n))) return e - i;
+    if (i < n && (s[i] == '{' || s[i] == ',') && (e = json_field_rest(s, i + 1, n))) return e - i;
+    if (line_start) { /* ^\s*""(?=\s*[,}\]]): a leading masked value whose `:` the chunker cut off */
+        size_t q = skip_ws(s, i, n);
+        if (q + 1 < n && s[q] == '"' && s[q + 1] == '"' && delimiter_ahead(s, q + 2, n, ",}]", false)) return q + 2 - i;
+    }
+    return 0;
+}
+
+/* String length in UTF-16 units, as omp measures the field share */
+static size_t utf16_len(const char *s, size_t n) {
+    size_t u = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c & 0xC0) != 0x80) u += c >= 0xF0 ? 2 : 1;
+    }
+    return u;
+}
+
+/* isStructuredSegment: mostly JSON key/value fields (a record, or a fragment the 700-character chunker cut from one) or
+ * mostly markdown table rows. A row leads with a pipe, so union types (`A | B | null`) and shell pipelines stay
+ * reasoning; bullet and numbered lists are not structured. */
+static bool is_structured_segment(const char *segment) {
+    size_t n = strlen(segment);
+    sb_t a = SB_INIT;
+    /* JSON_STRING_TAIL /^[^"\n]*"(?=\s*[,}\]:])/: the tail of a string the chunker cut at the segment start */
+    size_t q = 0;
+    while (q < n && segment[q] != '"' && segment[q] != '\n') q++;
+    if (q < n && segment[q] == '"' && delimiter_ahead(segment, q + 1, n, ",}]:", false)) {
+        sb_append(&a, "\"\"");
+        sb_appendn(&a, segment + q + 1, n - q - 1);
+    } else sb_appendn(&a, segment, n);
+    /* JSON_STRING_LEAD: a value whose opening quote starts the segment */
+    size_t lead = lead_string(sb_cstr(&a), a.len);
+    sb_t b = SB_INIT;
+    if (lead) sb_append(&b, "\"\"");
+    sb_appendn(&b, sb_cstr(&a) + lead, a.len - lead);
+    sb_free(&a);
+    /* JSON_STRING /(?<=[{[,:]\s*)"(?:\\.|[^"\\\n])*"?/g -> "" */
+    const char *s = sb_cstr(&b);
+    size_t bn = b.len;
+    sb_t masked = SB_INIT;
+    for (size_t i = 0; i < bn;) {
+        if (s[i] == '"') {
+            size_t j = i, k;
+            while ((k = js_space_before(s, j))) j -= k;
+            if (j > 0 && strchr("{[,:", s[j - 1])) {
+                size_t e = i + 1, u;
+                while ((u = string_unit(s, e, bn)) > e) e = u;
+                if (e < bn && s[e] == '"') e++;
+                sb_append(&masked, "\"\"");
+                i = e;
+                continue;
+            }
+        }
+        size_t l = char_len(s, i, bn);
+        sb_appendn(&masked, s + i, l);
+        i += l;
+    }
+    sb_free(&b);
+    const char *ms = sb_cstr(&masked);
+    size_t mn = masked.len, fields = 0, field_chars = 0;
+    for (size_t i = 0; i < mn;) {
+        size_t len = json_field(ms, i, mn);
+        if (len) {
+            fields++;
+            field_chars += utf16_len(ms + i, len);
+            i += len;
+        } else i += char_len(ms, i, mn);
+    }
+    size_t lo = skip_ws(ms, 0, mn), hi = mn, k;
+    while (hi > lo && (k = js_space_before(ms, hi))) hi -= k;
+    bool record = fields >= JSON_MIN_FIELDS && (double)field_chars >= (double)utf16_len(ms + lo, hi - lo) * JSON_MIN_FIELD_SHARE;
+    sb_free(&masked);
+    if (record) return true;
+    size_t lines = 0, rows = 0;
+    for (const char *p = segment; p;) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (skip_ws(p, 0, len) < len) {
+            lines++;
+            size_t pipes = 0;
+            for (size_t i = 0; i < len; i++) pipes += p[i] == '|';
+            size_t first = skip_ws(p, 0, len);
+            if (p[first] == '|' && pipes >= TABLE_ROW_MIN_PIPES) rows++;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    if (lines < TABLE_MIN_LINES) return false;
+    return (double)rows >= (double)lines * TABLE_ROW_MIN_SHARE;
+}
+
 static char *consume_segment(tl_detector_t *d, const char *raw) {
     char *a = bt_strip(g_code_line, raw);
     char *b = bt_strip(g_heading, a);
@@ -260,7 +482,9 @@ static char *consume_segment(tl_detector_t *d, const char *raw) {
     free(a);
     free(b);
     char *norm = normalize_segment(segment);
-    if (strlen(norm) < SEGMENT_MIN_NORM_CHARS) {
+    /* structured answer content is not reasoning: its rows differ only in data normalization drops, so they would cluster
+     * like a loop. Skipping it leaves the cluster window and the stall run untouched. */
+    if (strlen(norm) < SEGMENT_MIN_NORM_CHARS || is_structured_segment(segment)) {
         free(norm);
         free(segment);
         return NULL;
