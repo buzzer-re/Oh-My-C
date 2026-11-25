@@ -3764,15 +3764,23 @@ int run_interactive_mode(app_t *a, const char *initial) {
     tui_container_t *root = tui_root(u.tui);
     tui_term_set_mouse_capture(tui_term(u.tui), settings_bool("tui.mouse", false));
     tui_sym_set_preset(settings_str("symbolPreset", "unicode"));
-    /* config warnings head the header (interactive-mode.ts #buildConfigWarningComponents): retry.fallbackChains
-     * validation (turn-recovery validateRetryFallbackChains) and the model registry's discovery warnings */
-    strvec_t models_warns = {0};
+    /* the session's config warnings head the header (interactive-mode.ts #buildConfigWarningComponents):
+     * retry.fallbackChains validation (turn-recovery validateRetryFallbackChains), then the discovery failures of
+     * env-redirected local providers, which omp's initial background discovery moves there once it settles
+     * (#surfaceModelRegistryWarningsAfterDiscovery). The registry warnings startup already holds are main.ts notifs
+     * after the welcome instead: the models.yml findings always, and the discovery failures when startup had to await
+     * a discovery pass to find a model (sdk.ts resolveModelDiscoveryFallback: no model from the static catalog) */
+    bool mute_warnings = settings_bool("startup.quietWarnings", false); /* omc-only: /quiet */
+    strvec_t models_warns = {0}, discovery_warns = {0};
     catalog_take_models_file_warnings(&models_warns);
+    if (!mute_warnings) catalog_drain_config_warnings(&discovery_warns);
+    bool discovery_awaited = !a->model || json_get_bool(a->model->raw, "discovered", false);
     {
         strvec_t warns = {0};
         mr_fallback_validate(&warns);
-        catalog_drain_config_warnings(&warns); /* model registry: failed discovery of an env-redirected local provider */
-        bool mute = settings_bool("startup.quietWarnings", false); /* omc-only: /quiet */
+        if (!discovery_awaited)
+            for (size_t i = 0; i < discovery_warns.n; i++) strvec_push(&warns, discovery_warns.v[i]);
+        bool mute = mute_warnings;
         for (size_t i = 0; i < warns.n && !mute; i++) {
             char *t = xasprintf("Warning: %s", warns.v[i]);
             char *styled = tui_fgs(NULL, TUI_TC_WARNING, t);
@@ -3883,10 +3891,13 @@ int run_interactive_mode(app_t *a, const char *initial) {
     /* worktree.onStart applies to fresh launches only */
     if (fresh) tui_post(u.tui, wt_onstart_cb, &u);
     if (g_start && g_start->restore) tui_post(u.tui, restore_cb, &u);
-    if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice); /* main.ts notifs */
-    /* main.ts: models.yml findings (dropped input modalities) are startup warnings, not header lines */
+    /* main.ts notifs, in its order: the model registry's config warnings (models.yml findings, then discovery failures),
+     * then the model scope */
     for (size_t i = 0; i < models_warns.n; i++) add_notice(&u, "warning", models_warns.v[i]);
+    for (size_t i = 0; discovery_awaited && i < discovery_warns.n; i++) add_notice(&u, "warning", discovery_warns.v[i]);
     strvec_free(&models_warns);
+    strvec_free(&discovery_warns);
+    if (g_start && g_start->notice) add_notice(&u, "info", g_start->notice);
     /* main.ts checkForNewVersion: in the background from here; its notice lands after the startup transcript */
     bool setup_pending = ui_setup_pending(a->opts.resume || a->opts.continue_recent);
     updatectl_start(&u, !setup_pending && !(g_start && g_start->resume_picker));

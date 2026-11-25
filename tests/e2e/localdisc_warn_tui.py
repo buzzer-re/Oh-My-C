@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Implicit local-provider discovery warning under a pty (tests/e2e/run.sh): with LM_STUDIO_BASE_URL naming a closed
-port, the header shows omp's config warning (model-registry.ts #warnProviderDiscoveryFailure) with Bun's ECONNREFUSED
-text; without the env var the default endpoint stays optional and silent.
+port, omp's config warning (model-registry.ts #warnProviderDiscoveryFailure) with Bun's ECONNREFUSED text heads the
+header when startup found a model (omp's background discovery moves it there), and is a startup notice after the
+welcome when startup had to await discovery for want of a model (main.ts drainConfigWarnings); without the env var the
+default endpoint stays optional and silent.
 usage: localdisc_warn_tui.py <omc> <scratch dir> <closed port>
 Prints "localdisc warn tui ok" or the first failing step."""
 import fcntl, os, pty, re, select, signal, struct, sys, termios, time
@@ -40,13 +42,13 @@ def fail(step, detail=""):
     sys.exit(1)
 
 
-def launch(env):
+def launch(env, model=True):
     global pid, fd, out
     stop()
     out = bytearray()
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(omc, [omc, "--model", "mock/mock-1", "--no-session"], env)
+        os.execve(omc, [omc] + (["--model", "mock/mock-1"] if model else []) + ["--no-session"], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
 
 
@@ -87,10 +89,20 @@ want = (f"Warning: Built-in lm-studio provider: model discovery at {url} (from L
 launch(dict(base, LM_STUDIO_BASE_URL=url))
 if not wait_text(want):
     fail("warning", screen_text()[-900:])
-# the header warning comes before the welcome banner's tip
+# startup found a model: the header warning comes before the welcome banner's tip
 txt = screen_text()
 if txt.find("Built-in lm-studio") > txt.find("Tip: "):
     fail("warning above the banner", txt[-900:])
+
+# no model (an agent dir without models.yml): a startup notice after the tip
+bare = os.path.join(scratch, "bare-agent")
+os.makedirs(bare, exist_ok=True)
+launch(dict(base, LM_STUDIO_BASE_URL=url, OMC_CODING_AGENT_DIR=bare), model=False)
+if not wait_text(want):
+    fail("warning without a model", screen_text()[-900:])
+txt = screen_text()
+if txt.find("Built-in lm-studio") < txt.find("Tip: "):
+    fail("warning below the banner without a model", txt[-900:])
 
 # no env var: the default endpoint is optional, nothing is said
 launch(base)
