@@ -107,7 +107,12 @@ bool session_tree_position(const session_t *s, session_tree_pos_t *out);
  * Also reports latest model/thinking selections (owned strings, may be NULL). */
 typedef struct {
     json_t *messages;
-    char *model;         /* "provider/id" */
+    char *model;         /* "provider/id" of the latest default-role model_change */
+    /* getRestorableSessionModels: the model selectors a resume tries, in fallback order: the model of the last
+     * model_change's role (a /switch pick, the plan model, a cycled role) before the default role's; just the default
+     * after a default or retry-fallback change. The default falls back to the newest assistant message's model when no
+     * default model_change was recorded (legacy sessions). Owned. */
+    strvec_t restore_models;
     char *thinking;      /* level name */
     char *thinking_configured; /* configured selector of the latest thinking entry ("auto"), may be NULL */
     bool has_service_tier;     /* the path has a service_tier_change entry */

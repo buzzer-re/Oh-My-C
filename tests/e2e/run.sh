@@ -784,9 +784,10 @@ if python3 -c 'import pty' 2>/dev/null; then
     check "agents tui" $'waiting ok\ndelivered ok\nwaiting again ok\nstop waiting ok\nfolded ok\nagents ok\nstrip ok\nmodel strip ok\nback ok\ntoggle ok\nconfig True\nenable ok\nclose ok'  python3 -I "$ROOT/tests/e2e/agents_tui.py" "$B" "$T/agent"
     # Alt+P model picker: Tab provider scopes, ←/→ thinking slider, the pick applies the slider's level (omp 94a10c5b22)
     check "model picker tui" $'footer ok\nno thinking ok\nslider ok\nstep right ok\nprovider scope ok\nnext provider ok\nall again ok\nshift tab ok\npick applies level ok\npicked level kept ok\nstep right again ok\nesc keeps level ok'  python3 -I "$ROOT/tests/e2e/model_picker_tui.py" "$B" "$T/mpick"
-    # plan mode journals the pre-plan model; a session resumed in plan mode restores it when planning ends (omp 05aca3f69c)
+    # plan mode journals the pre-plan model; a resumed plan session runs the plan model (the last model change) and
+    # restores the pre-plan model when planning ends (omp 05aca3f69c, sdk.ts restoreSessionModel)
     mkdir -p "$T/planres/agent" && cp "$T/agent/models.yml" "$T/planres/agent/"
-    check "plan resume tui" $'composer ok\nswitch ok\nplan on ok\nturn ok\njournal ok\nplan model ok\nresumed in plan ok\nplan off ok\nrestored ok'  python3 -I "$ROOT/tests/e2e/plan_resume_tui.py" "$B" "$T/planres/agent"
+    check "plan resume tui" $'composer ok\nplan on ok\nturn ok\njournal ok\nplan model ok\nresumed in plan ok\nresumed on plan model ok\nplan off ok\nrestored ok'  python3 -I "$ROOT/tests/e2e/plan_resume_tui.py" "$B" "$T/planres/agent"
     # /settings: option-less string rows are text fields; Todo Backend offers Native (omp b0d3834d78)
     check "settings rows tui" $'text field ok\ntodo backend row ok\nnative choice ok'  python3 -I "$ROOT/tests/e2e/settings_rows_tui.py" "$B" "$T/setrows"
     # Models hub: Enter Enter on a just-assigned row keeps its role; moving the strip or the cursor re-arms it (omp bb6d78c023)

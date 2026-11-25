@@ -990,6 +990,57 @@ const ai_model_t *mr_exact_identity(const char *identity) {
     return hit;
 }
 
+/* parseSessionModelSelector: provider and id (owned) of a journaled `provider/id`, its `:level` suffix (`max` / `auto`
+ * admitted) split off unless the whole id is a registered literal */
+static bool parse_session_selector(const char *selector, char **prov, char **id, const char **lv) {
+    const char *slash = strchr(selector, '/');
+    *lv = NULL;
+    if (!slash || slash == selector || !slash[1]) return false;
+    *prov = xstrndup(selector, (size_t)(slash - selector));
+    if (catalog_find(*prov, slash + 1)) {
+        *id = xstrdup(slash + 1);
+        return true;
+    }
+    *lv = mr_split_level(slash + 1, 0, true, id);
+    return true;
+}
+
+/* resolveSessionModelSelector (resolveRoutedModelSelector + hasConfiguredAuth): an exact registry lookup, an
+ * `@upstream` reading naming its aggregator base (omc keeps no per-request pins; older selectors put the pin before
+ * the level), and only a model whose provider has credentials or needs none */
+const ai_model_t *mr_session_selector(const char *selector, const char **level) {
+    *level = NULL;
+    char *prov = NULL, *id = NULL;
+    const char *lv = NULL;
+    if (!selector || !parse_session_selector(selector, &prov, &id, &lv)) return NULL;
+    const ai_model_t *m = catalog_find(prov, id);
+    char *base = NULL, *up = NULL;
+    if (!m && split_upstream(id, &base, &up)) {
+        const ai_model_t *b = catalog_find(prov, base);
+        char *obase = NULL, *oup = NULL;
+        if (!b && split_upstream(selector, &obase, &oup)) {
+            char *p2 = NULL, *i2 = NULL;
+            const char *l2 = NULL;
+            if (parse_session_selector(obase, &p2, &i2, &l2)) {
+                b = catalog_find(p2, i2);
+                lv = l2;
+            }
+            free(p2);
+            free(i2);
+            free(obase);
+            free(oup);
+        }
+        if (b && supports_upstream(b)) m = b;
+        free(base);
+        free(up);
+    }
+    free(prov);
+    free(id);
+    if (m && !catalog_model_available(m)) m = NULL;
+    if (m) *level = lv;
+    return m;
+}
+
 static bool match_pattern(const char *pattern, const mr_pool_t *pool, const prefs_t *pf, mr_result_t *out) {
     if (parse_with(pattern, pool, pf, out)) return true;
     char *base, *up;

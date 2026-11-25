@@ -90,6 +90,9 @@ const ai_model_t *mr_match(const char *pattern, const mr_pool_t *pool, bool exac
 bool mr_parse_pattern(const char *pattern, const mr_pool_t *pool, mr_result_t *out);
 /* resolveModelRoleValue: pool NULL = available chat models */
 bool mr_resolve_value(const char *value, const mr_pool_t *pool, mr_result_t *out);
+/* resolveSessionModelSelector: the registered model a journaled `provider/id[@upstream][:level]` names, when its provider
+ * has credentials (or needs none); *level is the selector's thinking suffix (static) or NULL */
+const ai_model_t *mr_session_selector(const char *selector, const char **level);
 /* resolveExactModelIdentity: the available chat model a journaled `provider/id` identity names (an `@upstream` one: its
  * aggregator base), or NULL */
 const ai_model_t *mr_exact_identity(const char *identity);

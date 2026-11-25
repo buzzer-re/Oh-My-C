@@ -505,7 +505,44 @@ static void test_tree_position(void) {
     session_free(s);
 }
 
+/* getRestorableSessionModels (omp session-context.ts): the last model_change role's model before the default's */
+static void test_restorable_models(void) {
+    session_context_t sc;
+    session_t *s = session_in_memory("/tmp/restore");
+    session_append_model_change(s, "mock/a", NULL);
+    add(s, user("hi"));
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 1 && !strcmp(sc.restore_models.v[0], "mock/a"));
+    session_context_free(&sc);
+    session_append_model_change(s, "mock/b", "temporary"); /* a /switch pick or the plan model */
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 2 && !strcmp(sc.restore_models.v[0], "mock/b") && !strcmp(sc.restore_models.v[1], "mock/a"));
+    session_context_free(&sc);
+    session_append_model_change(s, "mock/a", "smol"); /* a cycled role on the default model: tried once */
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 1 && !strcmp(sc.restore_models.v[0], "mock/a"));
+    session_context_free(&sc);
+    session_append_model_change(s, "mock/c", "fallback"); /* a retry-fallback hop restores the default */
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 1 && !strcmp(sc.restore_models.v[0], "mock/a"));
+    session_context_free(&sc);
+    session_free(s);
+
+    /* a legacy session without a default model_change: the newest assistant message's model */
+    s = session_in_memory("/tmp/restore");
+    add(s, user("hi"));
+    json_t *m = assistant("hello");
+    json_set_str(m, "provider", "mock");
+    json_set_str(m, "model", "legacy");
+    add(s, m);
+    session_build_context(s, &sc);
+    CHECK(sc.restore_models.n == 1 && !strcmp(sc.restore_models.v[0], "mock/legacy"));
+    session_context_free(&sc);
+    session_free(s);
+}
+
 int main(void) {
+    test_restorable_models();
     test_tree_position();
     test_session_write_failure();
     test_session_concurrent_reads();

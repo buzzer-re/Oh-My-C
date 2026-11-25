@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Plan mode remembers the pre-plan model across a resume (omp 05aca3f69c, 9a2daffb9b): entering plan mode with a
+"""Plan mode across a resume (omp 05aca3f69c, 9a2daffb9b, sdk.ts restoreSessionModel): entering plan mode with a
 `plan` role journals the model and thinking level it replaced (`prePlanModelIdentity` / `prePlanThinkingLevel` on the
-plan mode_change); a session resumed in plan mode restores that model when planning ends. The pre-plan model here is a
-session-only `/switch` pick, so the resume (which restores the default-role model) does not land on it by itself.
+plan mode_change); the resumed session runs the plan model again (the model of the last model change), and ending plan
+mode restores the journaled pre-plan model.
 
 usage: plan_resume_tui.py <omc> <agent dir>   (the agent dir holds a models.yml with the mock provider)
 Prints one "<step> ok" line per step, or "<step> FAIL: ..." and exits 1."""
@@ -15,7 +15,7 @@ scratch = os.path.dirname(os.path.abspath(agent))
 work = os.path.join(scratch, "planres-work")
 os.makedirs(work, exist_ok=True)
 open(os.path.join(agent, "config.yml"), "w").write(
-    "setupVersion: 3\nmodelRoles:\n  default: mock/mock-1\n  plan: mock/mock-2\nstartup:\n  checkUpdate: false\n")
+    "setupVersion: 3\nmodelRoles:\n  default: mock/mock-think\n  plan: mock/mock-2\nstartup:\n  checkUpdate: false\n")
 
 
 def check(name, ok, detail=""):
@@ -87,15 +87,19 @@ try:
     check("composer", app.wait_for("╰", 15), app.text())
     app.pump(0.5)
     mark = len(app.raw)
-    app.type("/switch mock/mock-think")
-    check("switch", app.wait_for("Session-only model: mock/mock-think", 10, mark), app.text(mark))
-    mark = len(app.raw)
     app.type("/plan")
     check("plan on", app.wait_for("Plan mode enabled", 10, mark), app.text(mark))
-    mark = len(app.raw)
     app.type("say:planned hello")
-    check("turn", app.wait_for("planned hello", 15, mark), app.text(mark))
-    app.pump(1.0)
+
+    def answered():
+        return any(e.get("type") == "message" and e.get("message", {}).get("role") == "assistant"
+                   and "planned hello" in json.dumps(e["message"].get("content")) for e in entries())
+
+    end = time.time() + 20
+    while time.time() < end and not answered():
+        app.pump(0.2)
+    check("turn", answered(), app.text())
+    app.pump(0.5)
 finally:
     app.kill()
 modes = [e for e in entries() if e.get("type") == "mode_change" and e.get("mode") == "plan"]
@@ -108,6 +112,7 @@ app = App("-c")
 try:
     check("resumed in plan", app.wait_for("Plan mode enabled", 15), app.text())
     app.pump(0.8)
+    check("resumed on plan model", "mock-2" in app.text() and "mock-think" not in app.text(), app.text())
     mark = len(app.raw)
     app.type("/plan")
     check("plan off", app.wait_for("Plan mode paused", 10, mark), app.text(mark))

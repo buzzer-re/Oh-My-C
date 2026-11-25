@@ -237,6 +237,12 @@ assistant message, and then the whole session is written at once.
 - **Entries** form a tree through `id` / `parentId`. Types: `message`, `model_change`,
   `thinking_level_change`, `compaction`, `branch_summary`, `custom`, `custom_message`, `label`,
   `reset_boundary`, `title_change`, `mode_change` (goal/plan state).
+- **Model on resume** (startup and session switches, omp's getRestorableSessionModels + resolveSessionModelSelector):
+  the model of the last `model_change` on the branch when its role is not `default` or `fallback` (a `/switch` pick,
+  the plan model, a cycled role), then the default role's (legacy sessions: the newest assistant message's model);
+  the first that names a registered model (exact `provider/id`, a registered literal id beating a `:level` suffix, an
+  `@upstream` one naming its aggregator base) whose provider has credentials. The session's thinking entry sets the
+  level, else that selector's `:level`.
 - **Write failures** (disk full, a read-only session dir) never leave a hole in the parent chain: like omp's
   `#rewriteRequired`, the entries stay in memory and the next entry rewrites the whole file (temp file + rename). The
   first failure of an episode is reported once (`session_take_persist_error` → a `session-persistence` notice: an

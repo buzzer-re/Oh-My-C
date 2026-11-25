@@ -975,6 +975,9 @@ void session_build_context_for(const json_t *path, session_context_t *out) {
 
 static void build_context_path(const json_t *path, session_context_t *out, const reader_t *rd) {
     size_t n = json_len(path);
+    json_t *role_models = json_obj(); /* buildSessionContext models: role -> "provider/id" */
+    const char *last_role = NULL;     /* lastModelChangeRole */
+    bool explicit_default = false;
     ssize_t boundary = -1, compaction = -1;
     /* omp ca42dc150a: a retry-fallback hop is ephemeral, so the thinking level it applied (a chain entry's `:level`)
      * does not outlive it: the level in effect before the first hop wins unless a later change superseded the
@@ -1006,6 +1009,22 @@ static void build_context_path(const json_t *path, session_context_t *out, const
             if (!role || !strcmp(role, "default")) {
                 free(out->model);
                 out->model = xstrdup(json_get_str(e, "model"));
+            }
+            if (json_get_str(e, "model") && *json_get_str(e, "model")) {
+                json_set_str(role_models, role ? role : "default", json_get_str(e, "model"));
+                if (!role || !strcmp(role, "default")) explicit_default = true;
+            }
+            last_role = role ? role : "default";
+        } else if (str_eq(t, "message") && !explicit_default &&
+                   str_eq(json_get_str(json_get(e, "message"), "role"), "assistant")) {
+            /* legacy sessions: the default model is inferred from assistant messages until a default model_change
+             * names one (Claude Code's synthetic errors keep a placeholder model, not a selection) */
+            const json_t *m = json_get(e, "message");
+            const char *mp = json_get_str(m, "provider"), *mid = json_get_str(m, "model");
+            if (mp && mid && strcmp(mid, "<synthetic>")) {
+                char *k = xasprintf("%s/%s", mp, mid);
+                json_set_str(role_models, "default", k);
+                free(k);
             }
         } else if (str_eq(t, "thinking_level_change")) {
             free(out->thinking);
@@ -1076,11 +1095,26 @@ static void build_context_path(const json_t *path, session_context_t *out, const
         start = (size_t)compaction + 1;
     }
     for (size_t i = start; i < n; i++) emit_entry(out->messages, json_at(path, i));
+    /* getRestorableSessionModels */
+    const char *def = json_get_str(role_models, "default");
+    if (!last_role || !strcmp(last_role, "default") || !strcmp(last_role, "fallback")) {
+        if (def) strvec_push(&out->restore_models, def);
+    } else {
+        const char *rm = json_get_str(role_models, last_role);
+        if (!rm) {
+            if (def) strvec_push(&out->restore_models, def);
+        } else {
+            strvec_push(&out->restore_models, rm);
+            if (def && strcmp(rm, def)) strvec_push(&out->restore_models, def);
+        }
+    }
+    json_free(role_models);
 }
 
 void session_context_free(session_context_t *c) {
     json_free(c->messages);
     free(c->model);
+    strvec_free(&c->restore_models);
     free(c->thinking);
     free(c->thinking_configured);
     json_free(c->service_tier);
