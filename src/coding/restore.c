@@ -8,6 +8,7 @@
 
 #include "session/trace.h"
 #include "tools/jobs.h"
+#include "tools/jobtext.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -286,50 +287,6 @@ bool app_restore_interrupted_turn(app_t *a, json_t **branch) {
 
 /* ---------- background bash jobs (restoreTerminatedBashJobs) ---------- */
 
-/* JS \s at p: the whitespace character's byte length, 0 if none */
-static size_t js_space_at(const char *p) {
-    unsigned char c = (unsigned char)*p;
-    if (c == ' ' || (c >= 9 && c <= 13)) return 1;
-    if (c < 0x80) return 0;
-    uint32_t cp;
-    int n = utf8_decode(p, strnlen(p, 4), &cp);
-    if (cp == 0xA0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F ||
-        cp == 0x3000 || cp == 0xFEFF)
-        return (size_t)n;
-    return 0;
-}
-
-/* formatAsyncJobLabel: the command on one line (whitespace runs collapsed, trimmed), at most 120 UTF-16 units with "...".
- * Same contract as stream b's job_format_label() (tools/jobtext.c), which replaces this copy once both are merged. */
-static char *restore_job_label(const char *command) {
-    enum { MAX_CHARS = 120 };
-    sb_t b = SB_INIT;
-    for (const char *p = command ? command : ""; *p;) {
-        size_t w = js_space_at(p);
-        if (!w) {
-            sb_putc(&b, *p++);
-            continue;
-        }
-        while ((w = js_space_at(p))) p += w;
-        if (b.len && *p) sb_putc(&b, ' ');
-    }
-    const char *s = sb_cstr(&b);
-    size_t units = 0, cut = 0;
-    for (size_t i = 0; i < b.len;) {
-        uint32_t cp;
-        int k = utf8_decode(s + i, b.len - i, &cp);
-        if (k <= 0) k = 1;
-        size_t w = cp > 0xffff ? 2 : 1;
-        if (units + w <= MAX_CHARS - 3) cut = i + (size_t)k;
-        units += w;
-        i += (size_t)k;
-    }
-    if (units <= MAX_CHARS) return sb_detach(&b);
-    char *r = xasprintf("%.*s...", (int)cut, s);
-    sb_free(&b);
-    return r;
-}
-
 typedef struct {
     strvec_t ids, labels; /* running jobs in first-seen order (a Map: re-adding keeps the place) */
 } running_t;
@@ -402,7 +359,7 @@ json_t *restore_unsettled_bash_jobs(const json_t *branch) {
                     continue;
                 const char *cmd = json_get_str(args, "command");
                 if (!cmd) continue;
-                char *label = restore_job_label(cmd);
+                char *label = job_format_label(cmd);
                 if (*label && json_get_str(b, "id")) {
                     strvec_push(&call_ids, json_get_str(b, "id"));
                     strvec_push_own(&call_labels, label);
