@@ -9,7 +9,7 @@ that adds a `fresh` prompt and sends `notifications/prompts/list_changed` plus
 
 `--startup-delay=<secs>` holds the initialize reply back (a slow server: omp's startup window, MCP tool cache and
 deferred tools). $MOCK_MCP_EXTRA_TOOL=<name> adds a tool of that name to tools/list without changing the server
-config (so a cached catalog can differ from the live one).
+config (so a cached catalog can differ from the live one); $MOCK_MCP_EXTRA_SCHEMA (JSON) is its inputSchema.
 `--modern` speaks MCP 2026-07-28: it answers server/discover (initialize is unknown to it), requires the request _meta,
 asks for roots through an input_required round trip (`echo_text` with text "roots"), and acknowledges a
 subscriptions/listen stream, on which `echo_text` "notify" announces a new tool `late_tool`.
@@ -22,6 +22,7 @@ FULL = "--full" in sys.argv[1:]
 BLOBS = "--blobs" in sys.argv[1:]
 STARTUP_DELAY = next((float(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--startup-delay=")), 0.0)
 EXTRA_TOOL = os.environ.get("MOCK_MCP_EXTRA_TOOL")
+EXTRA_SCHEMA = json.loads(os.environ.get("MOCK_MCP_EXTRA_SCHEMA") or '{"type": "object", "properties": {}}')
 LAZY = "--lazy" in sys.argv[1:]
 MODERN = "--modern" in sys.argv[1:]
 listen_id = [None]
@@ -126,8 +127,7 @@ for line in sys.stdin:
             tools.append({"name": "change_prompts", "description": "Add a prompt and notify",
                           "inputSchema": {"type": "object", "properties": {}}})
         if EXTRA_TOOL:
-            tools.append({"name": EXTRA_TOOL, "description": "Extra tool",
-                          "inputSchema": {"type": "object", "properties": {}}})
+            tools.append({"name": EXTRA_TOOL, "description": "Extra tool", "inputSchema": EXTRA_SCHEMA})
         if LAZY:
             tools += [{"name": n, "description": "Load extra tools", "inputSchema": {"type": "object", "properties": {}}}
                       for n in ("load_extra", "load_extra_late")]
