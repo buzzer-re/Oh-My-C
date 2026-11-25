@@ -3,6 +3,7 @@
  * expected values are omp v18.14.2's get_available_models output for the same models.yml entries). */
 #include "ai/ai.h"
 #include "ai/compat_detect.h"
+#include "ai/provider_openai.h"
 #include "ai/thinkprobe.h"
 #include "core/fs.h"
 #include "tui/ansi.h"
@@ -502,6 +503,55 @@ static void test_scoped_model_search(void) {
     ui_model_browser_free(b);
 }
 
+/* the reasoning effort a Responses request for a bundled model sends with thinking off (NULL: none sent) */
+static char *disabled_effort(const char *provider, const char *id) {
+    const ai_model_t *m = catalog_find(provider, id);
+    if (!m) return NULL;
+    json_t *msgs = json_parse_str("[{\"role\":\"user\",\"content\":\"hi\",\"timestamp\":1}]");
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    o.disable_reasoning = true;
+    json_t *p = oair_build_request(m, &ctx, &o);
+    const char *e = json_get_str(json_get_obj(p, "reasoning"), "effort");
+    char *r = e ? xstrdup(e) : NULL;
+    json_free(p);
+    json_free(msgs);
+    return r;
+}
+
+/* omp v19.1.1 catalog rules the code acts on: Llama 3 splitToolCalls (02eb912b76), GPT-6.2 prefix binding on the Responses
+ * APIs only (0da37d35a1), GPT-6.1 Terra's `none` effort when thinking is off (03f6225894) */
+static void test_v1911_rules(void) {
+    json_t *m = resolved("splash", "https://api.example.com/v1", "{\"id\":\"llama-3.1-8b-instruct\"}");
+    CHECK(json_get_bool(json_get(m, "compat"), "splitToolCalls", false));
+    json_free(m);
+    m = resolved("splash", "https://api.example.com/v1", "{\"id\":\"meta-llama/llama-4-scout-17b-16e-instruct\"}");
+    CHECK(json_get(json_get(m, "compat"), "splitToolCalls") && !json_get_bool(json_get(m, "compat"), "splitToolCalls", true));
+    json_free(m);
+    const ai_model_t *bm = catalog_find("cerebras", "llama3.1-8b");
+    CHECK(bm && json_get_bool(bm->compat, "splitToolCalls", false));
+    m = resolved("openai-codex", "https://chatgpt.com/backend-api",
+                 "{\"id\":\"gpt-6.2-sol\",\"api\":\"openai-codex-responses\",\"reasoning\":true}");
+    CHECK(json_get_bool(json_get(m, "thinking"), "prefixBinding", false));
+    json_free(m);
+    m = resolved("amazon-bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com",
+                 "{\"id\":\"openai.gpt-6.2-sol\",\"api\":\"bedrock-converse-stream\",\"reasoning\":true}");
+    CHECK(!json_get_bool(json_get(m, "thinking"), "prefixBinding", false));
+    json_free(m);
+    bm = catalog_find("openai", "gpt-6.2-sol");
+    CHECK(bm && json_get_bool(bm->thinking, "prefixBinding", false));
+    m = resolved("openai", "https://api.openai.com/v1", "{\"id\":\"gpt-6.1-terra\",\"api\":\"openai-responses\",\"reasoning\":true}");
+    CHECK(str_eq(json_get_str(json_get(m, "compat"), "reasoningDisableMode"), "none-effort"));
+    json_free(m);
+    char *e = disabled_effort("openai", "gpt-6.1-terra");
+    CHECK(str_eq(e, "none"));
+    free(e);
+    e = disabled_effort("openai", "gpt-6.1-sol");
+    CHECK(str_eq(e, "low"));
+    free(e);
+}
+
 int main(void) {
     char tmpl[] = "/tmp/omc-test-catalog.XXXXXX";
     char *dir = mkdtemp(tmpl);
@@ -516,6 +566,7 @@ int main(void) {
     test_google_base64_skip();
     test_paused_provider_stream();
     test_deepseek_hyphen_flash();
+    test_v1911_rules();
 
     /* omp f31041c637 / 895d5838f8: bundled Muse Ember rows, max-capable ladder, >200K long-context card */
     {

@@ -20,7 +20,10 @@ models without image input, and drops errored or aborted assistant turns
 `__demotedThinking` key (omp `kDemotedThinking`; encoders build their own wire blocks, so it never leaves the
 process): the Anthropic encoder counts those blocks, a refused request reports the count as
 `demotedReasoningBlocks`, and `ai_stream_opts_t.omit_demoted_reasoning` leaves them out (see agent.md, classifier
-refusals).
+refusals). Two compat flags reshape the end result: `splitToolCalls` (Llama 3 rows: vLLM's chat templates take one
+tool call per assistant message) replays each call of a multi-call turn as its own assistant message directly
+followed by its result, text and thinking on the first call and without the turn's native Responses items; then
+`foldUserAfterToolResult` folds user text that follows a tool result into that result.
 
 ## Model catalog (`catalog.c`)
 

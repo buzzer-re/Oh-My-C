@@ -606,6 +606,77 @@ static void test_cut_tool_calls_replay(void) {
     }
 }
 
+/* omp 02eb912b76 (openrouter-llama-split-tool-calls.test.ts): compat splitToolCalls replays each call of a multi-call turn
+ * directly before its own output, text on the first call, without the turn's native items (results in any order) */
+static void test_split_tool_calls(void) {
+    static const char HIST[] =
+        "[{\"role\":\"user\",\"content\":\"Compare a.ts and b.ts.\",\"timestamp\":1},"
+        "{\"role\":\"assistant\",\"api\":\"openai-responses\",\"provider\":\"openrouter\",\"model\":\"meta-llama/llama-3.1-8b-instruct\","
+        "\"stopReason\":\"toolUse\",\"timestamp\":1,\"content\":[{\"type\":\"text\",\"text\":\"Reading both.\"},"
+        "{\"type\":\"toolCall\",\"id\":\"call_1\",\"name\":\"read\",\"arguments\":{\"path\":\"a.ts\"}},"
+        "{\"type\":\"toolCall\",\"id\":\"call_2\",\"name\":\"read\",\"arguments\":{\"path\":\"b.ts\"}}],"
+        "\"providerPayload\":{\"type\":\"openaiResponsesHistory\",\"provider\":\"openrouter\",\"items\":["
+        "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Reading both.\"}]},"
+        "{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.ts\\\"}\"},"
+        "{\"type\":\"function_call\",\"call_id\":\"call_2\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"b.ts\\\"}\"}]}},"
+        "{\"role\":\"toolResult\",\"toolCallId\":\"call_2\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\",\"text\":\"export const b = 2;\"}],"
+        "\"isError\":false,\"timestamp\":2},"
+        "{\"role\":\"toolResult\",\"toolCallId\":\"call_1\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\",\"text\":\"export const a = 1;\"}],"
+        "\"isError\":false,\"timestamp\":2},"
+        "{\"role\":\"user\",\"content\":\"Which is larger?\",\"timestamp\":3}]";
+    for (int split = 0; split < 2; split++) {
+        tmodel_t t;
+        char *mj = xasprintf("{\"id\":\"meta-llama/llama-3.1-8b-instruct\",\"api\":\"openai-responses\",\"provider\":\"openrouter\","
+                             "\"baseUrl\":\"https://openrouter.ai/api/v1\",\"compat\":{\"isOpenRouterHost\":true,\"splitToolCalls\":%s}}",
+                             split ? "true" : "false");
+        model_init(&t, mj);
+        free(mj);
+        json_t *msgs = J(HIST);
+        ai_context_t ctx = {.messages = msgs};
+        json_t *in = oair_convert_input(&t.m, &ctx, 0);
+        sb_t order = SB_INIT;
+        json_t *it;
+        json_arr_foreach(in, i, it) {
+            const char *ty = json_get_str(it, "type");
+            if (str_eq(ty, "reasoning")) continue;
+            if (!ty || str_eq(ty, "message")) sb_appendf(&order, "message:%s ", json_get_str(it, "role"));
+            else sb_appendf(&order, "%s:%s ", ty, json_get_str(it, "call_id"));
+        }
+        CHECK_STR(sb_cstr(&order), split ? "message:user message:assistant function_call:call_1 function_call_output:call_1 "
+                                           "function_call:call_2 function_call_output:call_2 message:user "
+                                         : "message:user message:assistant function_call:call_1 function_call:call_2 "
+                                           "function_call_output:call_2 function_call_output:call_1 message:user ");
+        sb_free(&order);
+        json_free(in);
+        json_free(msgs);
+        json_free(t.raw);
+    }
+    /* chat completions: one tool call per assistant message, the text on the first */
+    tmodel_t t;
+    model_init(&t, "{\"id\":\"llama3.1-8b\",\"api\":\"openai-completions\",\"provider\":\"cerebras\",\"compat\":{\"splitToolCalls\":true}}");
+    json_t *msgs = J(HIST);
+    ai_context_t ctx = {.messages = msgs};
+    ai_stream_opts_t o;
+    ai_stream_opts_init(&o);
+    json_t *p = oaic_build_request(&t.m, &ctx, &o);
+    sb_t order = SB_INIT;
+    json_t *m;
+    json_arr_foreach(json_get(p, "messages"), i, m) {
+        const char *role = json_get_str(m, "role");
+        if (str_eq(role, "assistant")) {
+            json_t *tcs = json_get(m, "tool_calls");
+            sb_appendf(&order, "assistant(%s,%zu:%s) ", json_is_str(json_get(m, "content")) ? json_get_str(m, "content") : "",
+                       json_len(tcs), json_get_str(json_at(tcs, 0), "id"));
+        } else if (str_eq(role, "tool")) sb_appendf(&order, "tool:%s ", json_get_str(m, "tool_call_id"));
+        else sb_appendf(&order, "%s ", role);
+    }
+    CHECK_STR(sb_cstr(&order), "user assistant(Reading both.,1:call_1) tool:call_1 assistant(,1:call_2) tool:call_2 user ");
+    sb_free(&order);
+    json_free(p);
+    json_free(msgs);
+    json_free(t.raw);
+}
+
 /* compat.toolNamePrefix (Muse Code): declared tools, rebuilt calls and a forced choice use the wire name, a name the
  * prefix would push past the limit stays bare, and returned calls map back to the declared tool */
 static void test_tool_name_prefix(void) {
@@ -1528,6 +1599,7 @@ int main(void) {
     test_completions_stream();
     test_reasoning_details();
     test_gemini_thought_signatures();
+    test_split_tool_calls();
     test_completions_stream_errors();
     test_responses_request();
     test_tool_name_prefix();

@@ -941,6 +941,7 @@ static json_t *chat_compat(const char *provider, const char *backend, const char
     json_set_bool(c, "requiresToolResultName", mistral);
     json_set_bool(c, "requiresAssistantAfterToolResult", mistral);
     json_set_bool(c, "foldUserAfterToolResult", false);
+    json_set_bool(c, "splitToolCalls", false);
     json_set_bool(c, "requiresThinkingAsText", mistral);
     json_set_bool(c, "requiresMistralToolIds", mistral);
     json_set_str(c, "thinkingFormat", fmt);
@@ -1115,6 +1116,7 @@ static json_t *responses_compat(const char *provider, const char *backend, const
     json_set_bool(c, "requiresToolResultName", false);
     json_set_bool(c, "requiresAssistantAfterToolResult", false);
     json_set_bool(c, "foldUserAfterToolResult", false);
+    json_set_bool(c, "splitToolCalls", false);
     json_set_bool(c, "requiresAssistantContentForToolCalls", kimi);
     json_set_bool(c, "isOpenRouterHost", openrouter);
     json_set_bool(c, "isVercelGatewayHost", vercel);
