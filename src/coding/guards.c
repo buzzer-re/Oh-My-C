@@ -796,6 +796,8 @@ static void append_dev(app_t *a, const char *tpl, int count, int max) {
     agent_append_message(a->agent, m);
 }
 
+static const char *or_undef(const char *s) { return s ? s : "undefined"; }
+
 /* 0 = not an empty stop, 1 = continuation scheduled, 2 = terminal (retry cap) */
 static int handle_empty_stop(app_t *a, const json_t *msg) {
     guards_t *g = a->guards;
@@ -805,6 +807,10 @@ static int handle_empty_stop(app_t *a, const json_t *msg) {
     }
     g->empty_retries++;
     if (g->empty_retries > EMPTY_STOP_MAX_RETRIES) {
+        int attempts = g->empty_retries - 1;
+        /* the exhausted count stays in the log; the budget starts over so a later wake (an async result) can retry its
+         * own empty replies (omp 2c708d3772) */
+        g->empty_retries = 0;
         int64_t out = json_get_int(json_get(msg, "usage"), "output", 0);
         int64_t reasoning = json_get_int(json_get(msg, "usage"), "reasoningTokens", -1);
         char *err;
@@ -819,6 +825,8 @@ static int handle_empty_stop(app_t *a, const json_t *msg) {
             err = xstrdup("Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove "
                           "archived frames");
         }
+        LOGW("%s attempts=%d model=%s provider=%s outputTokens=%lld", err, attempts, or_undef(json_get_str(msg, "model")),
+             or_undef(json_get_str(msg, "provider")), (long long)out);
         if (a->notice) a->notice(a->notice_ud, "error", err);
         free(err);
         drop_assistant_turn(a, msg);
@@ -826,6 +834,18 @@ static int handle_empty_stop(app_t *a, const json_t *msg) {
     }
     drop_assistant_turn(a, msg);
     append_dev(a, "coding-agent/prompts/system/empty-stop-retry.md", g->empty_retries, EMPTY_STOP_MAX_RETRIES);
+    /* one line per scheduled recovery, with the reply's model and stop metadata (omp 238cb78b25, 4745bf5c2b) */
+    const json_t *v;
+    char dur[24] = "undefined", ttft[24] = "undefined", status[24] = "undefined";
+    if ((v = json_get(msg, "duration")) && json_is_num(v)) snprintf(dur, sizeof dur, "%lld", (long long)json_get_int(msg, "duration", 0));
+    if ((v = json_get(msg, "ttft")) && json_is_num(v)) snprintf(ttft, sizeof ttft, "%lld", (long long)json_get_int(msg, "ttft", 0));
+    if ((v = json_get(msg, "errorStatus")) && json_is_num(v))
+        snprintf(status, sizeof status, "%lld", (long long)json_get_int(msg, "errorStatus", 0));
+    LOGI("Empty-stop retry scheduled attempt=%d maxAttempts=%d model=%s provider=%s stopReason=%s durationMs=%s ttftMs=%s "
+         "errorMessage=%s errorStatus=%s outputTokens=%lld",
+         g->empty_retries, EMPTY_STOP_MAX_RETRIES, or_undef(json_get_str(msg, "model")), or_undef(json_get_str(msg, "provider")),
+         or_undef(json_get_str(msg, "stopReason")), dur, ttft, or_undef(json_get_str(msg, "errorMessage")), status,
+         (long long)json_get_int(json_get(msg, "usage"), "output", 0));
     return 1;
 }
 

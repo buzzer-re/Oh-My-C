@@ -43,6 +43,10 @@ json_t *jobs_take_notices(jobs_t *j);
 char *jobs_start(jobs_t *j, const char *type, const char *id_hint, const char *label, const char *agent_id, bool hidden,
                  job_fn fn, void *ud, void (*ud_free)(void *));
 
+/* publishFailed: an already-failed job of `type` (no thread, no running slot) delivered like any settled job; id_hint
+ * keeps a known id (a `bg_<n>` one moves the automatic sequence past it). Returns the owned job id. */
+char *jobs_publish_failed(jobs_t *j, const char *type, const char *id_hint, const char *label, const char *error_text);
+
 /* the job's settlement is not delivered to the agent (still listed by proc://) */
 void jobs_set_quiet(jobs_t *j, const char *id);
 

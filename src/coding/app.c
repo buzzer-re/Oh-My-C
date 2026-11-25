@@ -12,6 +12,7 @@
 #include "coding/keywords.h"
 #include "coding/thinkloop.h"
 #include "coding/title.h"
+#include "tools/outsink.h"
 #include "coding/branchsum.h"
 #include "coding/compaction.h"
 #include "coding/skilldesc.h"
@@ -1959,6 +1960,7 @@ static void install_agent(app_t *a) {
     a->env->can_prompt_user = a->opts.has_ui;
     a->env->ask_ui = a->opts.rpc_ui || a->opts.interactive_prompts;
     a->env->delegation_bias = model_delegation_bias(a->model);
+    agent_set_text_sanitizer(out_sanitize); /* coerceToolResult's sanitizeText (tools/outsink.c) */
     /* intentTracingActive: an explicit tools.intentTracing (any layer or PI_INTENT_TRACING) wins; unset, the host decides */
     if (settings_configured("tools.intentTracing")) agent_set_intent_tracing(settings_bool("tools.intentTracing", true));
     else agent_reset_intent_tracing();
@@ -2472,6 +2474,7 @@ void app_free(app_t *a) {
     free(a->cost_refusal);
     free(a->demoted_omitted_for);
     free(a->fixed_dead_end_session);
+    free(a->failed_remote_spec);
     free(a->plan_file);
     free(a->plan_reference_path);
     free(a->fallback.role);
@@ -3471,6 +3474,20 @@ void app_compaction_candidates(app_t *a, mr_pool_t *out) {
 
 char *app_generate_title_from(app_t *a, const char *text) { return app_generate_title_with(a, text, NULL); }
 
+/* one candidate of generateTitleOnlineWithModels: a provider error (logged by the completion) or an unusable reply sends
+ * the request on to the next model; a clean decline ends the search */
+static int title_ask(app_t *a, const ai_model_t *m, const char *sys, const char *user, char **title) {
+    *title = NULL;
+    char *reply = app_complete_text_for(a, m, sys, user, EFFORT_OFF, "title");
+    if (!reply) return TITLE_INVALID;
+    int r = title_judge_reply(reply, title);
+    free(reply);
+    if (r != TITLE_OK)
+        LOGD("title-generator: no title returned provider=%s model=%s reason=%s", m->provider, m->id,
+             r == TITLE_DECLINED ? "model-returned-none" : "invalid-title");
+    return r;
+}
+
 char *app_generate_title_with(app_t *a, const char *text, const char *system_prompt) {
     if (!text || !*text) return NULL;
     char *sys = system_prompt ? xstrdup(system_prompt)
@@ -3483,9 +3500,10 @@ char *app_generate_title_with(app_t *a, const char *text, const char *system_pro
     mr_online_tiny_candidates(roles, ARRAY_LEN(roles), a->model, &models);
     char *snippet = xasprintf("%.2000s", text);
     char *title = NULL;
+    /* a model that declines (`<title/>`, `none`) is not second-guessed by paid fallbacks (omp 15d38fb094) */
     for (size_t i = 0; i < models.n && !title && !a->agent->cancel; i++)
-        title = app_complete_text_for(a, models.v[i], sys, snippet, EFFORT_OFF, "title");
-    if (!models.n && a->model) title = app_complete_text_for(a, a->model, sys, snippet, EFFORT_OFF, "title");
+        if (title_ask(a, models.v[i], sys, snippet, &title) == TITLE_DECLINED) break;
+    if (!models.n && a->model) title_ask(a, a->model, sys, snippet, &title);
     mr_pool_free(&models);
     free(snippet);
     free(sys);
@@ -3503,10 +3521,7 @@ char *app_generate_title(app_t *a) {
         }
     }
     if (!first || title_low_signal(first)) return NULL;
-    char *raw = app_generate_title_from(a, first);
-    char *t = raw ? title_normalize(raw) : NULL;
-    free(raw);
-    return t;
+    return app_generate_title_from(a, first);
 }
 
 static void maybe_title(app_t *a) {

@@ -118,6 +118,10 @@ optionals, numeric strings, enum whitespace — up to 5 coercion passes, and omp
 `pattern must be a string (was missing)`) → `execute` → `after_tool` hook. Validation errors return
 `Validation failed for tool "<name>": ...` with the received arguments (2-space indented JSON,
 `{original, normalized}` when something was coerced), as omp does. Unknown tools return `Tool <name> not found`.
+The text of a result the tool returned (and of every partial result) is sanitized where it enters the loop, like
+omp's `coerceToolResult`: ANSI sequences, CR, the other C0 controls but `\t`/`\n`, DEL and C1 controls are dropped
+(`out_sanitize`, installed by the coding layer through `agent_set_text_sanitizer`), so the events, the history and
+the session file carry the clean text. A thrown error (omc's detail-less error result) keeps its text.
 
 ### The intent field `i`
 
@@ -205,7 +209,9 @@ continuations print mode suppresses).
   (`model.toolCallLoopGuard.*`; the redirect is steered in and persisted as a `tool-call-loop-redirect`
   custom_message) and counts mutating tool results for the todo tracker; `guards_mid_run_nudge` steers the hidden
   `mid-run-todo-nudge`. After every run `app_prompt` / `app_prompt_hidden` call `guards_after_run`, which may append a
-  hidden developer message and continue the agent: the empty-stop retry (`empty-stop-retry.md`, 3 attempts), the
+  hidden developer message and continue the agent: the empty-stop retry (`empty-stop-retry.md`, 3 attempts, each
+  logged as `Empty-stop retry scheduled` with the reply's model, provider and stop metadata; the capped error is logged
+  as a warning and the budget starts over), the
   unexpected-stop retry (`features.unexpectedStopDetection`: mechanical for signed-thinking-only stops, smart judges
   text stops with `judge/unexpected-stop.json`), and the stop-time todo reminder (`todo.reminders`, `remindersMax`,
   skipped when the reply waits for the user, while async jobs run, in plan mode and in print mode; surfaced as the
@@ -301,14 +307,22 @@ chars/4 estimates (omp uses its tokenizer); provider usage floors them where omp
   `handoff-<time>.md` to the session artifacts) and commits it with `method: "handoff"`, rendered
   through `handoff-summary-context.md`. A document without a `## Goal` heading line (text before it is allowed) is
   rejected (an automatic handoff moves on to the next method, `/handoff` reports "Compaction failed: Handoff generation
-  produced an invalid document").
+  produced an invalid document"). Before sending, the prepared request (system prompt, tool schemas, transformed
+  history, handoff prompt) is counted against the model's window without usage anchors or a tokenizer margin, stopping
+  at the first message past it (omp `countContextOverrun`); one that leaves less than the smallest output a request
+  asks for (window − 64 − 1024) is refused locally ("Handoff input does not fit …"), so automatic and speculative
+  passes move on without calling the provider. A document cut off at the output limit fails as
+  `Handoff generation failed: model output ended incomplete (stopReason: length)`.
 - **Triggers**: after each turn (`cmp_after_turn`: stale-read supersession and useless-result elision
   with `compaction.supersedeReads` / `dropUseless`, tool-output pruning, then the threshold), between
   tool-loop turns (`cmp_mid_turn`, `compaction.midTurnEnabled`, through the agent's `turn_boundary`
   hook), before a prompt (`cmp_before_prompt`), and on context overflow (every attempt, with a retry
   of the failed turn). With `compaction.asyncEnabled`, a background thread prepares the summary or
   handoff document inside `[threshold − lead, threshold)` and a threshold pass in the grace band
-  defers to it; the armed result is committed by the next pass when still valid for the branch.
+  defers to it; the armed result is committed by the next pass when still valid for the branch. A remote speculation
+  that fails for a reason a retry would hit again (anything but a 429, 5xx, timeout or network error, e.g. a 404 for
+  the model) latches remote compaction off for that session and model until a compaction commits: speculation runs
+  the next method instead, and a threshold pass skips remote while a later method can run.
 - **Dead ends**: when preparation finds nothing or a commit leaves no headroom (or no retry fit), a
   rescue elides inside the kept tail, then drops images; otherwise omp's dead-end warning is shown
   and stamped on the compaction entry. A threshold pass is not started at all while the system prompt and
@@ -510,7 +524,11 @@ Under `title.generator: fork` (the default), when the reply to the user's first 
 begins, a side request on the same model, system prompt, tools and history asks for a card title
 such as `🧪 FLAKY: Fix flaky park tests`. This reuses the prompt cache. Low-signal input
 (greetings, acks) is skipped. The `tiny` generator and the fallback use the title model with
-`title-system.md`. Titles are applied on the agent thread and written to the title slot.
+`title-system.md`: the tiny/commit/smol role candidates are asked in turn, and a provider error or an unusable reply
+(empty, cut off after `<title>`, over the length limits) moves on to the next one, while a clean decline (a closed
+empty `<title/>` / `<title></title>` or `none`, quoted or with a trailing `.!?`) ends the search without asking a
+fallback model (`title_judge_reply`, omp `extractGeneratedTitle`). Titles are applied on the agent thread and written
+to the title slot.
 `OMC_NO_TITLE=1` disables them (RPC mode always does). Every billed title request (the fork, each
 title-model attempt, errors included) is journaled as an off-transcript `model_usage` entry with
 `purpose: "title"` and charged to the session's cost gate, so `/usage` and `--max-cost` count it.

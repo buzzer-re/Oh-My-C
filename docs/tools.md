@@ -332,10 +332,15 @@ call to it runs, every session sees.
   `type: http|streamable-http`) and legacy SSE (`type: sse`). Servers stay per session (omp's daemon-shared MCP
   host is out of scope), but they are spoken to as omp's host speaks to them (protocol.ts, host/peers.ts):
   - Era probe: stdio sends `server/discover` (with the request `_meta`) and `initialize` right behind it; a discover
-    answer (`supportedVersions` + `capabilities`) or a 2026-07-28-only error (-32020/-32021/-32022) means a modern
-    server, else the initialize answer opens a handshake-era session (one process, where omp's host probes on a
-    throwaway one). Streamable HTTP POSTs `server/discover` first; a 400/404/405 or a JSON-RPC error falls back to the
-    handshake, anything else (an OAuth challenge, an outage) is the connect error. Legacy SSE always handshakes.
+    answer (`supportedVersions` + `capabilities`) or a 2026-07-28 error (-32020/-32021, or -32022 unless its
+    `data.supported` is a list of strings naming a handshake-era revision: `2025-11-25`, `2025-06-18`, `2025-03-26`,
+    `2024-11-05`) means a modern server, else the initialize answer opens a handshake-era session (one process, where
+    omp's host probes on a throwaway one). Streamable HTTP POSTs `server/discover` first; a 400/404/405 or a JSON-RPC
+    error falls back to the handshake, and so does -32022 listing a handshake-era revision under any status; anything
+    else (an OAuth challenge, an outage) is the connect error. A modern request answered by an error status whose body
+    is a JSON-RPC error (not 401/403) fails as that JSON-RPC error, the status its cause (`#statusError`). Legacy SSE
+    always handshakes. omp's host re-probes a modern unit whose server later refuses with -32022; omc probes on every
+    connect and caches no era, so there is no verdict to expire.
   - Handshake era: `initialize` with protocol `2025-11-25`, `roots` capability, then `notifications/initialized`; the
     negotiated version rides on HTTP requests as `MCP-Protocol-Version`.
   - Modern (2026-07-28): no session; every request's `_meta` carries `io.modelcontextprotocol/protocolVersion`,

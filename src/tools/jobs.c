@@ -517,7 +517,13 @@ static char *assign_id(jobs_t *j, const char *hint) {
         } while (id_taken(j, id));
         return id;
     }
-    if (!id_taken(j, hint)) return xstrdup(hint);
+    if (!id_taken(j, hint)) {
+        /* #claimJobId: a claimed `bg_<n>` moves the automatic sequence past it, so a later job never repeats the id */
+        char *end = NULL;
+        unsigned long long seq = !strncmp(hint, "bg_", 3) && isdigit((unsigned char)hint[3]) ? strtoull(hint + 3, &end, 10) : 0;
+        if (end && !*end && seq > j->next) j->next = seq;
+        return xstrdup(hint);
+    }
     for (int n = 2;; n++) {
         char *id = xasprintf("%s-%d", hint, n);
         if (!id_taken(j, id)) return id;
@@ -551,6 +557,27 @@ char *jobs_start(jobs_t *j, const char *type, const char *id_hint, const char *l
     char *id = xstrdup(x->id);
     spawn(j, x);
     pthread_mutex_unlock(&j->mu);
+    return id;
+}
+
+char *jobs_publish_failed(jobs_t *j, const char *type, const char *id_hint, const char *label, const char *error_text) {
+    prune(j);
+    bgjob_t *x = job_new(j, type, label);
+    free(x->label);
+    x->label = xstrdup(label ? label : type); /* already a display label: kept whole */
+    x->result = xstrdup(error_text ? error_text : "");
+    x->failed = true;
+    x->ended = x->started;
+    x->done = true;
+    pthread_mutex_lock(&j->mu);
+    x->id = assign_id(j, id_hint);
+    char *id = xstrdup(x->id);
+    vec_push(&j->v, x);
+    void (*fn)(void *) = j->notify;
+    void *ud = j->notify_ud;
+    pthread_cond_broadcast(&j->cv);
+    pthread_mutex_unlock(&j->mu);
+    if (fn) fn(ud);
     return id;
 }
 

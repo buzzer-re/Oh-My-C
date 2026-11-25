@@ -6,6 +6,7 @@
 #include "coding/autothink.h"
 #include "coding/guards.h"
 #include "coding/keywords.h"
+#include "coding/title.h"
 #include "tools/web.h"
 
 #include <stdio.h>
@@ -45,8 +46,48 @@ static void explicit_nulls(void) {
     json_free(schema);
 }
 
+/* generateTitleOnlineWithModels on one reply (omp 15d38fb094, d4ab5de6cb): a closed empty marker or the `none` sentinel
+ * declines (no fallback model is asked); an empty or cut-off reply moves on to the next model */
+static int judge(const char *reply, const char *want) {
+    char *t = NULL;
+    int r = title_judge_reply(reply, &t);
+    if (want && (r != TITLE_OK || !t || strcmp(t, want))) fprintf(stderr, "judge(%s) = %d [%s] want [%s]\n", reply, r, t ? t : "", want);
+    free(t);
+    return r;
+}
+
+static void title_replies(void) {
+    CHECK(judge("<title>none</title>", NULL) == TITLE_DECLINED);
+    CHECK(judge("<title/>", NULL) == TITLE_DECLINED);
+    CHECK(judge("<title />", NULL) == TITLE_DECLINED);
+    CHECK(judge("<title>\"None.\"</title>", NULL) == TITLE_DECLINED);
+    CHECK(judge("<title></title>", NULL) == TITLE_DECLINED);
+    CHECK(judge("None.", NULL) == TITLE_DECLINED);
+    CHECK(judge("", NULL) == TITLE_INVALID);
+    CHECK(judge("<title>", NULL) == TITLE_INVALID);   /* cut off: not a decline */
+    CHECK(judge("<title>  \n", NULL) == TITLE_INVALID);
+    CHECK(judge("Thinking process:\nthe user wants a title", NULL) == TITLE_INVALID);
+    CHECK(judge("<title>Fix resolver errors</title>", "Fix resolver errors") == TITLE_OK);
+    CHECK(judge("Fix resolver errors.", "Fix resolver errors") == TITLE_OK);
+    CHECK(judge("<think>maybe <title>Wrong</title></think>\n<title>Real title</title>", "Real title") == TITLE_OK);
+    CHECK(judge("<thinking>plan</thinking>\n\nFix parser crash", "Fix parser crash") == TITLE_OK);
+    CHECK(judge("{\"title\": \"Json title\"}", "Json title") == TITLE_OK);
+    CHECK(judge("```json\n{\"title\": \"Fenced title\"}\n```", "Fenced title") == TITLE_OK);
+    CHECK(judge("{\"title\": \"Salvaged title\", ", "Salvaged title") == TITLE_OK);
+    CHECK(judge("<title>one two three four five six seven eight nine ten eleven twelve thirteen</title>", NULL) == TITLE_INVALID);
+    char *t = title_normalize("'None'.");
+    CHECK(!t);
+    free(t);
+    t = title_normalize("\"Fix the bug!\"\nsecond line");
+    CHECK(t && !strcmp(t, "Fix the bug"));
+    free(t);
+    CHECK(title_is_no_title(" 'none!' "));
+    CHECK(!title_is_no_title("nonexistent"));
+}
+
 int main(void) {
     explicit_nulls();
+    title_replies();
     /* standalone prose keyword */
     CHECK(kw("please ultrathink"));
     CHECK(kw("ultrathink."));

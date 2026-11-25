@@ -13,6 +13,7 @@ typedef struct {
                             * "closed" | "unknown" */
     bool retryable;
     char *message, *code, *data, *trace_id; /* owned; code/data/trace_id may be NULL */
+    json_t *rpc_data;                        /* a JSON-RPC error's raw `data` (owned, may be NULL) */
 } mcp_fail_t;
 
 void mcp_fail_free(mcp_fail_t *f);

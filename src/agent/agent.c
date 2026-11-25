@@ -118,6 +118,42 @@ void agent_tool_free(agent_tool_t *t) {
  * `i: {type: string, description: "concise intent"}` property (required unless the tool opts for optional/omit);
  * the harness strips it before validation/execution and reports it on tool_execution_start. */
 
+/* ---------- tool-result text (agent-loop.ts coerceToolResult) ---------- */
+
+static agent_text_sanitizer_fn g_sanitizer;
+
+void agent_set_text_sanitizer(agent_text_sanitizer_fn fn) { g_sanitizer = fn; }
+
+/* the bytes sanitizeText changes: C0 controls but \t and \n (CR, ESC included), DEL, C1 (U+0080-U+009F), invalid UTF-8 */
+static bool needs_sanitize(const char *s) {
+    const unsigned char *p = (const unsigned char *)s;
+    for (; *p; p++) {
+        if ((*p < 0x20 && *p != '\t' && *p != '\n') || *p == 0x7F) return true;
+        if (*p == 0xC2 && p[1] >= 0x80 && p[1] <= 0x9F) return true;
+    }
+    return !utf8_valid(s, (size_t)((const char *)p - s));
+}
+
+/* sanitizeText over every text block; true when one changed (content may be NULL) */
+static bool sanitize_content(json_t *content) {
+    bool changed = false;
+    json_t *b;
+    json_arr_foreach(content, i, b) {
+        const char *t = str_eq(json_get_str(b, "type"), "text") ? json_get_str(b, "text") : NULL;
+        if (!t || !needs_sanitize(t)) continue;
+        size_t n = 0;
+        json_set(b, "text", json_str_own(g_sanitizer(t, strlen(t), &n)));
+        changed = true;
+    }
+    return changed;
+}
+
+/* a result the tool returned, including one it flags as an error, is coerced; a thrown error (omc's detail-less error
+ * result: blocked, invalid arguments, aborted, a tool's own failure) is not, so it keeps its text */
+static void sanitize_result(tool_result_t *r) {
+    if (g_sanitizer && r && !(r->is_error && !r->details)) sanitize_content(r->content);
+}
+
 static int g_intent_tracing = -1; /* -1 = unset: follows the interactive host (omp intentTracingActive) */
 static bool g_interactive_host;
 
@@ -1445,9 +1481,24 @@ typedef struct {
 static void tool_update_cb(tool_ctx_t *ctx, const tool_result_t *partial) {
     tool_job_t *j = (tool_job_t *)((char *)ctx - offsetof(tool_job_t, ctx));
     if (j->quiet) return;
+    /* every partial result is coerced (its text sanitized) before tool_execution_update carries it */
+    tool_result_t clean = {0};
+    bool dirty = false;
+    json_t *b;
+    if (g_sanitizer && partial)
+        json_arr_foreach(partial->content, i, b) {
+            const char *t = str_eq(json_get_str(b, "type"), "text") ? json_get_str(b, "text") : NULL;
+            dirty = dirty || (t && needs_sanitize(t));
+        }
+    if (dirty) {
+        clean = *partial;
+        clean.content = json_clone(partial->content);
+        sanitize_content(clean.content);
+    }
     agent_event_t ev = {.type = AGENT_EV_TOOL_UPDATE, .tool_call_id = ctx->tool_call_id, .tool_name = ctx->tool_name,
-                        .args = j->args, .result = partial};
+                        .args = j->args, .result = dirty ? &clean : partial};
     emit(j->a, &ev);
+    if (dirty) json_free(clean.content);
 }
 
 /* agent-loop.ts formatToolNotFoundMessage / suggestToolNames: `Tool <name> not found`, plus the tools whose name is a
@@ -1553,6 +1604,9 @@ static void run_tool(tool_job_t *j) {
                 j->ctx.intent = j->intent;
                 j->tool->execute(j->tool, &j->ctx, j->args, &j->res);
                 if (a->cancel && !j->res.content) tool_result_error(&j->res, "Tool execution was aborted");
+                /* coerceToolResult: the result's text is sanitized where it enters the loop, so the events, the history
+                 * and the session file all carry the clean text */
+                sanitize_result(&j->res);
                 /* an interruptible tool the interrupt cut short with an error (not an external abort) reads as skipped;
                  * a handler of the interrupt (wait) reports its own wake */
                 if (j->tool->interruptible && !j->tool->handles_tool_interrupt && j->res.is_error && !a->cancel) {

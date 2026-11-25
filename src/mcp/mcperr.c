@@ -20,6 +20,7 @@ void mcp_fail_free(mcp_fail_t *f) {
     free(f->code);
     free(f->data);
     free(f->trace_id);
+    json_free(f->rpc_data);
     memset(f, 0, sizeof *f);
 }
 
@@ -217,6 +218,7 @@ void mcp_fail_json_rpc(mcp_fail_t *f, const char *transport, const json_t *error
     if (data) {
         f->data = mcp_serialize_data(data);
         f->trace_id = mcp_find_trace_id(data, 0);
+        f->rpc_data = json_clone(data);
     }
 }
 

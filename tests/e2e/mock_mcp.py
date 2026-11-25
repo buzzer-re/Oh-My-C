@@ -14,6 +14,8 @@ config (so a cached catalog can differ from the live one).
 asks for roots through an input_required round trip (`echo_text` with text "roots"), and acknowledges a
 subscriptions/listen stream, on which `echo_text` "notify" announces a new tool `late_tool`.
 echo_text "__client__" (legacy) / "client" (modern) answers the clientInfo the client declared.
+`--reject-modern` is a handshake-era server that answers server/discover with -32022 listing the revisions it speaks
+(`data.supported`, Datadog-style); `--reject-modern-bare` sends the same error with no list.
 `--lazy` serves lazy loaders shaped like Kata's `load_*`: `load_extra` adds `extra_tool` and announces it before its
 reply, `load_extra_late` replies first and announces it afterwards (no call to the server running)."""
 import json, os, sys, time
@@ -24,6 +26,8 @@ STARTUP_DELAY = next((float(a.split("=", 1)[1]) for a in sys.argv[1:] if a.start
 EXTRA_TOOL = os.environ.get("MOCK_MCP_EXTRA_TOOL")
 LAZY = "--lazy" in sys.argv[1:]
 MODERN = "--modern" in sys.argv[1:]
+REJECT_MODERN = "--reject-modern" in sys.argv[1:]
+REJECT_MODERN_BARE = "--reject-modern-bare" in sys.argv[1:]
 listen_id = [None]
 notified = [False]
 initialized_seen = [False]
@@ -90,6 +94,12 @@ for line in sys.stdin:
         continue
     mid, method = msg.get("id"), msg.get("method")
     if mid is None:
+        continue
+    if method == "server/discover" and (REJECT_MODERN or REJECT_MODERN_BARE):
+        err = {"code": -32022, "message": "Unsupported protocol version"}
+        if REJECT_MODERN:
+            err["data"] = {"supported": ["2025-06-18", "2025-03-26"], "requested": "2026-07-28"}
+        send({"jsonrpc": "2.0", "id": mid, "error": err})
         continue
     if method == "initialize":
         client_info[0] = (msg.get("params") or {}).get("clientInfo")

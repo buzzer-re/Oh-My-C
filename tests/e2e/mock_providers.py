@@ -18,8 +18,10 @@ Anthropic "think:<x>" streams unsigned reasoning before the answer; "refusecot:<
 reasoning_extraction, before any output) while an assistant text block replays that reasoning (tests/e2e/refusal.sh);
 "refuseon:<model>,<model>:<x>" is refused before any output (category cyber) on every request to a listed model id.
 Anthropic requests under a path containing "nostrict" answer a 400 refusing the first strict tool.
-Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test)."""
-import json, os, sys
+Paths under /deny answer 403 to Copilot-Integration-Id copilot-chat (identity fallback test).
+OpenAI Responses: "CTX=<n>" in the latest user text reports <n> input tokens; /responses/compact answers 404
+(model_not_found) when the request carries "COMPACT404" (the remote speculation latch, tests/e2e/compaction.sh)."""
+import json, os, re, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = os.environ.get("MOCK_LOG")
@@ -166,6 +168,10 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(500, {"error": {"message": "image backend down"}})
             png = "iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGP4z8AARww4OQD1MQv1NXv7ggAAAABJRU5ErkJggg=="
             return self.reply(200, {"created": 1, "data": [{"b64_json": png}], "usage": {"input_tokens": 12, "output_tokens": 34}})
+        if path.endswith("/responses/compact") and "COMPACT404" in json.dumps(body):
+            # a compaction endpoint that does not serve the model: a non-retriable rejection
+            return self.reply(404, {"error": {"message": "The model mock-r does not exist", "type": "invalid_request_error",
+                                              "code": "model_not_found"}})
         if path.endswith("/responses/compact"):
             # OpenAI remote compaction: the retained user turns plus an opaque compaction item
             users = [i for i in body.get("input") or [] if i.get("type") == "message" and i.get("role") == "user"]
@@ -229,8 +235,9 @@ class H(BaseHTTPRequestHandler):
             self.ev({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "plain provider answer"})
             done = dict(item, status="completed", content=[{"type": "output_text", "text": "plain provider answer"}])
             self.ev({"type": "response.output_item.done", "output_index": 0, "item": done})
+            ctx = re.search(r"CTX=(\d+)", ltext)  # the prompt names the input size the turn reports
             self.ev({"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": [done],
-                                                                  "usage": {"input_tokens": 5, "output_tokens": 3}}})
+                                                                  "usage": {"input_tokens": int(ctx.group(1)) if ctx else 5, "output_tokens": 3}}})
             return self.end()
         dropu = latest_user_text(body)
         if path.endswith("/messages") and dropu.startswith("drop:"):

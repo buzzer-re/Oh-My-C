@@ -34,8 +34,11 @@ agent-dir `SYSTEM_TEMPLATE.md` is discovered like `SYSTEM.md`; failing those, th
 model substrings to template files, longest match wins, a missing or empty file keeps the bundled prompt), `--append-system-prompt`, `--cwd`, `--mode`,
 `--config` (repeatable), `-p`, `-c`, `-r/--resume [id|path]` (no value: the session picker; Esc prints
 `No session selected`), `--restore <session>` (resume, then go on with the interrupted turn:
-`src/coding/restore.c`; a turn the host's SIGTERM/SIGHUP cut off is labelled interrupted on the way out, a quit or
-Ctrl+C stops it), `--session-dir`, `--no-session`, `--fork`, `--tools`, `--no-tools`, `--no-lsp`,
+`src/coding/restore.c`, reading the branch's entries like omp's exit-diagnostics.ts, so a trailing eval runtime snapshot
+after a finished answer, an older release's false abort over one, or a recorded normal exit leaves the session as it
+is; a turn the host's SIGTERM/SIGHUP cut off is labelled interrupted on the way out, a quit or Ctrl+C stops it; once the
+retry runs, each background bash job the branch shows running with no outcome is reported as a failed job, "its outcome
+is unknown", delivered after the retried run), `--session-dir`, `--no-session`, `--fork`, `--tools`, `--no-tools`, `--no-lsp`,
 `--hide-thinking`, `--advisor`, `--skills <globs>` (`skills.includeSkills`), `--no-skills`, `--no-rules`,
 `--no-context-files`, `--export <session> [out]`, `--no-title`, `--print-thoughts`, `--max-time 600|10m|1h`
 (runs stop at the deadline), `--warn-cost` / `--max-cost` (`session.warnCost` / `session.maxCost`:
